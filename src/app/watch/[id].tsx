@@ -159,6 +159,7 @@ export default function WatchScreen() {
   const mountedStreamRef = useRef<StreamData | null>(mountedStream);
   const playerDocumentReadyRef = useRef(false);
   const activePlayerStreamKeyRef = useRef<string | null>(null);
+  const audioSwitchRequestRef = useRef(0);
   mountedStreamRef.current = mountedStream;
   if (!initialDocumentStreamRef.current && mountedStream?.streamUrl) {
     initialDocumentStreamRef.current = mountedStream;
@@ -602,6 +603,9 @@ export default function WatchScreen() {
   const handleSelectAudio = useCallback(
     async (selection: { type: 'in-band'; trackId: number } | { type: 'separate'; mode: 'sub' | 'dub' }) => {
       if (selection.type === 'in-band') {
+        // An in-band selection supersedes any outstanding separate-stream request.
+        audioSwitchRequestRef.current += 1;
+        setIsSwitchingAudio(false);
         setCurrentAudioTrackId(selection.trackId);
         sendPlayerCommand(`
           if (window._hls) {
@@ -613,9 +617,15 @@ export default function WatchScreen() {
         return;
       }
 
-      // Separate Sub/Dub stream fallback
+      // Separate Sub/Dub stream fallback. A newer choice invalidates any older
+      // resolver result so rapid taps cannot apply audio from an earlier choice.
+      const requestId = ++audioSwitchRequestRef.current;
+      const requestedEpisodeKey = `${currentSeason}:${currentEp}`;
       const targetMode = selection.mode;
-      if (targetMode === currentLang) return;
+      if (targetMode === currentLang) {
+        setIsSwitchingAudio(false);
+        return;
+      }
 
       if (targetMode === 'dub' && !currentEpHasDub) {
         showBadge('English Dub not available for this episode');
@@ -634,8 +644,8 @@ export default function WatchScreen() {
           targetMode,
         );
 
-        // Guard against race condition with episode changes
-        if (currentEpisodeKeyRef.current !== `${currentSeason}:${currentEp}`) return;
+        // Guard against episode changes and newer audio selections.
+        if (requestId !== audioSwitchRequestRef.current || currentEpisodeKeyRef.current !== requestedEpisodeKey) return;
 
         if (!resolved || !resolved.streamUrl) {
           throw new Error(`Could not load ${targetMode.toUpperCase()} stream`);
@@ -657,7 +667,7 @@ export default function WatchScreen() {
       } catch (err: any) {
         showBadge(err?.message || 'Failed to switch audio');
       } finally {
-        setIsSwitchingAudio(false);
+        if (requestId === audioSwitchRequestRef.current) setIsSwitchingAudio(false);
       }
     },
     [
