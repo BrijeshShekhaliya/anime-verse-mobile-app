@@ -23,6 +23,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView, type WebViewProps } from 'react-native-webview';
+import NativeHlsPlayer, { type NativePlayerTrack, type NativeVideoLevel } from '@/components/player/NativeHlsPlayer';
 import { EpisodeBadges } from '@/components/Badges';
 import { BottomSheet } from '@/components/BottomSheet';
 import { Icon } from '@/components/Icon';
@@ -143,6 +144,12 @@ export default function WatchScreen() {
   const [dislikeCount, setDislikeCount] = useState<number>(18);
 
   const webViewRef = useRef<any>(null);
+  const nativeVideoRef = useRef<any>(null);
+  const nativePlayerTimeRef = useRef(0);
+  const nativeSourceKeyRef = useRef<string | null>(null);
+  const [nativeAudioTrackId, setNativeAudioTrackId] = useState<number | null>(null);
+  const [nativeTextTrackId, setNativeTextTrackId] = useState<number | null>(null);
+  const [resumeAfterSourceChange, setResumeAfterSourceChange] = useState<{ key: string; time: number; shouldPlay: boolean } | null>(null);
   const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const advisoryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -152,21 +159,8 @@ export default function WatchScreen() {
   const recordedEpRef = useRef<string | null>(null);
   const progressBarWidthRef = useRef<number>(width);
 
-  // Keep the Hianime document stable for the lifetime of this watch screen.
-  // Changing WebView source.html reloads the document and interrupts playback,
-  // so later episode/language changes are applied through window.switchStream.
-  const initialDocumentStreamRef = useRef<StreamData | null>(null);
-  const initialDocumentEpisodeKeyRef = useRef<string | null>(null);
   const mountedStreamEpisodeKeyRef = useRef<string | null>(null);
-  const mountedStreamRef = useRef<StreamData | null>(mountedStream);
-  const playerDocumentReadyRef = useRef(false);
-  const activePlayerStreamKeyRef = useRef<string | null>(null);
   const audioSwitchRequestRef = useRef(0);
-  mountedStreamRef.current = mountedStream;
-  if (!initialDocumentStreamRef.current && mountedStream?.streamUrl) {
-    initialDocumentStreamRef.current = mountedStream;
-    initialDocumentEpisodeKeyRef.current = `${currentSeason}:${currentEp}`;
-  }
 
   // Live state refs to capture values synchronously during stream switches
   const currentTimeRef = useRef<number>(0);
@@ -236,14 +230,12 @@ export default function WatchScreen() {
   }, []);
 
   const enterFullscreen = useCallback(() => {
-    // Request rotation first; the fullscreen layout/status bar follow measured
-    // landscape geometry instead of flashing a portrait-sized fullscreen view.
-    setIsFullscreen(true);
+    // Request rotation; the visual layout waits for measured landscape geometry.
     enterLandscape();
   }, [enterLandscape]);
 
   const exitFullscreen = useCallback(() => {
-    setIsFullscreen(false);
+    // The view and status bar return to portrait when the measured bounds do.
     restoreOrientation();
   }, [restoreOrientation]);
 
@@ -464,8 +456,13 @@ export default function WatchScreen() {
       .then((res) => {
         if (cancelled || currentEpisodeKeyRef.current !== `${currentSeason}:${currentEp}`) return;
         if (res && res.streamUrl) {
+          const resolvedEpisodeKey = `${currentSeason}:${currentEp}`;
+          if (mountedStreamEpisodeKeyRef.current !== resolvedEpisodeKey) {
+            const newEpisodeSourceKey = `${resolvedEpisodeKey}:${res.mode}:${res.streamUrl}`;
+            setResumeAfterSourceChange({ key: newEpisodeSourceKey, time: 0, shouldPlay: true });
+          }
           setHlsStream(res);
-          mountedStreamEpisodeKeyRef.current = `${currentSeason}:${currentEp}`;
+          mountedStreamEpisodeKeyRef.current = resolvedEpisodeKey;
           setMountedStream(res);
           setHlsError(null);
         } else {
@@ -534,83 +531,61 @@ export default function WatchScreen() {
     };
   }, [resetHideTimer]);
 
-  // Send JavaScript command into WebView
+  // JavaScript injection is only used for the VidRift iframe fallback.
   const sendPlayerCommand = useCallback((code: string) => {
-    webViewRef.current?.injectJavaScript(`(function(){ ${code} })(); true;`);
+    if (server === 'vidrift') webViewRef.current?.injectJavaScript(`(function(){ ${code} })(); true;`);
+  }, [server]);
+  const seekNativePlayer = useCallback((time: number) => {
+    const target = Math.max(0, time);
+    nativeVideoRef.current?.seek?.(target);
+    nativePlayerTimeRef.current = target;
+    currentTimeRef.current = target;
   }, []);
 
   // Controls Actions
   const handleTogglePlay = useCallback(() => {
-    sendPlayerCommand(
-      "var v = document.getElementById('player') || document.querySelector('video'); if (v) { if (v.paused) { v.play(); } else { v.pause(); } }",
-    );
-    setIsPlaying((prev) => !prev);
+    if (server === 'vidrift') {
+      sendPlayerCommand("var v=document.querySelector('video');if(v){if(v.paused)v.play();else v.pause();}");
+    }
+    setIsPlaying((prev) => { isPlayingRef.current = !prev; return !prev; });
     resetHideTimer();
-  }, [sendPlayerCommand, resetHideTimer]);
+  }, [server, sendPlayerCommand, resetHideTimer]);
 
   const handleRewind10 = useCallback(() => {
-    sendPlayerCommand(
-      "var v = document.getElementById('player') || document.querySelector('video'); if (v) { v.currentTime = Math.max(0, v.currentTime - 10); }",
-    );
-    setCurrentTime((t) => Math.max(0, t - 10));
-    resetHideTimer();
-  }, [sendPlayerCommand, resetHideTimer]);
+    const next = Math.max(0, nativePlayerTimeRef.current - 10);
+    if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.currentTime=${next};`); else seekNativePlayer(next);
+    setCurrentTime(next); resetHideTimer();
+  }, [server, sendPlayerCommand, seekNativePlayer, resetHideTimer]);
 
   const handleForward10 = useCallback(() => {
-    sendPlayerCommand(
-      "var v = document.getElementById('player') || document.querySelector('video'); if (v) { v.currentTime = v.currentTime + 10; }",
-    );
-    setCurrentTime((t) => t + 10);
-    resetHideTimer();
-  }, [sendPlayerCommand, resetHideTimer]);
+    const next = Math.min(duration || Number.MAX_SAFE_INTEGER, nativePlayerTimeRef.current + 10);
+    if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.currentTime=${next};`); else seekNativePlayer(next);
+    setCurrentTime(next); resetHideTimer();
+  }, [duration, server, sendPlayerCommand, seekNativePlayer, resetHideTimer]);
 
   const handleSeek = useCallback(
     (targetSec: number) => {
       const clamped = Math.max(0, Math.min(duration, targetSec));
       setCurrentTime(clamped);
-      sendPlayerCommand(
-        `var v = document.getElementById('player') || document.querySelector('video'); if (v) { v.currentTime = ${clamped}; }`,
-      );
+      if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.currentTime=${clamped};`); else seekNativePlayer(clamped);
       resetHideTimer();
     },
-    [duration, sendPlayerCommand, resetHideTimer],
+    [duration, server, sendPlayerCommand, seekNativePlayer, resetHideTimer],
   );
 
-  const handleSetSpeed = useCallback(
-    (speed: number) => {
-      setPlaybackSpeed(speed);
-      playbackSpeedRef.current = speed;
-      sendPlayerCommand(
-        `var v = document.getElementById('player') || document.querySelector('video'); if (v) { v.playbackRate = ${speed}; }`,
-      );
-    },
-    [sendPlayerCommand],
-  );
+  const handleSetSpeed = useCallback((speed: number) => {
+    setPlaybackSpeed(speed); playbackSpeedRef.current = speed;
+    if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.playbackRate=${speed};`);
+  }, [server, sendPlayerCommand]);
 
-  // Apply a resolved stream to the existing player document without changing
-  // the WebView source. The key prevents repeated renders from restarting HLS.
-  const applyStreamInPlace = useCallback(
-    (stream: StreamData, episodeKey: string, resumeTime = 0, shouldPlay = true, speed = playbackSpeedRef.current, quality = selectedQualityRef.current) => {
-      if (!stream?.streamUrl || !playerDocumentReadyRef.current) return false;
-      const streamKey = `${episodeKey}:${stream.mode}:${stream.streamUrl}`;
-      if (activePlayerStreamKeyRef.current === streamKey) return true;
-      const subtitles = JSON.stringify(
-        (stream.subtitles || []).map((sub, idx) => ({
-          label: sub.label || sub.lang || 'English',
-          lang: sub.lang || 'en',
-          src: toFullUrl(sub.src),
-          default: sub.default || idx === 0,
-        })),
-      );
-      const url = toFullUrl(stream.streamUrl);
-      sendPlayerCommand(
-        `if (window.switchStream) { window.switchStream(${JSON.stringify(url)}, ${subtitles}, ${resumeTime}, ${shouldPlay}, ${speed}, ${quality}, ${JSON.stringify(episodeKey)}); }`,
-      );
-      activePlayerStreamKeyRef.current = streamKey;
-      return true;
-    },
-    [sendPlayerCommand],
-  );
+  // The separate-stream in-place switch is retained only for VidRift. HiAnime
+  // source changes are delegated to the native Video source prop.
+  const applyStreamInPlace = useCallback((stream: StreamData, episodeKey: string, resumeTime = 0, shouldPlay = true, speed = playbackSpeedRef.current, quality = selectedQualityRef.current) => {
+    if (server !== 'vidrift' || !stream?.streamUrl) return false;
+    const subtitles = JSON.stringify((stream.subtitles || []).map((sub, idx) => ({label:sub.label || sub.lang || 'English',lang:sub.lang || 'en',src:toFullUrl(sub.src),default:sub.default || idx === 0})));
+    sendPlayerCommand(`if(window.switchStream)window.switchStream(${JSON.stringify(toFullUrl(stream.streamUrl))},${subtitles},${resumeTime},${shouldPlay},${speed},${quality},${JSON.stringify(episodeKey)});`);
+    return true;
+  }, [server, sendPlayerCommand]);
 
   // Switch Audio Track
   // Path A: in-place Hls.js audioTrack switch when real alternate tracks exist in manifest
@@ -622,11 +597,8 @@ export default function WatchScreen() {
         audioSwitchRequestRef.current += 1;
         setIsSwitchingAudio(false);
         setCurrentAudioTrackId(selection.trackId);
-        sendPlayerCommand(`
-          if (window._hls) {
-            window._hls.audioTrack = ${selection.trackId};
-          }
-        `);
+        setNativeAudioTrackId(selection.trackId);
+        if (server === 'vidrift') sendPlayerCommand(`if(window._hls)window._hls.audioTrack=${selection.trackId};`);
         const track = availableAudioTracks.find((t) => t.id === selection.trackId);
         if (track) showBadge(`Audio: ${track.name || track.lang}`);
         return;
@@ -666,12 +638,18 @@ export default function WatchScreen() {
           throw new Error(`Could not load ${targetMode.toUpperCase()} stream`);
         }
 
-        const capturedTime = currentTimeRef.current;
-        const capturedPlaying = isPlayingRef.current;
-        const capturedSpeed = playbackSpeedRef.current;
-        const capturedQuality = selectedQualityRef.current;
-        const dispatched = applyStreamInPlace(resolved, requestedEpisodeKey, capturedTime, capturedPlaying, capturedSpeed, capturedQuality);
-        if (!dispatched) throw new Error('Player is still preparing. Please try the audio change again.');
+        const capturedTime = nativePlayerTimeRef.current || currentTimeRef.current;
+        if (server === 'vidrift') {
+          const dispatched = applyStreamInPlace(resolved, requestedEpisodeKey, capturedTime, isPlayingRef.current, playbackSpeedRef.current, selectedQualityRef.current);
+          if (!dispatched) throw new Error('Player is still preparing. Please try again.');
+        } else {
+          const switchKey = `${requestedEpisodeKey}:${targetMode}:${resolved.streamUrl}`;
+          setResumeAfterSourceChange({ key: switchKey, time: capturedTime, shouldPlay: isPlayingRef.current });
+          mountedStreamEpisodeKeyRef.current = requestedEpisodeKey;
+          setIsBuffering(true);
+          setResolvingHls(true);
+          setMountedStream(resolved);
+        }
 
         setCurrentLang(targetMode);
         currentLangRef.current = targetMode;
@@ -700,51 +678,23 @@ export default function WatchScreen() {
     ],
   );
 
-  // Switch Video Resolution (1080p, 720p, 480p, Auto) dynamically in Hls.js
-  const handleSelectQuality = useCallback(
-    (targetHeight: number) => {
-      setSelectedQualityHeight(targetHeight);
-      selectedQualityRef.current = targetHeight;
-      sendPlayerCommand(`
-        if (window._hls) {
-          if (${targetHeight} === -1) {
-            window._hls.currentLevel = -1; // Auto
-          } else {
-            var found = -1;
-            for (var i = 0; i < window._hls.levels.length; i++) {
-              if (window._hls.levels[i].height === ${targetHeight}) {
-                found = i;
-                break;
-              }
-            }
-            if (found !== -1) {
-              window._hls.currentLevel = found;
-            } else {
-              window._hls.currentLevel = window._hls.levels.length - 1;
-            }
-          }
-        }
-      `);
-      showBadge(targetHeight === -1 ? 'Quality: Auto' : `Quality: ${targetHeight}p`);
-    },
-    [sendPlayerCommand, showBadge],
-  );
+  const handleSelectQuality = useCallback((targetHeight: number) => {
+    setSelectedQualityHeight(targetHeight);
+    selectedQualityRef.current = targetHeight;
+    if (server === 'vidrift') sendPlayerCommand(`if(window._hls)window._hls.currentLevel=${targetHeight};`);
+    // Native HLS uses resolution-based track selection; the native engine chooses
+    // the closest available resolution when exact variants differ.
+    showBadge(targetHeight === -1 ? 'Quality: Auto' : `Quality: ${targetHeight}p`);
+  }, [server, sendPlayerCommand, showBadge]);
 
   const handleToggleSubtitles = useCallback(
     (enable: boolean) => {
       setSubtitlesEnabled(enable);
       subtitlesEnabledRef.current = enable;
-      sendPlayerCommand(`
-        var v = document.getElementById('player') || document.querySelector('video');
-        if (v && v.textTracks) {
-          for (var i = 0; i < v.textTracks.length; i++) {
-            v.textTracks[i].mode = '${enable ? 'showing' : 'hidden'}';
-          }
-        }
-      `);
+      if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v&&v.textTracks)for(var i=0;i<v.textTracks.length;i++)v.textTracks[i].mode='${enable ? 'showing' : 'hidden'}';`);
       showBadge(enable ? 'Subtitles On' : 'Subtitles Off');
     },
-    [sendPlayerCommand, showBadge],
+    [server, sendPlayerCommand, showBadge],
   );
 
   const handleNextEpisode = useCallback(() => {
@@ -753,10 +703,19 @@ export default function WatchScreen() {
     if (currentEp < maxEp) {
       const nextEp = currentEp + 1;
       currentEpisodeKeyRef.current = `${currentSeason}:${nextEp}`;
+      audioSwitchRequestRef.current += 1;
+      setIsSwitchingAudio(false);
+      setResumeAfterSourceChange(null);
+      nativePlayerTimeRef.current = 0;
+      currentTimeRef.current = 0;
+      isPlayingRef.current = false;
+      setHlsError(null);
+      setResolvingHls(true);
+      setIsBuffering(true);
       setCurrentEp(nextEp);
       setCurrentTime(0);
       setBufferedTime(0);
-      setIsPlaying(true);
+      setIsPlaying(false);
       resetHideTimer();
     }
   }, [currentEp, currentSeason, episodes, resetHideTimer]);
@@ -852,399 +811,125 @@ export default function WatchScreen() {
       : `https://embed.vidrift.net/embed/anilist/${id}/${currentEp}?${params.toString()}`;
   }, [epData?.tmdbId, currentSeason, currentEp, id]);
 
-  // HiAnime clean native HLS HTML. Only the first stream seeds the document;
-  // episode and separate-audio changes are switched in-place below.
-  const documentStream = initialDocumentStreamRef.current || mountedStream;
-  const hianimeHtml = useMemo(() => {
-    if (!documentStream?.streamUrl) return '';
-    const proxiedUrl = toFullUrl(documentStream.streamUrl);
-    const subTracks = (documentStream.subtitles || [])
-      .map(
-        (s, idx) =>
-          `<track kind="subtitles" label="${s.label || s.lang || 'English'}" srclang="${s.lang || 'en'}" src="${toFullUrl(s.src)}" ${s.default ? 'default' : idx === 0 ? 'default' : ''}>`,
-      )
-      .join('\n');
+  // HiAnime streams go directly to ExoPlayer. The native source key uses the
+  // episode key attached to the resolved stream, not the currently selected
+  // episode, so a pending resolver result cannot relabel the previous source.
+  const nativeStreamKey = mountedStream?.streamUrl
+    ? `${mountedStreamEpisodeKeyRef.current || `${currentSeason}:${currentEp}`}:${mountedStream.mode}:${mountedStream.streamUrl}`
+    : '';
 
-    return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-        <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
-        <style>
-          * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
-          html, body {
-            width: 100vw;
-            height: 100vh;
-            margin: 0;
-            padding: 0;
-            background-color: #000000;
-            overflow: hidden;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-          }
-          #player {
-            width: 100%;
-            height: 100%;
-            background-color: #000000;
-            transform: translateZ(0);
-            backface-visibility: hidden;
-            -webkit-backface-visibility: hidden;
-            transition: object-fit 0.2s ease;
-          }
-          /* Dynamic aspect ratio / scale modes */
-          #player.contain {
-            object-fit: contain !important;
-          }
-          #player.cover {
-            object-fit: cover !important;
-          }
-          #player.fill {
-            object-fit: fill !important;
-          }
-          /* Crunchyroll Subtitles */
-          ::cue, video::cue {
-            background: transparent !important;
-            background-color: transparent !important;
-            color: #ffffff !important;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
-            font-weight: 700 !important;
-            font-size: 1.18rem !important;
-            line-height: 1.35 !important;
-            text-shadow: 2px 2px 3px rgba(0,0,0,0.95), -2px -2px 3px rgba(0,0,0,0.95), 2px -2px 3px rgba(0,0,0,0.95), -2px 2px 3px rgba(0,0,0,0.95) !important;
-          }
-        </style>
-      </head>
-      <body>
-        <video id="player" class="contain" crossorigin="anonymous" playsinline autoplay preload="auto">
-          ${subTracks}
-        </video>
-        <script>
-          var video = document.getElementById('player');
-          var streamSrc = "${proxiedUrl}";
-          var epToken = "${initialDocumentEpisodeKeyRef.current || `${currentSeason}:${currentEp}`}";
-          var stallRecoveryTimer = null;
-          var stallRecoveryAttempts = 0;
-          var MAX_STALL_RECOVERIES = 2;
+  const nativeSubtitles = useMemo(() => (mountedStream?.subtitles || []).map((sub) => ({
+    label: sub.label || sub.lang || 'English',
+    lang: sub.lang || 'en',
+    src: toFullUrl(sub.src),
+    default: sub.default,
+  })), [mountedStream?.subtitles]);
 
-          function post(type, payload) {
-            if (window.ReactNativeWebView) {
-              window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({ type: type, epToken: epToken }, payload || {})));
-            }
-          }
-
-          function inspectAudioTracks(hlsInstance) {
-            if (!hlsInstance) return;
-            var tracks = hlsInstance.audioTracks || [];
-            // Real alternate in-band audio exists only if length > 1 and tracks are valid
-            if (tracks.length > 1) {
-              var mapped = tracks.map(function(t, idx) {
-                return { id: idx, name: t.name || t.lang || ('Audio ' + (idx + 1)), lang: t.lang || '' };
-              });
-              post('audioTracks', { audioTracks: mapped, currentTrack: hlsInstance.audioTrack, hasInBand: true });
-            } else {
-              post('audioTracks', { audioTracks: [], currentTrack: 0, hasInBand: false });
-            }
-          }
-
-          function setupHlsInstance(sourceUrl, resumeTime, autoPlay, speed, targetQuality) {
-            if (window._hls) {
-              try {
-                window._hls.stopLoad();
-                window._hls.detachMedia();
-                window._hls.destroy();
-              } catch(e) {}
-              window._hls = null;
-            }
-
-            var networkErrorRecoveries = 0;
-            var mediaErrorRecoveries = 0;
-            var MAX_NETWORK_RETRIES = 3;
-            var MAX_MEDIA_RETRIES = 2;
-            var lastRecoveryTime = 0;
-
-            var startPos = (resumeTime && resumeTime > 1.5) ? resumeTime : -1;
-
-            var hls = new Hls({
-              autoStartLoad: true,
-              enableWorker: true,
-              startPosition: startPos,
-              startFragPrefetch: true,
-              lowLatencyMode: false,
-              maxBufferLength: 30,
-              maxMaxBufferLength: 60,
-              backBufferLength: 30,
-              maxBufferSize: 30 * 1024 * 1024,
-              manifestLoadingTimeOut: 20000,
-              levelLoadingTimeOut: 20000,
-              fragLoadingTimeOut: 25000,
-            });
-            window._hls = hls;
-
-            hls.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
-              // Automatic ABR by default (hls.currentLevel = -1), unless explicit quality requested
-              if (targetQuality && targetQuality !== -1 && data.levels && data.levels.length > 0) {
-                var found = -1;
-                for (var i = 0; i < data.levels.length; i++) {
-                  if (data.levels[i].height === targetQuality) {
-                    found = i;
-                    break;
-                  }
-                }
-                hls.currentLevel = (found !== -1) ? found : -1;
-              } else {
-                hls.currentLevel = -1; // Auto Adaptive Bitrate
-              }
-
-              if (data.levels && data.levels.length > 0) {
-                var levels = data.levels.map(function(l, idx) {
-                  return { index: idx, height: l.height, width: l.width, bitrate: l.bitrate };
-                });
-                post('levels', { levels: levels });
-              }
-
-              inspectAudioTracks(hls);
-
-              if (speed && typeof speed === 'number') {
-                video.playbackRate = speed;
-              }
-
-              if (autoPlay !== false) {
-                video.play().catch(function(){});
-              }
-            });
-
-            hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, function() {
-              inspectAudioTracks(hls);
-            });
-
-            hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, function(event, data) {
-              post('audioTrackSwitched', { currentTrack: data.id });
-            });
-
-            hls.on(Hls.Events.ERROR, function(event, data) {
-              if (!data.fatal) return;
-
-              var now = Date.now();
-              if (now - lastRecoveryTime > 30000) {
-                networkErrorRecoveries = 0;
-                mediaErrorRecoveries = 0;
-              }
-              lastRecoveryTime = now;
-
-              switch (data.type) {
-                case Hls.ErrorTypes.NETWORK_ERROR:
-                  if (networkErrorRecoveries < MAX_NETWORK_RETRIES) {
-                    networkErrorRecoveries++;
-                    console.warn('[Hls] Fatal network error, recovering (' + networkErrorRecoveries + '/' + MAX_NETWORK_RETRIES + ')');
-                    hls.startLoad();
-                  } else {
-                    console.error('[Hls] Network recovery exhausted');
-                    hls.destroy();
-                    post('error', { details: 'Network connection failed. Please check your internet.' });
-                  }
-                  break;
-                case Hls.ErrorTypes.MEDIA_ERROR:
-                  if (mediaErrorRecoveries < MAX_MEDIA_RETRIES) {
-                    mediaErrorRecoveries++;
-                    console.warn('[Hls] Fatal media error, recovering (' + mediaErrorRecoveries + '/' + MAX_MEDIA_RETRIES + ')');
-                    hls.recoverMediaError();
-                  } else {
-                    console.error('[Hls] Media recovery exhausted');
-                    hls.destroy();
-                    post('error', { details: 'Media decode error occurred.' });
-                  }
-                  break;
-                default:
-                  hls.destroy();
-                  post('error', { details: data.details || 'Playback error occurred' });
-                  break;
-              }
-            });
-
-            hls.loadSource(sourceUrl);
-            hls.attachMedia(video);
-          }
-
-          // Switch to alternate stream in-place without reloading HTML
-          window.switchStream = function(newUrl, newSubs, resumeSec, shouldPlay, rate, targetQuality, newEpToken) {
-            if (!video) return;
-            if (stallRecoveryTimer) { clearTimeout(stallRecoveryTimer); stallRecoveryTimer = null; }
-            stallRecoveryAttempts = 0;
-            if (newEpToken) epToken = newEpToken;
-
-            while (video.firstChild) {
-              video.removeChild(video.firstChild);
-            }
-            if (Array.isArray(newSubs)) {
-              newSubs.forEach(function(s, idx) {
-                var tr = document.createElement('track');
-                tr.kind = 'subtitles';
-                tr.label = s.label || s.lang || ('Track ' + (idx + 1));
-                tr.srclang = s.lang || 'en';
-                tr.src = s.src;
-                if (s.default || idx === 0) tr.default = true;
-                video.appendChild(tr);
-              });
-            }
-
-            setupHlsInstance(newUrl, resumeSec, shouldPlay, rate, targetQuality);
-          };
-
-          if (Hls.isSupported()) {
-            setupHlsInstance(streamSrc, -1, true, 1.0, -1);
-          } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-            video.src = streamSrc;
-            video.play().catch(function(){});
-          }
-
-          video.addEventListener('timeupdate', function() {
-            post('timeupdate', { currentTime: video.currentTime, duration: video.duration || 0 });
-          });
-          video.addEventListener('durationchange', function() {
-            post('durationchange', { duration: video.duration || 0 });
-          });
-          video.addEventListener('progress', function() {
-            if (video.buffered && video.buffered.length > 0) {
-              var end = video.buffered.end(video.buffered.length - 1);
-              post('buffered', { buffered: end });
-            }
-          });
-          video.addEventListener('play', function() { post('play'); });
-          video.addEventListener('pause', function() { post('pause'); });
-          video.addEventListener('ended', function() { post('ended'); });
-          video.addEventListener('waiting', function() {
-            post('buffering', { isBuffering: true });
-            if (video.paused || stallRecoveryTimer || stallRecoveryAttempts >= MAX_STALL_RECOVERIES) return;
-            stallRecoveryTimer = setTimeout(function() {
-              stallRecoveryTimer = null;
-              if (!video || video.paused || video.readyState >= 3 || !window._hls) return;
-              if (stallRecoveryAttempts < MAX_STALL_RECOVERIES) {
-                stallRecoveryAttempts++;
-                try { window._hls.startLoad(); } catch (e) {}
-              }
-            }, 5000);
-          });
-          video.addEventListener('playing', function() {
-            if (stallRecoveryTimer) { clearTimeout(stallRecoveryTimer); stallRecoveryTimer = null; }
-            post('buffering', { isBuffering: false });
-          });
-        </script>
-      </body>
-      </html>
-    `;
-  }, [documentStream?.streamUrl, documentStream?.subtitles]);
-
-  // Keep the source object stable too; changing source object identity can
-  // trigger unnecessary reloads on some native WebView versions.
-  const hianimeSource = useMemo(() => ({ html: hianimeHtml }), [hianimeHtml]);
-
-  // Code injected before content loads
-  const injectedCode = useMemo(
-    () => `
-    (function() {
-      window.__isMobileApp = true;
-      var _origOpen = window.open;
-      window.open = function(url, target, features) {
-        if (!url || url === 'about:blank' || url === '' || url === 'about:srcdoc') {
-          return {
-            closed: false,
-            close: function() { this.closed = true; },
-            focus: function() {},
-            blur: function() {},
-            location: { href: 'about:blank' },
-            document: { write: function(){}, close: function(){}, open: function(){} }
-          };
-        }
-        return null;
-      };
-
-      // Suppress any floating gear buttons or watermarks
-      var style = document.createElement('style');
-      style.innerHTML = \`
-        .floating-settings, button[title*="Settings"], .vjs-menu-button-popup, .jw-settings-menu,
-        [class*="watermark"], [class*="brand-logo"], a[href*="anime"], .jw-icon-settings,
-        [class*="floating"], [id*="settings-floating"], button[aria-label*="Settings"] {
-          display: none !important;
-          opacity: 0 !important;
-          visibility: hidden !important;
-          pointer-events: none !important;
-        }
-      \`;
-      document.head && document.head.appendChild(style);
-    })();
-    true;
-  `,
-    [],
-  );
-
-  // Synchronize later streams only after the first HTML document has finished loading.
   useEffect(() => {
-    if (server !== 'hianime' || !mountedStream?.streamUrl || !playerDocumentReadyRef.current) return;
-    const streamEpisodeKey = mountedStreamEpisodeKeyRef.current;
-    // Never relabel the previous episode's stream as the newly selected episode
-    // while its resolver request is still in flight.
-    if (!streamEpisodeKey || streamEpisodeKey !== currentEpisodeKeyRef.current) return;
-    applyStreamInPlace(mountedStream, streamEpisodeKey);
-  }, [server, mountedStream, currentSeason, currentEp, applyStreamInPlace]);
+    if (server !== 'hianime' || !mountedStream?.streamUrl || !nativeStreamKey) return;
+    if (nativeSourceKeyRef.current === nativeStreamKey) return;
+    nativeSourceKeyRef.current = nativeStreamKey;
+    setAvailableAudioTracks([]);
+    setAvailableLevels([]);
+    setNativeAudioTrackId(null);
+    setNativeTextTrackId(null);
+    setHasInBandAlternateAudio(false);
+    setCurrentAudioTrackId(0);
+    setIsBuffering(true);
+    setHlsError(null);
+  }, [server, mountedStream?.streamUrl, nativeStreamKey]);
 
-  const handlePlayerLoadEnd = useCallback(() => {
-    if (server !== 'hianime') return;
-    playerDocumentReadyRef.current = true;
-    const initialStream = initialDocumentStreamRef.current;
-    if (initialStream) {
-      const initialKey = `${initialDocumentEpisodeKeyRef.current || `${currentSeason}:${currentEp}`}:${initialStream.mode}:${initialStream.streamUrl}`;
-      activePlayerStreamKeyRef.current = initialKey;
+  const onNativePlayerLoad = useCallback((loadedDuration: number) => {
+    if (loadedDuration > 0) setDuration(loadedDuration);
+    const pending = resumeAfterSourceChange;
+    if (pending && pending.key === nativeSourceKeyRef.current) {
+      if (pending.time > 0) {
+        nativeVideoRef.current?.seek?.(pending.time);
+        nativePlayerTimeRef.current = pending.time;
+        currentTimeRef.current = pending.time;
+        setCurrentTime(pending.time);
+      }
+      setIsPlaying(pending.shouldPlay);
+      isPlayingRef.current = pending.shouldPlay;
+      setResumeAfterSourceChange(null);
     }
-    const latestStream = mountedStreamRef.current;
-    const latestStreamEpisodeKey = mountedStreamEpisodeKeyRef.current;
-    if (latestStream?.streamUrl && latestStreamEpisodeKey === currentEpisodeKeyRef.current) {
-      applyStreamInPlace(latestStream, latestStreamEpisodeKey);
-    }
-  }, [server, currentSeason, currentEp, applyStreamInPlace]);
+    setIsBuffering(false);
+    setResolvingHls(false);
+  }, [resumeAfterSourceChange]);
 
-  // WebView message listener
-  const handleWebViewMessage = useCallback(
-    (e: { nativeEvent: { data: string } }) => {
-      try {
-        const data = JSON.parse(e.nativeEvent.data);
-        // Ignore stale callbacks from prior episodes or streams
-        if (data.epToken && data.epToken !== currentEpisodeKeyRef.current) {
-          return;
+  const onNativePlayerProgress = useCallback((time: number, loadedDuration: number, playable: number) => {
+    nativePlayerTimeRef.current = time;
+    currentTimeRef.current = time;
+    setCurrentTime(time);
+    if (loadedDuration > 0) setDuration(loadedDuration);
+    setBufferedTime(playable);
+  }, []);
+
+  const onNativePlayerAudioTracks = useCallback((tracks: NativePlayerTrack[]) => {
+    const audio = tracks.filter((track) => track.type === 'audio');
+    setAvailableAudioTracks(audio.map(({ id, name, lang }) => ({ id, name, lang })));
+    setHasInBandAlternateAudio(audio.length > 1);
+    if (audio.length > 0 && nativeAudioTrackId === null) {
+      const wanted = audio.find((track) => track.name.toLowerCase().includes(currentLangRef.current === 'dub' ? 'english' : 'japanese'));
+      const initial = wanted || audio[0];
+      setNativeAudioTrackId(initial.id);
+      setCurrentAudioTrackId(initial.id);
+    }
+  }, [nativeAudioTrackId]);
+
+  const onNativePlayerTextTracks = useCallback((tracks: NativePlayerTrack[]) => {
+    const text = tracks.filter((track) => track.type === 'text');
+    if (text.length > 0 && nativeTextTrackId === null) {
+      const english = text.find((track) => track.name.toLowerCase().includes('english'));
+      setNativeTextTrackId((english || text[0]).id);
+    }
+  }, [nativeTextTrackId]);
+
+  const onNativePlayerVideoTracks = useCallback((tracks: NativeVideoLevel[]) => {
+    const levels = tracks.filter((track) => track.height > 0).map((track) => ({
+      index: track.index,
+      height: track.height,
+      width: track.width,
+      bitrate: track.bitrate,
+    }));
+    setAvailableLevels(levels);
+    const targetHeight = selectedQualityRef.current;
+    if (server === 'hianime' && targetHeight > 0) {
+      const match = levels.find((level) => level.height === targetHeight);
+      setSelectedQualityHeight(match ? targetHeight : -1);
+      selectedQualityRef.current = match ? targetHeight : -1;
+    }
+  }, [server]);
+
+  const onNativePlayerError = useCallback((message: string) => {
+    setIsBuffering(false);
+    setHlsError(message || 'Unable to play this stream');
+    setResolvingHls(false);
+  }, []);
+
+  const handleVidRiftMessage = useCallback((e: { nativeEvent: { data: string } }) => {
+    try {
+      const data = JSON.parse(e.nativeEvent.data);
+      if (data.type === 'play') {
+        setIsPlaying(true);
+        isPlayingRef.current = true;
+      } else if (data.type === 'pause') {
+        setIsPlaying(false);
+        isPlayingRef.current = false;
+      } else if (data.type === 'timeupdate') {
+        if (typeof data.currentTime === 'number') {
+          currentTimeRef.current = data.currentTime;
+          nativePlayerTimeRef.current = data.currentTime;
+          setCurrentTime(data.currentTime);
         }
-        if (data.type === 'timeupdate') {
-          if (typeof data.currentTime === 'number') {
-            setCurrentTime(data.currentTime);
-            currentTimeRef.current = data.currentTime;
-          }
-          if (typeof data.duration === 'number' && data.duration > 0) setDuration(data.duration);
-        } else if (data.type === 'durationchange') {
-          if (typeof data.duration === 'number' && data.duration > 0) setDuration(data.duration);
-        } else if (data.type === 'buffered') {
-          if (typeof data.buffered === 'number') setBufferedTime(data.buffered);
-        } else if (data.type === 'audioTracks') {
-          if (Array.isArray(data.audioTracks)) setAvailableAudioTracks(data.audioTracks);
-          if (typeof data.currentTrack === 'number') setCurrentAudioTrackId(data.currentTrack);
-          setHasInBandAlternateAudio(Boolean(data.hasInBand));
-        } else if (data.type === 'levels') {
-          if (Array.isArray(data.levels)) setAvailableLevels(data.levels);
-        } else if (data.type === 'buffering') {
-          setIsBuffering(Boolean(data.isBuffering));
-        } else if (data.type === 'play') {
-          setIsPlaying(true);
-          isPlayingRef.current = true;
-        } else if (data.type === 'pause') {
-          setIsPlaying(false);
-          setIsBuffering(false);
-          isPlayingRef.current = false;
-        } else if (data.type === 'ended' || data.type === 'vidrift:ended' || data.type === 'vidrift:nextup-play') {
-          if (autoplay) handleNextEpisode();
-        }
-      } catch (_) {}
-    },
-    [autoplay, handleNextEpisode],
-  );
+        if (typeof data.duration === 'number' && data.duration > 0) setDuration(data.duration);
+      } else if (data.type === 'buffered' && typeof data.buffered === 'number') {
+        setBufferedTime(data.buffered);
+      } else if (data.type === 'vidrift:ended' || data.type === 'vidrift:nextup-play' || data.type === 'ended') {
+        if (autoplay) handleNextEpisode();
+      }
+    } catch {}
+  }, [autoplay, handleNextEpisode]);
 
   // Interactive like / dislike toggles
   const handleToggleLike = useCallback(() => {
@@ -1309,30 +994,53 @@ export default function WatchScreen() {
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
       >
-        {/* Stream View (HiAnime or VidRift) - Persistent Native WebView (NEVER UNMOUNTED) */}
-        <MobileWebView
-          ref={webViewRef}
-          source={server === 'vidrift' ? { uri: vidriftEmbedUrl } : hianimeSource}
-          onLoadEnd={handlePlayerLoadEnd}
-          style={styles.webView}
-          containerStyle={{ backgroundColor: '#000000' }}
-          javaScriptEnabled={true}
-          domStorageEnabled={true}
-          allowsFullscreenVideo={true}
-          allowsInlineMediaPlayback={true}
-          mediaPlaybackRequiresUserAction={false}
-          setSupportMultipleWindows={true}
-          originWhitelist={['*']}
-          injectedJavaScriptBeforeContentLoaded={injectedCode}
-          onMessage={handleWebViewMessage}
-          startInLoadingState={false}
-          renderToHardwareTextureAndroid={true}
-          overScrollMode="never"
-          scrollEnabled={false}
-          scalesPageToFit={false}
-          showsHorizontalScrollIndicator={false}
-          showsVerticalScrollIndicator={false}
-        />
+        {server === 'hianime' ? (
+          mountedStream?.streamUrl ? (
+            <NativeHlsPlayer
+              ref={nativeVideoRef}
+              uri={toFullUrl(mountedStream.streamUrl)}
+              referer={mountedStream.referer}
+              paused={!isPlaying || resolvingHls}
+              playbackRate={playbackSpeed}
+              fitMode={fitMode}
+              selectedQualityHeight={selectedQualityHeight}
+              selectedAudioTrackId={nativeAudioTrackId}
+              selectedTextTrackId={nativeTextTrackId}
+              subtitlesEnabled={subtitlesEnabled}
+              subtitles={nativeSubtitles}
+              onLoad={onNativePlayerLoad}
+              onProgress={onNativePlayerProgress}
+              onBuffer={setIsBuffering}
+              onAudioTracks={onNativePlayerAudioTracks}
+              onTextTracks={onNativePlayerTextTracks}
+              onVideoTracks={onNativePlayerVideoTracks}
+              onEnd={() => { if (autoplay) handleNextEpisode(); }}
+              onError={onNativePlayerError}
+            />
+          ) : null
+        ) : (
+          <MobileWebView
+            ref={webViewRef}
+            source={{ uri: vidriftEmbedUrl }}
+            style={styles.webView}
+            containerStyle={{ backgroundColor: '#000000' }}
+            javaScriptEnabled
+            domStorageEnabled
+            allowsFullscreenVideo
+            allowsInlineMediaPlayback
+            mediaPlaybackRequiresUserAction={false}
+            setSupportMultipleWindows
+            originWhitelist={['*']}
+            onMessage={handleVidRiftMessage}
+            startInLoadingState={false}
+            renderToHardwareTextureAndroid
+            overScrollMode="never"
+            scrollEnabled={false}
+            scalesPageToFit={false}
+            showsHorizontalScrollIndicator={false}
+            showsVerticalScrollIndicator={false}
+          />
+        )}
 
         {/* Loading Overlay (Non-destructive to WebView) */}
         {server === 'hianime' && resolvingHls && (
@@ -2038,11 +1746,18 @@ export default function WatchScreen() {
                     currentEpisodeKeyRef.current = nextEpisodeKey;
                     audioSwitchRequestRef.current += 1;
                     setIsSwitchingAudio(false);
+                    setResumeAfterSourceChange(null);
+                    nativePlayerTimeRef.current = 0;
+                    currentTimeRef.current = 0;
+                    isPlayingRef.current = false;
+                    setHlsError(null);
+                    setResolvingHls(true);
+                    setIsBuffering(true);
                     setCurrentSeason(s.season_number);
                     setCurrentEp(1);
                     setCurrentTime(0);
                     setBufferedTime(0);
-                    setIsPlaying(true);
+                    setIsPlaying(false);
                   }}
                   style={[styles.seasonTab, currentSeason === s.season_number && styles.seasonTabActive]}
                 >
@@ -2062,10 +1777,22 @@ export default function WatchScreen() {
                 <PressableScale
                   key={ep.episode_number}
                   onPress={() => {
+                    const nextEpisodeKey = `${currentSeason}:${ep.episode_number}`;
+                    currentEpisodeKeyRef.current = nextEpisodeKey;
+                    audioSwitchRequestRef.current += 1;
+                    setIsSwitchingAudio(false);
+                    setResumeAfterSourceChange(null);
+                    nativePlayerTimeRef.current = 0;
+                    currentTimeRef.current = 0;
+                    isPlayingRef.current = false;
+                    setHlsError(null);
+                    setResolvingHls(true);
+                    setIsBuffering(true);
                     setCurrentEp(ep.episode_number);
                     setAllEpisodesOpen(false);
                     setCurrentTime(0);
                     setBufferedTime(0);
+                    setIsPlaying(false);
                     resetHideTimer();
                   }}
                   style={[styles.sheetEpCard, active && styles.sheetEpCardActive]}

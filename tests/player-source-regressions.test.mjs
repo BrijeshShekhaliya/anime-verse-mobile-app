@@ -2,41 +2,45 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const source = await readFile(new URL('../src/app/watch/[id].tsx', import.meta.url), 'utf8');
+const route = await readFile(new URL('../src/app/watch/[id].tsx', import.meta.url), 'utf8');
+const player = await readFile(new URL('../src/components/player/NativeHlsPlayer.tsx', import.meta.url), 'utf8');
 
 describe('Player source-level regressions', () => {
-  test('HiAnime HTML source is not regenerated for every episode change', () => {
-    const start = source.indexOf('const hianimeHtml = useMemo');
-    const end = source.indexOf('const hianimeSource = useMemo', start);
-    assert.notEqual(start, -1);
-    assert.notEqual(end, -1);
-    const htmlMemo = source.slice(start, end);
-    assert.match(htmlMemo, /\[documentStream\?\.streamUrl, documentStream\?\.subtitles\]/);
-    assert.doesNotMatch(htmlMemo, /\[mountedStream\?\.streamUrl, currentSeason, currentEp\]/);
-    assert.match(source, /source=\{server === 'vidrift' \? \{ uri: vidriftEmbedUrl \} : hianimeSource\}/);
+  test('HiAnime route uses the native player instead of generating HLS HTML', () => {
+    assert.match(route, /import NativeHlsPlayer/);
+    assert.match(route, /<NativeHlsPlayer/);
+    assert.match(route, /server === 'hianime' \?/);
+    assert.match(route, /source=\{\{ uri: vidriftEmbedUrl \}\}/);
+    assert.doesNotMatch(route, /new Hls\(/);
+    assert.doesNotMatch(route, /const hianimeHtml/);
+    assert.equal((player.match(/<Video\b/g) || []).length, 1);
   });
 
-  test('In-place stream switching updates the episode token without replacing the WebView', () => {
-    assert.match(source, /window\.switchStream = function\(newUrl, newSubs, resumeSec, shouldPlay, rate, targetQuality, newEpToken\)/);
-    assert.match(source, /if \(newEpToken\) epToken = newEpToken;/);
-    assert.match(source, /applyStreamInPlace\(mountedStream, streamEpisodeKey\)/);
-    assert.match(source, /mountedStreamEpisodeKeyRef\.current = `\$\{currentSeason\}:\$\{currentEp\}`;/);
+  test('A separate Sub/Dub stream change retains the playback position', () => {
+    assert.match(route, /const switchKey = `\$\{requestedEpisodeKey\}:\$\{targetMode\}:\$\{resolved\.streamUrl\}`/);
+    assert.match(route, /setResumeAfterSourceChange\(\{ key: switchKey, time: capturedTime, shouldPlay: isPlayingRef\.current \}\)/);
+    assert.match(route, /pending\.key === nativeSourceKeyRef\.current/);
+    assert.match(route, /nativeVideoRef\.current\?\.seek\?\.\(pending\.time\)/);
   });
 
-  test('Cold start does not eagerly resolve an alternate Sub/Dub stream', () => {
-    assert.doesNotMatch(source, /Pre-fetch alternate Sub\/Dub stream in the background/);
-    assert.match(source, /Alternate Sub\/Dub streams are resolved on demand instead of during cold/);
+  test('Fullscreen presentation follows measured landscape geometry', () => {
+    assert.match(route, /const isFullscreenView = isPhysicalLandscape;/);
+    assert.match(route, /const enterFullscreen = useCallback\(\(\) => \{/);
+    assert.match(route, /ScreenOrientation\.lockAsync\(ScreenOrientation\.OrientationLock\.LANDSCAPE\)/);
   });
 
-  test('Fullscreen layout waits for measured landscape geometry', () => {
-    assert.match(source, /const isFullscreenView = isPhysicalLandscape;/);
-    assert.match(source, /const enterFullscreen = useCallback\(\(\) => \{\s*\/\/ Request rotation first/);
-    assert.match(source, /useEffect\(\(\) => \{\s*RNStatusBar\.setHidden\(isFullscreenView, 'none'\);/);
+  test('New source transitions pause the old stream and reject stale audio results', () => {
+    assert.match(route, /paused=\{!isPlaying \|\| resolvingHls\}/);
+    assert.match(route, /requestId !== audioSwitchRequestRef\.current/);
+    assert.match(route, /setResumeAfterSourceChange\(null\)/);
   });
 
-  test('A stale audio resolution cannot override a newer audio choice', () => {
-    assert.match(source, /const audioSwitchRequestRef = useRef\(0\);/);
-    assert.match(source, /requestId !== audioSwitchRequestRef\.current/);
-    assert.match(source, /if \(requestId === audioSwitchRequestRef\.current\) setIsSwitchingAudio\(false\);/);
+  test('Native player uses native buffering and reports audio, subtitle and video tracks', () => {
+    assert.match(player, /minLoadRetryCount: 3/);
+    assert.match(player, /bufferForPlaybackAfterRebufferMs: 5000/);
+    assert.match(player, /automaticallyWaitsToMinimizeStalling/);
+    assert.match(player, /onAudioTracks=\{handleAudioTracks\}/);
+    assert.match(player, /onTextTracks=\{handleTextTracks\}/);
+    assert.match(player, /onVideoTracks=\{handleVideoTracks\}/);
   });
 });
