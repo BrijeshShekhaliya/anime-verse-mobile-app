@@ -20,13 +20,14 @@ describe('Native streaming player architecture regressions', () => {
     assert.doesNotMatch(player, /<Modal\b/);
     assert.match(player, /automaticallyWaitsToMinimizeStalling/);
     assert.match(player, /bufferForPlaybackAfterRebufferMs: 5000/);
-    assert.match(player, /minLoadRetryCount=\{3\}/);
+    assert.match(player, /minLoadRetryCount: 3/);
   });
 
   test('Native media updates preserve the playhead for audio-only stream changes', () => {
     assert.match(route, /const switchKey = `\$\{requestedEpisodeKey\}:\$\{targetMode\}:\$\{resolved\.streamUrl\}`/);
     assert.match(route, /setResumeAfterSourceChange\(\{ key: switchKey, time: capturedTime, shouldPlay: isPlayingRef\.current \}\)/);
-    assert.match(route, /pending\.key === nativeSourceKeyRef\.current && pending\.time > 0/);
+    assert.match(route, /pending\.key === nativeSourceKeyRef\.current/);
+    assert.match(route, /if \(pending\.time > 0\)/);
     assert.match(route, /nativeVideoRef\.current\?\.seek\?\.\(pending\.time\)/);
   });
 
