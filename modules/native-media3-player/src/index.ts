@@ -1,5 +1,5 @@
 import { requireNativeViewManager } from 'expo-modules-core';
-import type { ComponentType } from 'react';
+import type { ComponentType, Ref } from 'react';
 import type { StyleProp, ViewStyle } from 'react-native';
 
 export type Media3Track = {
@@ -39,4 +39,4 @@ export type NativeMedia3ViewRef = {
 
 export const NativeMedia3View = requireNativeViewManager<NativeMedia3ViewProps>(
   'NativeMedia3Player',
-) as ComponentType<NativeMedia3ViewProps & { ref?: React.Ref<NativeMedia3ViewRef> }>;
+) as ComponentType<NativeMedia3ViewProps & { ref?: Ref<NativeMedia3ViewRef> }>;
