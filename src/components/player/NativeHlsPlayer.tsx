@@ -146,7 +146,6 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
     if (!source) return;
     let active = true;
     onBuffer(true);
-    onError('');
     player.replaceAsync(source).then(() => {
       if (!active) return;
       if (paused) player.pause();
