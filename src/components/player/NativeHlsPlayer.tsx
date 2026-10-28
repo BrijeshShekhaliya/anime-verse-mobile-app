@@ -104,6 +104,7 @@ const AndroidMedia3Player = forwardRef<NativeVideoPlayerHandle, Props>(function 
         referer={referer}
         paused={paused}
         playbackRate={playbackRate}
+        fitMode={fitMode}
         selectedQualityHeight={selectedQualityHeight}
         selectedAudioTrackId={selectedAudioTrackId}
         selectedTextTrackId={selectedTextTrackId}
