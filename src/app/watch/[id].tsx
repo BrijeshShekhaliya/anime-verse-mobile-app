@@ -874,15 +874,6 @@ export default function WatchScreen() {
     setHlsError(null);
   }, [server, nativeStreamKey]);
 
-  const hianimeHtml = useMemo(() => {
-    if (!mountedStream?.streamUrl) return '';
-    return '';
-  }, [mountedStream?.streamUrl, mountedStream?.subtitles]);
-
-  // Keep the source object stable too; changing source object identity can
-  // trigger unnecessary reloads on some native WebView versions.
-  const hianimeSource = useMemo(() => ({ html: hianimeHtml }), [hianimeHtml]);
-
   const onNativePlayerLoad = useCallback((loadedDuration: number) => {
     if (loadedDuration > 0) setDuration(loadedDuration);
     const pending = resumeAfterSourceChange;
@@ -1015,30 +1006,57 @@ export default function WatchScreen() {
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
       >
-        {/* Stream View (HiAnime or VidRift) - Persistent Native WebView (NEVER UNMOUNTED) */}
-        <MobileWebView
-          ref={webViewRef}
-          source={server === 'vidrift' ? { uri: vidriftEmbedUrl } : hianimeSource}
-          onLoadEnd={handlePlayerLoadEnd}
-          style={styles.webView}
-          containerStyle={{ backgroundColor: '#000000' }}
-          javaScriptEnabled={true}
-          domStorageEnabled={true}
-          allowsFullscreenVideo={true}
-          allowsInlineMediaPlayback={true}
-          mediaPlaybackRequiresUserAction={false}
-          setSupportMultipleWindows={true}
-          originWhitelist={['*']}
-          injectedJavaScriptBeforeContentLoaded={injectedCode}
-          onMessage={handleWebViewMessage}
-          startInLoadingState={false}
-          renderToHardwareTextureAndroid={true}
-          overScrollMode="never"
-          scrollEnabled={false}
-          scalesPageToFit={false}
-          showsHorizontalScrollIndicator={false}
-          showsVerticalScrollIndicator={false}
-        />
+        {server === 'hianime' ? (
+          mountedStream?.streamUrl ? (
+            <NativeHlsPlayer
+              ref={nativeVideoRef}
+              uri={toFullUrl(mountedStream.streamUrl)}
+              referer={mountedStream.referer}
+              paused={!isPlaying}
+              playbackRate={playbackSpeed}
+              fitMode={fitMode}
+              selectedQualityHeight={selectedQualityHeight}
+              selectedAudioTrackId={nativeAudioTrackId}
+              selectedTextTrackId={nativeTextTrackId}
+              subtitlesEnabled={subtitlesEnabled}
+              subtitles={(mountedStream.subtitles || []).map((sub) => ({
+                label: sub.label || sub.lang || 'English',
+                lang: sub.lang || 'en',
+                src: toFullUrl(sub.src),
+                default: sub.default,
+              }))}
+              onLoad={onNativePlayerLoad}
+              onProgress={onNativePlayerProgress}
+              onBuffer={setIsBuffering}
+              onAudioTracks={onNativePlayerAudioTracks}
+              onTextTracks={onNativePlayerTextTracks}
+              onEnd={() => { if (autoplay) handleNextEpisode(); }}
+              onError={onNativePlayerError}
+            />
+          ) : null
+        ) : (
+          <MobileWebView
+            ref={webViewRef}
+            source={{ uri: vidriftEmbedUrl }}
+            style={styles.webView}
+            containerStyle={{ backgroundColor: '#000000' }}
+            javaScriptEnabled
+            domStorageEnabled
+            allowsFullscreenVideo
+            allowsInlineMediaPlayback
+            mediaPlaybackRequiresUserAction={false}
+            setSupportMultipleWindows
+            originWhitelist={['*']}
+            onMessage={handleVidRiftMessage}
+            startInLoadingState={false}
+            renderToHardwareTextureAndroid
+            overScrollMode="never"
+            scrollEnabled={false}
+            scalesPageToFit={false}
+            showsHorizontalScrollIndicator={false}
+            showsVerticalScrollIndicator={false}
+          />
+        )}
 
         {/* Loading Overlay (Non-destructive to WebView) */}
         {server === 'hianime' && resolvingHls && (
