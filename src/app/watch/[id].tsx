@@ -646,8 +646,11 @@ export default function WatchScreen() {
           const switchKey = `${requestedEpisodeKey}:${targetMode}:${resolved.streamUrl}`;
           setResumeAfterSourceChange({ key: switchKey, time: capturedTime, shouldPlay: isPlayingRef.current });
           mountedStreamEpisodeKeyRef.current = requestedEpisodeKey;
+          // Keep the existing player surface and custom controls mounted while
+          // ExoPlayer replaces the source. The resolver spinner is only for the
+          // initial URL lookup; actual media loading is shown by isBuffering.
+          setResolvingHls(false);
           setIsBuffering(true);
-          setResolvingHls(true);
           setMountedStream(resolved);
         }
 
