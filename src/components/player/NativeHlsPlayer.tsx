@@ -42,11 +42,12 @@ type Props = {
 };
 
 const BUFFER_OPTIONS = {
-  // Build a generous forward buffer so short seeks and transient network dips
-  // are absorbed before the playback position catches up.
+  // Start after a short startup buffer, then keep a larger forward window so
+  // brief mobile-network dips do not immediately stall playback. The byte
+  // budget must be large enough for a minute of high-bitrate 1080p HLS.
   minBufferForPlayback: 3.5,
   preferredForwardBufferDuration: 60,
-  maxBufferBytes: 60 * 1024 * 1024,
+  maxBufferBytes: 128 * 1024 * 1024,
   prioritizeTimeOverSizeThreshold: true,
 };
 
