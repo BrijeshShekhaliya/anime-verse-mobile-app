@@ -137,3 +137,6 @@ const styles = StyleSheet.create({
 });
 
 export default memo(NativeHlsPlayer);
+
+// Preserve the watch screen's existing shared player type imports.
+export type { NativePlayerTrack, NativeVideoLevel } from './ExpoVideoHlsPlayer';
