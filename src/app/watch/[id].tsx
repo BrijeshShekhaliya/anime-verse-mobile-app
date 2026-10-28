@@ -928,6 +928,30 @@ export default function WatchScreen() {
     setResolvingHls(false);
   }, []);
 
+  const handleVidRiftMessage = useCallback((e: { nativeEvent: { data: string } }) => {
+    try {
+      const data = JSON.parse(e.nativeEvent.data);
+      if (data.type === 'play') {
+        setIsPlaying(true);
+        isPlayingRef.current = true;
+      } else if (data.type === 'pause') {
+        setIsPlaying(false);
+        isPlayingRef.current = false;
+      } else if (data.type === 'timeupdate') {
+        if (typeof data.currentTime === 'number') {
+          currentTimeRef.current = data.currentTime;
+          nativePlayerTimeRef.current = data.currentTime;
+          setCurrentTime(data.currentTime);
+        }
+        if (typeof data.duration === 'number' && data.duration > 0) setDuration(data.duration);
+      } else if (data.type === 'buffered' && typeof data.buffered === 'number') {
+        setBufferedTime(data.buffered);
+      } else if (data.type === 'vidrift:ended' || data.type === 'vidrift:nextup-play' || data.type === 'ended') {
+        if (autoplay) handleNextEpisode();
+      }
+    } catch {}
+  }, [autoplay, handleNextEpisode]);
+
   // Interactive like / dislike toggles
   const handleToggleLike = useCallback(() => {
     if (liked) {
