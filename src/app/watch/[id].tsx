@@ -456,8 +456,13 @@ export default function WatchScreen() {
       .then((res) => {
         if (cancelled || currentEpisodeKeyRef.current !== `${currentSeason}:${currentEp}`) return;
         if (res && res.streamUrl) {
+          const resolvedEpisodeKey = `${currentSeason}:${currentEp}`;
+          if (mountedStreamEpisodeKeyRef.current !== resolvedEpisodeKey) {
+            const newEpisodeSourceKey = `${resolvedEpisodeKey}:${res.mode}:${res.streamUrl}`;
+            setResumeAfterSourceChange({ key: newEpisodeSourceKey, time: 0, shouldPlay: true });
+          }
           setHlsStream(res);
-          mountedStreamEpisodeKeyRef.current = `${currentSeason}:${currentEp}`;
+          mountedStreamEpisodeKeyRef.current = resolvedEpisodeKey;
           setMountedStream(res);
           setHlsError(null);
         } else {
@@ -698,14 +703,14 @@ export default function WatchScreen() {
       setResumeAfterSourceChange(null);
       nativePlayerTimeRef.current = 0;
       currentTimeRef.current = 0;
-      isPlayingRef.current = true;
+      isPlayingRef.current = false;
       setHlsError(null);
       setResolvingHls(true);
       setIsBuffering(true);
       setCurrentEp(nextEp);
       setCurrentTime(0);
       setBufferedTime(0);
-      setIsPlaying(true);
+      setIsPlaying(false);
       resetHideTimer();
     }
   }, [currentEp, currentSeason, episodes, resetHideTimer]);
@@ -832,11 +837,13 @@ export default function WatchScreen() {
   const onNativePlayerLoad = useCallback((loadedDuration: number) => {
     if (loadedDuration > 0) setDuration(loadedDuration);
     const pending = resumeAfterSourceChange;
-    if (pending && pending.key === nativeSourceKeyRef.current && pending.time > 0) {
-      nativeVideoRef.current?.seek?.(pending.time);
-      nativePlayerTimeRef.current = pending.time;
-      currentTimeRef.current = pending.time;
-      setCurrentTime(pending.time);
+    if (pending && pending.key === nativeSourceKeyRef.current) {
+      if (pending.time > 0) {
+        nativeVideoRef.current?.seek?.(pending.time);
+        nativePlayerTimeRef.current = pending.time;
+        currentTimeRef.current = pending.time;
+        setCurrentTime(pending.time);
+      }
       setIsPlaying(pending.shouldPlay);
       isPlayingRef.current = pending.shouldPlay;
       setResumeAfterSourceChange(null);
@@ -1730,7 +1737,7 @@ export default function WatchScreen() {
                     setResumeAfterSourceChange(null);
                     nativePlayerTimeRef.current = 0;
                     currentTimeRef.current = 0;
-                    isPlayingRef.current = true;
+                    isPlayingRef.current = false;
                     setHlsError(null);
                     setResolvingHls(true);
                     setIsBuffering(true);
@@ -1738,7 +1745,7 @@ export default function WatchScreen() {
                     setCurrentEp(1);
                     setCurrentTime(0);
                     setBufferedTime(0);
-                    setIsPlaying(true);
+                    setIsPlaying(false);
                   }}
                   style={[styles.seasonTab, currentSeason === s.season_number && styles.seasonTabActive]}
                 >
@@ -1765,7 +1772,7 @@ export default function WatchScreen() {
                     setResumeAfterSourceChange(null);
                     nativePlayerTimeRef.current = 0;
                     currentTimeRef.current = 0;
-                    isPlayingRef.current = true;
+                    isPlayingRef.current = false;
                     setHlsError(null);
                     setResolvingHls(true);
                     setIsBuffering(true);
@@ -1773,7 +1780,7 @@ export default function WatchScreen() {
                     setAllEpisodesOpen(false);
                     setCurrentTime(0);
                     setBufferedTime(0);
-                    setIsPlaying(true);
+                    setIsPlaying(false);
                     resetHideTimer();
                   }}
                   style={[styles.sheetEpCard, active && styles.sheetEpCardActive]}
