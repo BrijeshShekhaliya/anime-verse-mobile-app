@@ -695,6 +695,7 @@ export default function WatchScreen() {
       currentEpisodeKeyRef.current = `${currentSeason}:${nextEp}`;
       audioSwitchRequestRef.current += 1;
       setIsSwitchingAudio(false);
+      setResumeAfterSourceChange(null);
       nativePlayerTimeRef.current = 0;
       currentTimeRef.current = 0;
       isPlayingRef.current = true;
@@ -1726,6 +1727,7 @@ export default function WatchScreen() {
                     currentEpisodeKeyRef.current = nextEpisodeKey;
                     audioSwitchRequestRef.current += 1;
                     setIsSwitchingAudio(false);
+                    setResumeAfterSourceChange(null);
                     nativePlayerTimeRef.current = 0;
                     currentTimeRef.current = 0;
                     isPlayingRef.current = true;
@@ -1760,6 +1762,7 @@ export default function WatchScreen() {
                     currentEpisodeKeyRef.current = nextEpisodeKey;
                     audioSwitchRequestRef.current += 1;
                     setIsSwitchingAudio(false);
+                    setResumeAfterSourceChange(null);
                     nativePlayerTimeRef.current = 0;
                     currentTimeRef.current = 0;
                     isPlayingRef.current = true;
