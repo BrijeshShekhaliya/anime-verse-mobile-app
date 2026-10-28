@@ -46,6 +46,7 @@ const BUFFER_OPTIONS = {
   // are absorbed before the playback position catches up.
   minBufferForPlayback: 3.5,
   preferredForwardBufferDuration: 60,
+  maxBufferBytes: 60 * 1024 * 1024,
   prioritizeTimeOverSizeThreshold: true,
 };
 
@@ -202,8 +203,8 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
 
   const applyVideoQuality = useCallback(() => {
     if (selectedQualityHeight < 0) {
-      // Clearing the explicit track restores ExoPlayer's adaptive bitrate logic.
-      player.videoTrack = null;
+      // Expo Video exposes adaptive quality through maxResolution. videoTrack is
+      // read-only; setting it does not force a rendition and can fail at runtime.
       player.maxResolution = null;
       return;
     }
@@ -218,24 +219,15 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
       return value.size?.height || value.height || 0;
     };
     const exact = available.find((track) => readHeight(track) === selectedQualityHeight);
-    if (exact) {
-      // Select the requested rendition directly rather than only setting a
-      // ceiling (a ceiling alone can leave ABR playing 480p after 1080p is chosen).
-      player.videoTrack = exact;
-      const value = exact as unknown as { size?: { width?: number; height?: number }; width?: number };
-      player.maxResolution = {
-        width: value.size?.width || value.width || Math.round((selectedQualityHeight * 16) / 9),
-        height: selectedQualityHeight,
-      };
-      return;
-    }
-
-    // Some manifests expose only a subset of variants. Keep the cap as a safe
-    // fallback and let ExoPlayer choose the closest available rendition.
-    player.videoTrack = null;
+    const requestedHeight = exact ? readHeight(exact) : selectedQualityHeight;
+    // Expo Video's supported manual-quality API is maxResolution (the current
+    // videoTrack is read-only). On Android this is a hard ceiling, so ExoPlayer
+    // cannot silently choose a resolution above the user's selection.
     player.maxResolution = {
-      width: Math.round((selectedQualityHeight * 16) / 9),
-      height: selectedQualityHeight,
+      width: exact
+        ? ((exact as unknown as { size?: { width?: number } }).size?.width || Math.round((requestedHeight * 16) / 9))
+        : Math.round((requestedHeight * 16) / 9),
+      height: requestedHeight,
     };
   }, [player, selectedQualityHeight]);
 
