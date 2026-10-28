@@ -643,6 +643,8 @@ export default function WatchScreen() {
           const switchKey = `${requestedEpisodeKey}:${targetMode}:${resolved.streamUrl}`;
           setResumeAfterSourceChange({ key: switchKey, time: capturedTime, shouldPlay: isPlayingRef.current });
           mountedStreamEpisodeKeyRef.current = requestedEpisodeKey;
+          setIsBuffering(true);
+          setResolvingHls(true);
           setMountedStream(resolved);
         }
 
@@ -988,7 +990,7 @@ export default function WatchScreen() {
               ref={nativeVideoRef}
               uri={toFullUrl(mountedStream.streamUrl)}
               referer={mountedStream.referer}
-              paused={!isPlaying}
+              paused={!isPlaying || resolvingHls}
               playbackRate={playbackSpeed}
               fitMode={fitMode}
               selectedQualityHeight={selectedQualityHeight}
