@@ -58,7 +58,9 @@ describe('Expo Go compatible streaming player regressions', () => {
   test('HLS headers and buffering configuration are preserved through expo-video', () => {
     assert.match(player, /contentType: 'hls'/);
     assert.match(player, /headers: \{ Referer: referer, referer \}/);
-    assert.match(player, /preferredForwardBufferDuration: 50/);
+    assert.match(player, /preferredForwardBufferDuration: 60/);
+    assert.match(player, /surfaceType="textureView"/);
+    assert.match(player, /player\.videoTrack = exact/);
     assert.match(route, /resolveStreamWithCache\(/);
     assert.match(route, /api\.resolveStream\(/);
     assert.doesNotMatch(route, /cdn\.jsdelivr\.net\/npm\/hls\.js/);
