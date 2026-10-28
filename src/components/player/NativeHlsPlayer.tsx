@@ -1,4 +1,4 @@
-import React, { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useState } from 'react';
+import React, { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { VideoView, useVideoPlayer, type VideoSource } from 'expo-video';
 
@@ -134,6 +134,7 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
   const [playbackTime, setPlaybackTime] = useState(0);
   const [hasEmbeddedSubtitleTracks, setHasEmbeddedSubtitleTracks] = useState(false);
   const [externalSubtitleCues, setExternalSubtitleCues] = useState<SubtitleCue[]>([]);
+  const readySourceRef = useRef<string | null>(null);
 
   const player = useVideoPlayer(null, (instance) => {
     instance.timeUpdateEventInterval = 0.4;
@@ -157,6 +158,7 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
   useEffect(() => {
     if (!source) return;
     let active = true;
+    readySourceRef.current = null;
     onBuffer(true);
     setHasEmbeddedSubtitleTracks(false);
     setExternalSubtitleCues([]);
@@ -274,10 +276,11 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
 
   useEffect(() => {
     const subscriptions = [
-      player.addListener('sourceLoad', (event) => {
-        onLoad(event.duration || player.duration || 0);
+      player.addListener('sourceLoad', () => {
+        // Source metadata and track lists can arrive before the first frame is
+        // actually ready. Publish tracks now, but restore the playhead only when
+        // ExoPlayer reports readyToPlay.
         publishTracks();
-        onBuffer(false);
       }),
       player.addListener('timeUpdate', (event) => {
         const time = Math.max(0, event.currentTime || 0);
@@ -286,7 +289,14 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
       }),
       player.addListener('statusChange', (event) => {
         if (event.status === 'loading') onBuffer(true);
-        if (event.status === 'readyToPlay') onBuffer(false);
+        if (event.status === 'readyToPlay') {
+          onBuffer(false);
+          if (readySourceRef.current !== uri) {
+            readySourceRef.current = uri;
+            onLoad(Math.max(0, player.duration || 0));
+            publishTracks();
+          }
+        }
         if (event.status === 'error') {
           onBuffer(false);
           const error = event.error as unknown as { message?: string } | undefined;
@@ -298,7 +308,7 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
       player.addListener('playToEnd', onEnd),
     ];
     return () => subscriptions.forEach((subscription) => subscription.remove());
-  }, [player, onLoad, onProgress, onBuffer, onError, onEnd, publishTracks]);
+  }, [player, uri, onLoad, onProgress, onBuffer, onError, onEnd, publishTracks]);
 
   const activeSubtitle = externalSubtitleCues.find((cue) => playbackTime >= cue.start && playbackTime <= cue.end);
 
