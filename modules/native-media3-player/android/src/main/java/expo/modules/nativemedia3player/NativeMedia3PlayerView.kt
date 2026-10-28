@@ -176,12 +176,16 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
       builder.setOverrideForType(TrackSelectionOverride(group, listOf(trackIndex)))
     }
     val text = selectedTextTrackId
-    if (!subtitlesEnabled || text == null || text < 0) {
+    if (!subtitlesEnabled || (text != null && text < 0)) {
       builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-    } else if (textGroups.getOrNull(text) != null) {
-      val (group, trackIndex) = textGroups[text]
+    } else {
       builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-      builder.setOverrideForType(TrackSelectionOverride(group, listOf(trackIndex)))
+      if (text == null) {
+        builder.clearOverridesOfType(C.TRACK_TYPE_TEXT)
+      } else if (textGroups.getOrNull(text) != null) {
+        val (group, trackIndex) = textGroups[text]
+        builder.setOverrideForType(TrackSelectionOverride(group, listOf(trackIndex)))
+      }
     }
     trackSelector.setParameters(builder)
   }
