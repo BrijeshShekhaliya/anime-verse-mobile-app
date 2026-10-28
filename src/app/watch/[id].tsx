@@ -544,9 +544,12 @@ export default function WatchScreen() {
 
   // Controls Actions
   const handleTogglePlay = useCallback(() => {
+    if (server === 'vidrift') {
+      sendPlayerCommand("var v=document.querySelector('video');if(v){if(v.paused)v.play();else v.pause();}");
+    }
     setIsPlaying((prev) => { isPlayingRef.current = !prev; return !prev; });
     resetHideTimer();
-  }, [resetHideTimer]);
+  }, [server, sendPlayerCommand, resetHideTimer]);
 
   const handleRewind10 = useCallback(() => {
     const next = Math.max(0, nativePlayerTimeRef.current - 10);
