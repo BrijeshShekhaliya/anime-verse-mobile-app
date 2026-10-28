@@ -146,6 +146,7 @@ export default function WatchScreen() {
   const webViewRef = useRef<any>(null);
   const nativeVideoRef = useRef<any>(null);
   const nativePlayerTimeRef = useRef(0);
+  const nativeSeekTargetRef = useRef<number | null>(null);
   const nativeSourceKeyRef = useRef<string | null>(null);
   const [nativeAudioTrackId, setNativeAudioTrackId] = useState<number | null>(null);
   const [nativeTextTrackId, setNativeTextTrackId] = useState<number | null>(null);
@@ -537,6 +538,8 @@ export default function WatchScreen() {
   }, [server]);
   const seekNativePlayer = useCallback((time: number) => {
     const target = Math.max(0, time);
+    nativeSeekTargetRef.current = target;
+    setIsBuffering(true);
     nativeVideoRef.current?.seek?.(target);
     nativePlayerTimeRef.current = target;
     currentTimeRef.current = target;
@@ -646,8 +649,11 @@ export default function WatchScreen() {
           const switchKey = `${requestedEpisodeKey}:${targetMode}:${resolved.streamUrl}`;
           setResumeAfterSourceChange({ key: switchKey, time: capturedTime, shouldPlay: isPlayingRef.current });
           mountedStreamEpisodeKeyRef.current = requestedEpisodeKey;
+          // Keep the existing player surface and custom controls mounted while
+          // ExoPlayer replaces the source. The resolver spinner is only for the
+          // initial URL lookup; actual media loading is shown by isBuffering.
+          setResolvingHls(false);
           setIsBuffering(true);
-          setResolvingHls(true);
           setMountedStream(resolved);
         }
 
@@ -861,6 +867,11 @@ export default function WatchScreen() {
     nativePlayerTimeRef.current = time;
     currentTimeRef.current = time;
     setCurrentTime(time);
+    const seekTarget = nativeSeekTargetRef.current;
+    if (seekTarget !== null && Math.abs(time - seekTarget) <= 1.5) {
+      nativeSeekTargetRef.current = null;
+      setIsBuffering(false);
+    }
     if (loadedDuration > 0) setDuration(loadedDuration);
     setBufferedTime(playable);
   }, []);

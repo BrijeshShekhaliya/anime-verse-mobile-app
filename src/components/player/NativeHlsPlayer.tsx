@@ -1,4 +1,4 @@
-import React, { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useState } from 'react';
+import React, { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { VideoView, useVideoPlayer, type VideoSource } from 'expo-video';
 
@@ -42,8 +42,11 @@ type Props = {
 };
 
 const BUFFER_OPTIONS = {
-  minBufferForPlayback: 2.5,
-  preferredForwardBufferDuration: 50,
+  // Build a generous forward buffer so short seeks and transient network dips
+  // are absorbed before the playback position catches up.
+  minBufferForPlayback: 3.5,
+  preferredForwardBufferDuration: 60,
+  maxBufferBytes: 60 * 1024 * 1024,
   prioritizeTimeOverSizeThreshold: true,
 };
 
@@ -132,6 +135,7 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
   const [playbackTime, setPlaybackTime] = useState(0);
   const [hasEmbeddedSubtitleTracks, setHasEmbeddedSubtitleTracks] = useState(false);
   const [externalSubtitleCues, setExternalSubtitleCues] = useState<SubtitleCue[]>([]);
+  const readySourceRef = useRef<string | null>(null);
 
   const player = useVideoPlayer(null, (instance) => {
     instance.timeUpdateEventInterval = 0.4;
@@ -155,6 +159,7 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
   useEffect(() => {
     if (!source) return;
     let active = true;
+    readySourceRef.current = null;
     onBuffer(true);
     setHasEmbeddedSubtitleTracks(false);
     setExternalSubtitleCues([]);
@@ -196,16 +201,39 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
     }
   }, [player, selectedTextTrackId, subtitlesEnabled]);
 
-  useEffect(() => {
+  const applyVideoQuality = useCallback(() => {
     if (selectedQualityHeight < 0) {
+      // Expo Video exposes adaptive quality through maxResolution. videoTrack is
+      // read-only; setting it does not force a rendition and can fail at runtime.
       player.maxResolution = null;
       return;
     }
+
+    const available = player.availableVideoTracks;
+    const readHeight = (track: (typeof available)[number]) => {
+      const value = track as unknown as {
+        size?: { width?: number; height?: number };
+        width?: number;
+        height?: number;
+      };
+      return value.size?.height || value.height || 0;
+    };
+    const exact = available.find((track) => readHeight(track) === selectedQualityHeight);
+    const requestedHeight = exact ? readHeight(exact) : selectedQualityHeight;
+    // Expo Video's supported manual-quality API is maxResolution (the current
+    // videoTrack is read-only). On Android this is a hard ceiling, so ExoPlayer
+    // cannot silently choose a resolution above the user's selection.
     player.maxResolution = {
-      width: Math.round((selectedQualityHeight * 16) / 9),
-      height: selectedQualityHeight,
+      width: exact
+        ? ((exact as unknown as { size?: { width?: number } }).size?.width || Math.round((requestedHeight * 16) / 9))
+        : Math.round((requestedHeight * 16) / 9),
+      height: requestedHeight,
     };
   }, [player, selectedQualityHeight]);
+
+  useEffect(() => {
+    applyVideoQuality();
+  }, [applyVideoQuality]);
 
   const publishTracks = useCallback(() => {
     onAudioTracks(toAudioTracks(player));
@@ -213,7 +241,8 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
     setHasEmbeddedSubtitleTracks(textTracks.length > 0);
     onTextTracks(textTracks);
     onVideoTracks(toVideoLevels(player));
-  }, [player, onAudioTracks, onTextTracks, onVideoTracks]);
+    applyVideoQuality();
+  }, [player, onAudioTracks, onTextTracks, onVideoTracks, applyVideoQuality]);
 
   // Expo Video supports in-band HLS subtitles. Resolver-provided sidecar VTT/SRT
   // files use a lightweight JS cue overlay when the stream has no embedded tracks.
@@ -239,10 +268,11 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
 
   useEffect(() => {
     const subscriptions = [
-      player.addListener('sourceLoad', (event) => {
-        onLoad(event.duration || player.duration || 0);
+      player.addListener('sourceLoad', () => {
+        // Source metadata and track lists can arrive before the first frame is
+        // actually ready. Publish tracks now, but restore the playhead only when
+        // ExoPlayer reports readyToPlay.
         publishTracks();
-        onBuffer(false);
       }),
       player.addListener('timeUpdate', (event) => {
         const time = Math.max(0, event.currentTime || 0);
@@ -251,7 +281,14 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
       }),
       player.addListener('statusChange', (event) => {
         if (event.status === 'loading') onBuffer(true);
-        if (event.status === 'readyToPlay') onBuffer(false);
+        if (event.status === 'readyToPlay') {
+          onBuffer(false);
+          if (readySourceRef.current !== uri) {
+            readySourceRef.current = uri;
+            onLoad(Math.max(0, player.duration || 0));
+            publishTracks();
+          }
+        }
         if (event.status === 'error') {
           onBuffer(false);
           const error = event.error as unknown as { message?: string } | undefined;
@@ -263,7 +300,7 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
       player.addListener('playToEnd', onEnd),
     ];
     return () => subscriptions.forEach((subscription) => subscription.remove());
-  }, [player, onLoad, onProgress, onBuffer, onError, onEnd, publishTracks]);
+  }, [player, uri, onLoad, onProgress, onBuffer, onError, onEnd, publishTracks]);
 
   const activeSubtitle = externalSubtitleCues.find((cue) => playbackTime >= cue.start && playbackTime <= cue.end);
 
@@ -274,6 +311,9 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
         style={StyleSheet.absoluteFill}
         nativeControls={false}
         contentFit={fitMode}
+        // TextureView resizes with the rotated React Native layout. SurfaceView can
+        // briefly retain portrait-sized video or flash black during fullscreen changes.
+        surfaceType="textureView"
         allowsPictureInPicture={false}
       />
       {subtitlesEnabled && !hasEmbeddedSubtitleTracks && activeSubtitle ? (
