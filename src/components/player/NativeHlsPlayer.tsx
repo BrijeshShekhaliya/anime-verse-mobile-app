@@ -42,8 +42,10 @@ type Props = {
 };
 
 const BUFFER_OPTIONS = {
-  minBufferForPlayback: 2.5,
-  preferredForwardBufferDuration: 50,
+  // Build a generous forward buffer so short seeks and transient network dips
+  // are absorbed before the playback position catches up.
+  minBufferForPlayback: 3.5,
+  preferredForwardBufferDuration: 60,
   prioritizeTimeOverSizeThreshold: true,
 };
 
@@ -196,16 +198,48 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
     }
   }, [player, selectedTextTrackId, subtitlesEnabled]);
 
-  useEffect(() => {
+  const applyVideoQuality = useCallback(() => {
     if (selectedQualityHeight < 0) {
+      // Clearing the explicit track restores ExoPlayer's adaptive bitrate logic.
+      player.videoTrack = null;
       player.maxResolution = null;
       return;
     }
+
+    const available = player.availableVideoTracks;
+    const readHeight = (track: (typeof available)[number]) => {
+      const value = track as unknown as {
+        size?: { width?: number; height?: number };
+        width?: number;
+        height?: number;
+      };
+      return value.size?.height || value.height || 0;
+    };
+    const exact = available.find((track) => readHeight(track) === selectedQualityHeight);
+    if (exact) {
+      // Select the requested rendition directly rather than only setting a
+      // ceiling (a ceiling alone can leave ABR playing 480p after 1080p is chosen).
+      player.videoTrack = exact;
+      const value = exact as unknown as { size?: { width?: number; height?: number }; width?: number };
+      player.maxResolution = {
+        width: value.size?.width || value.width || Math.round((selectedQualityHeight * 16) / 9),
+        height: selectedQualityHeight,
+      };
+      return;
+    }
+
+    // Some manifests expose only a subset of variants. Keep the cap as a safe
+    // fallback and let ExoPlayer choose the closest available rendition.
+    player.videoTrack = null;
     player.maxResolution = {
       width: Math.round((selectedQualityHeight * 16) / 9),
       height: selectedQualityHeight,
     };
   }, [player, selectedQualityHeight]);
+
+  useEffect(() => {
+    applyVideoQuality();
+  }, [applyVideoQuality]);
 
   const publishTracks = useCallback(() => {
     onAudioTracks(toAudioTracks(player));
@@ -213,7 +247,8 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
     setHasEmbeddedSubtitleTracks(textTracks.length > 0);
     onTextTracks(textTracks);
     onVideoTracks(toVideoLevels(player));
-  }, [player, onAudioTracks, onTextTracks, onVideoTracks]);
+    applyVideoQuality();
+  }, [player, onAudioTracks, onTextTracks, onVideoTracks, applyVideoQuality]);
 
   // Expo Video supports in-band HLS subtitles. Resolver-provided sidecar VTT/SRT
   // files use a lightweight JS cue overlay when the stream has no embedded tracks.
@@ -274,6 +309,9 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
         style={StyleSheet.absoluteFill}
         nativeControls={false}
         contentFit={fitMode}
+        // TextureView resizes with the rotated React Native layout. SurfaceView can
+        // briefly retain portrait-sized video or flash black during fullscreen changes.
+        surfaceType="textureView"
         allowsPictureInPicture={false}
       />
       {subtitlesEnabled && !hasEmbeddedSubtitleTracks && activeSubtitle ? (
