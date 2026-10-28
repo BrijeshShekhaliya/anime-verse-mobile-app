@@ -1,31 +1,35 @@
-# Native ExoPlayer + dynamic audio discovery implementation plan
+# Native Media3 player and dynamic audio discovery
 
-## Why the existing player shows only English and Japanese
+## Current architecture
+- Android HiAnime playback uses a local Expo module backed by AndroidX Media3 / ExoPlayer.
+- The existing React Native watch screen and controls remain unchanged.
+- Non-Android playback retains the Expo Video implementation as a fallback.
+- The native player reports tracks discovered by Media3 from the selected HLS master and supports in-band audio selection, subtitle selection, adaptive Auto quality, exact rendition selection when available, progress, buffering, errors, seeking and playback speed.
+- The backend resolver parses audio renditions from the selected master playlist and now attempts alternate HiAnime mirrors if the preferred mirror fails to resolve.
 
-The mobile client currently receives one resolved HLS URL for either `mode=sub` or `mode=dub`. It then lists only audio renditions embedded in that single manifest. It does not ask the resolver for all episode server variants, so dubs served as separate HiAnime servers cannot appear in the track picker.
+## Important distinction: audio tracks vs separate sources
+An HLS `#EXT-X-MEDIA:TYPE=AUDIO` rendition is an in-band/manifest audio track. Media3 can select it without resolving a new stream URL.
 
-## Required architecture
-
-1. Enumerate all provider servers for the requested episode, without a fixed language list.
-2. Resolve each viable server independently and parse HLS master playlists for `#EXT-X-MEDIA:TYPE=AUDIO` entries (NAME, LANGUAGE, GROUP-ID, DEFAULT, URI).
-3. Return a normalized episode audio-source catalogue from the API. Each entry must be labelled from provider/manifest metadata and contain a source ID, stream URL, referer, and mode. Deduplicate equivalent tracks and do not claim languages that are not actually present.
-4. The app displays the discovered catalogue. Selecting a manifest-embedded rendition calls native ExoPlayer track selection; selecting a separate server/source switches the media item while preserving playback position and play/pause state.
-5. Replace the current Expo Video view with a local Expo native module wrapping AndroidX Media3 ExoPlayer. It must report track changes, support explicit audio and video `TrackSelectionOverride`, emit playback/buffer/error/progress events, and release player resources on view disposal.
+HiAnime may also expose separate server entries for `sub` and `dub`. Those are separate sources, not guaranteed audio renditions in the same manifest. The current UI supports its existing Sub/Dub source fallback; a full per-language catalogue across every separate server still requires resolver API fields and a source-selection UI mapping. Do not label every server mirror as a language or invent languages.
 
 ## Native build constraint
+The custom Expo module is not available in stock Expo Go. Generate and build Android with `npx expo prebuild --platform android` and use a custom development/production build.
 
-A local Expo native module is not available in stock Expo Go. Android must be generated/built with `npx expo prebuild` and run using a development or production build. Do not remove the old playback implementation until the native module builds and the screen is wired to it.
+## Implemented in the current branch
+- Local Expo module registration and Android Media3 `PlayerView`.
+- HLS playback with configurable Referer, adaptive selection, a 60-second minimum buffer target, 120-second maximum buffer duration, 2.5-second startup buffer and 128 MiB target buffer budget.
+- Supported audio, text and video track discovery.
+- Audio/text `TrackSelectionOverride` and exact video rendition override when the requested height exists; Auto clears the manual video override.
+- Progress, buffer, error, ready and end events, playback speed, seek, audio focus and keep-screen-on while playing.
+- TextureView-backed rendering to help with fullscreen rotation/layout resizing.
+- Existing Expo Video implementation retained only for non-Android fallback.
+- Mobile TypeScript + Android debug build workflow and backend resolver test workflow.
 
-## Acceptance checks
-
-- No hard-coded language array; all labels come from resolver/manifest metadata.
-- Anime with only one available audio stream shows one stream, not fabricated alternatives.
-- Anime with multiple in-manifest tracks permits native rendition selection.
-- Anime with dubs on separate servers exposes those as source options and switches source safely.
-- Audio changes preserve position and don't trigger episode autoplay.
-- Android debug build and on-device playback test pass.
-- Resolver failure for one server does not prevent other available sources from appearing.
-
-## Verification status
-
-This document records the implementation contract only. It is not evidence that the native module has been implemented or that an Android build has passed.
+## Still required before calling this production-ready
+1. Successful CI TypeScript check and Android Gradle debug build.
+2. Real-device Android testing on Wi-Fi and cellular for startup, sustained 1080p playback, buffer stalls, and recovery after bandwidth drops.
+3. Verify every in-manifest audio track and all actual HiAnime Sub/Dub availability for representative episodes.
+4. Test audio changes for playhead preservation, no episode auto-advance, and no unnecessary full source reload.
+5. Test repeated fullscreen entry/exit, back-button exit, rotation during buffering, and episode changes in fullscreen.
+6. Compare mobile and website master/segment request timings for the same episode.
+7. Only after those pass, remove obsolete Android-only player code. Keep Expo Video until iOS has a tested replacement.
