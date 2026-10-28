@@ -1,11 +1,5 @@
-import React, {
-  forwardRef,
-  memo,
-  useCallback,
-  useEffect,
-  useImperativeHandle,
-} from 'react';
-import { StyleSheet } from 'react-native';
+import React, { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useState } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
 import { VideoView, useVideoPlayer, type VideoSource } from 'expo-video';
 
 export type NativePlayerTrack = {
@@ -22,16 +16,9 @@ export type NativeSubtitle = {
   default?: boolean;
 };
 
-export type NativeVideoLevel = {
-  index: number;
-  height: number;
-  width: number;
-  bitrate: number;
-};
-
-export type NativeVideoPlayerHandle = {
-  seek: (time: number) => void;
-};
+export type NativeVideoLevel = { index: number; height: number; width: number; bitrate: number };
+export type NativeVideoPlayerHandle = { seek: (time: number) => void };
+type SubtitleCue = { start: number; end: number; text: string };
 
 type Props = {
   uri: string;
@@ -42,8 +29,6 @@ type Props = {
   selectedQualityHeight: number;
   selectedAudioTrackId?: number | null;
   selectedTextTrackId?: number | null;
-  // Kept in the adapter contract for the watch screen. expo-video v58 exposes
-  // in-band HLS subtitle tracks, but does not expose a sidecar WebVTT injection API.
   subtitles: NativeSubtitle[];
   subtitlesEnabled: boolean;
   onLoad: (duration: number) => void;
@@ -61,6 +46,33 @@ const BUFFER_OPTIONS = {
   preferredForwardBufferDuration: 50,
   prioritizeTimeOverSizeThreshold: true,
 };
+
+function parseSubtitleCues(raw: string): SubtitleCue[] {
+  return raw.replace(/^\uFEFF/, '').split(/\r?\n\s*\r?\n/).flatMap((block) => {
+    const lines = block.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const timingIndex = lines.findIndex((line) => line.includes('-->'));
+    if (timingIndex < 0) return [];
+    const timing = lines[timingIndex].split('-->');
+    const toSeconds = (value: string) => {
+      const match = value.trim().match(/(?:(\d+):)?(\d{2}):(\d{2})[.,](\d{1,3})/);
+      if (!match) return NaN;
+      return Number(match[1] || 0) * 3600
+        + Number(match[2]) * 60
+        + Number(match[3])
+        + Number((match[4] + '00').slice(0, 3)) / 1000;
+    };
+    const start = toSeconds(timing[0]);
+    const end = toSeconds(timing[1]);
+    const text = lines.slice(timingIndex + 1).join(' ')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .trim();
+    return Number.isFinite(start) && Number.isFinite(end) && end > start && text
+      ? [{ start, end, text }]
+      : [];
+  });
+}
 
 function toAudioTracks(player: ReturnType<typeof useVideoPlayer>): NativePlayerTrack[] {
   return player.availableAudioTracks.map((track, index) => ({
@@ -82,8 +94,6 @@ function toTextTracks(player: ReturnType<typeof useVideoPlayer>): NativePlayerTr
 
 function toVideoLevels(player: ReturnType<typeof useVideoPlayer>): NativeVideoLevel[] {
   return player.availableVideoTracks.map((track, index) => {
-    // Track metadata differs slightly between platform implementations. Read it
-    // defensively so a missing bitrate/size never breaks playback.
     const value = track as unknown as {
       size?: { width?: number; height?: number };
       width?: number;
@@ -108,6 +118,7 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
   selectedQualityHeight,
   selectedAudioTrackId = null,
   selectedTextTrackId = null,
+  subtitles,
   subtitlesEnabled,
   onLoad,
   onProgress,
@@ -118,6 +129,10 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
   onEnd,
   onError,
 }, forwardedRef) {
+  const [playbackTime, setPlaybackTime] = useState(0);
+  const [hasEmbeddedSubtitleTracks, setHasEmbeddedSubtitleTracks] = useState(false);
+  const [externalSubtitleCues, setExternalSubtitleCues] = useState<SubtitleCue[]>([]);
+
   const player = useVideoPlayer(null, (instance) => {
     instance.timeUpdateEventInterval = 0.4;
     instance.bufferOptions = BUFFER_OPTIONS;
@@ -126,22 +141,17 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
   });
 
   useImperativeHandle(forwardedRef, () => ({
-    seek: (time: number) => {
-      player.currentTime = Math.max(0, time);
-    },
+    seek: (time: number) => { player.currentTime = Math.max(0, time); },
   }), [player]);
 
-  const source: VideoSource | null = uri
-    ? {
-        uri,
-        contentType: 'hls',
-        ...(referer ? { headers: { Referer: referer, referer } } : {}),
-        useCaching: false,
-      }
-    : null;
+  const source: VideoSource | null = uri ? {
+    uri,
+    contentType: 'hls',
+    ...(referer ? { headers: { Referer: referer, referer } } : {}),
+    useCaching: false,
+  } : null;
 
-  // Keep one VideoPlayer instance alive across source, orientation and control
-  // changes. Replacing its source avoids remounting the native rendering surface.
+  // Keep one VideoPlayer instance alive across source, orientation and control changes.
   useEffect(() => {
     if (!source) return;
     let active = true;
@@ -155,9 +165,7 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
       onBuffer(false);
       onError(error instanceof Error ? error.message : 'Unable to load the HLS stream');
     });
-    return () => {
-      active = false;
-    };
+    return () => { active = false; };
   }, [player, uri, referer, onBuffer, onError]);
 
   useEffect(() => {
@@ -191,8 +199,6 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
       player.maxResolution = null;
       return;
     }
-    // expo-video exposes an adaptive resolution cap rather than selecting a
-    // platform-specific track index.
     player.maxResolution = {
       width: Math.round((selectedQualityHeight * 16) / 9),
       height: selectedQualityHeight,
@@ -201,9 +207,33 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
 
   const publishTracks = useCallback(() => {
     onAudioTracks(toAudioTracks(player));
-    onTextTracks(toTextTracks(player));
+    const textTracks = toTextTracks(player);
+    setHasEmbeddedSubtitleTracks(textTracks.length > 0);
+    onTextTracks(textTracks);
     onVideoTracks(toVideoLevels(player));
   }, [player, onAudioTracks, onTextTracks, onVideoTracks]);
+
+  // Expo Video supports in-band HLS subtitles. Resolver-provided sidecar VTT/SRT
+  // files use a lightweight JS cue overlay when the stream has no embedded tracks.
+  useEffect(() => {
+    if (!subtitlesEnabled || hasEmbeddedSubtitleTracks || subtitles.length === 0) {
+      setExternalSubtitleCues([]);
+      return;
+    }
+    const selected = subtitles.find((item) => item.default)
+      || subtitles.find((item) => /english|en/i.test(item.label + ' ' + item.lang))
+      || subtitles[0];
+    let active = true;
+    setExternalSubtitleCues([]);
+    fetch(selected.src, { headers: referer ? { Referer: referer, referer } : undefined })
+      .then((response) => {
+        if (!response.ok) throw new Error('Subtitle request failed');
+        return response.text();
+      })
+      .then((raw) => { if (active) setExternalSubtitleCues(parseSubtitleCues(raw)); })
+      .catch(() => { if (active) setExternalSubtitleCues([]); });
+    return () => { active = false; };
+  }, [subtitles, subtitlesEnabled, hasEmbeddedSubtitleTracks, referer]);
 
   useEffect(() => {
     const subscriptions = [
@@ -213,11 +243,9 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
         onBuffer(false);
       }),
       player.addListener('timeUpdate', (event) => {
-        onProgress(
-          Math.max(0, event.currentTime || 0),
-          Math.max(0, player.duration || 0),
-          Math.max(0, event.bufferedPosition || 0),
-        );
+        const time = Math.max(0, event.currentTime || 0);
+        setPlaybackTime(time);
+        onProgress(time, Math.max(0, player.duration || 0), Math.max(0, event.bufferedPosition || 0));
       }),
       player.addListener('statusChange', (event) => {
         if (event.status === 'loading') onBuffer(true);
@@ -225,7 +253,7 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
         if (event.status === 'error') {
           onBuffer(false);
           const error = event.error as unknown as { message?: string } | undefined;
-          onError(error?.message || 'Native HLS playback failed');
+          onError(error?.message || 'HLS playback failed');
         }
       }),
       player.addListener('availableAudioTracksChange', publishTracks),
@@ -236,15 +264,46 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
     return () => subscriptions.forEach((subscription) => subscription.remove());
   }, [player, onLoad, onProgress, onBuffer, onError, onEnd, publishTracks]);
 
+  const activeSubtitle = externalSubtitleCues.find((cue) => playbackTime >= cue.start && playbackTime <= cue.end);
+
   return (
-    <VideoView
-      player={player}
-      style={StyleSheet.absoluteFill}
-      nativeControls={false}
-      contentFit={fitMode}
-      allowsPictureInPicture={false}
-    />
+    <View style={StyleSheet.absoluteFill}>
+      <VideoView
+        player={player}
+        style={StyleSheet.absoluteFill}
+        nativeControls={false}
+        contentFit={fitMode}
+        allowsPictureInPicture={false}
+      />
+      {subtitlesEnabled && !hasEmbeddedSubtitleTracks && activeSubtitle ? (
+        <View pointerEvents="none" style={styles.subtitleContainer}>
+          <Text style={styles.subtitleText}>{activeSubtitle.text}</Text>
+        </View>
+      ) : null}
+    </View>
   );
+});
+
+const styles = StyleSheet.create({
+  subtitleContainer: {
+    position: 'absolute',
+    left: 18,
+    right: 18,
+    bottom: 54,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 2,
+  },
+  subtitleText: {
+    color: '#FFFFFF',
+    backgroundColor: 'rgba(0, 0, 0, 0.72)',
+    fontSize: 17,
+    lineHeight: 24,
+    textAlign: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    overflow: 'hidden',
+  },
 });
 
 export default memo(NativeHlsPlayer);
