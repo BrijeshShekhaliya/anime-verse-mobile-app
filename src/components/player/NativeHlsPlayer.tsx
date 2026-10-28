@@ -79,7 +79,7 @@ function toAudioTracks(player: ReturnType<typeof useVideoPlayer>): NativePlayerT
     id: index,
     name: track.name || track.label || track.language || `Audio ${index + 1}`,
     lang: track.language || '',
-    type: 'audio',
+    type: 'audio' as const,
   }));
 }
 
@@ -88,7 +88,7 @@ function toTextTracks(player: ReturnType<typeof useVideoPlayer>): NativePlayerTr
     id: index,
     name: track.name || track.label || track.language || `Subtitle ${index + 1}`,
     lang: track.language || '',
-    type: 'text',
+    type: 'text' as const,
   }));
 }
 
