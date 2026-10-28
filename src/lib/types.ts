@@ -117,6 +117,17 @@ export type SubtitleTrack = {
   default?: boolean;
 };
 
+export type StreamAudioTrack = {
+  id: string;
+  name: string;
+  language: string;
+  groupId: string | null;
+  uri: string | null;
+  isDefault: boolean;
+  isAutoselect: boolean;
+  channels: string | null;
+};
+
 export type StreamData = {
   success: boolean;
   source: string;
@@ -127,5 +138,7 @@ export type StreamData = {
   rawMasterUrl?: string;
   referer?: string;
   subtitles?: SubtitleTrack[];
+  // Dynamic in-manifest audio renditions discovered by the resolver.
+  audioTracks?: StreamAudioTrack[];
 };
 
