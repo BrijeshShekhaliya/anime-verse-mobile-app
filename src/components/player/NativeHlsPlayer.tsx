@@ -7,7 +7,9 @@ import Video, {
   type OnProgressData,
   type OnTextTracksData,
   type SelectedTrack,
+  SelectedTrackType,
   type SelectedVideoTrack,
+  SelectedVideoTrackType,
   type TextTrackType,
   type OnVideoTracksData,
   type ISO639_1,
@@ -98,20 +100,22 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
 
   const selectedVideoTrack: SelectedVideoTrack = useMemo(
     () => selectedQualityHeight < 0
-      ? { type: 'auto' }
-      : { type: 'resolution', value: selectedQualityHeight },
+      ? { type: SelectedVideoTrackType.AUTO }
+      : { type: SelectedVideoTrackType.RESOLUTION, value: selectedQualityHeight },
     [selectedQualityHeight],
   );
   const selectedAudioTrack: SelectedTrack = useMemo(
-    () => selectedAudioTrackId === null ? { type: 'system' } : { type: 'index', value: selectedAudioTrackId },
+    () => selectedAudioTrackId === null
+      ? { type: SelectedTrackType.SYSTEM }
+      : { type: SelectedTrackType.INDEX, value: selectedAudioTrackId },
     [selectedAudioTrackId],
   );
   const selectedTextTrack: SelectedTrack = useMemo(
     () => !subtitlesEnabled
-      ? { type: 'disabled' }
+      ? { type: SelectedTrackType.DISABLED }
       : selectedTextTrackId === null
-        ? { type: 'system' }
-        : { type: 'index', value: selectedTextTrackId },
+        ? { type: SelectedTrackType.SYSTEM }
+        : { type: SelectedTrackType.INDEX, value: selectedTextTrackId },
     [subtitlesEnabled, selectedTextTrackId],
   );
 
@@ -170,7 +174,7 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
       source={source}
       style={StyleSheet.absoluteFill}
       paused={paused}
-      resizeMode={fitMode}
+      resizeMode={fitMode === 'fill' ? 'stretch' : fitMode}
       rate={playbackRate}
       progressUpdateInterval={400}
       selectedVideoTrack={selectedVideoTrack}
