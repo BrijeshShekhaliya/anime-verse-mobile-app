@@ -1,6 +1,6 @@
 import React, { forwardRef, memo, useCallback, useImperativeHandle, useRef, useState } from 'react';
 import { Platform, StyleSheet, Text, View } from 'react-native';
-import { NativeMedia3View, type NativeMedia3ViewRef, type Media3Track, type Media3Level } from '../../../modules/native-media3-player/src';
+import { NativeMedia3View, type NativeMedia3ViewRef, type Media3Track, type Media3Level } from 'native-media3-player';
 import ExpoVideoHlsPlayer, { type NativePlayerTrack, type NativeSubtitle, type NativeVideoLevel, type NativeVideoPlayerHandle } from './ExpoVideoHlsPlayer';
 
 type Props = {
