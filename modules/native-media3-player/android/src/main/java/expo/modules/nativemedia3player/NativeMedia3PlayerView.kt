@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
 import android.view.LayoutInflater
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -101,11 +102,16 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
             }
           }
           override fun onTracksChanged(tracks: Tracks) { publishTracks(tracks) }
+          override fun onIsPlayingChanged(isPlaying: Boolean) { playerView.keepScreenOn = isPlaying }
           override fun onPlayerError(error: PlaybackException) {
             emit("onBuffer", mapOf("buffering" to false))
             emit("onError", mapOf("message" to (error.message ?: "Media3 playback failed")))
           }
         })
+        exo.setAudioAttributes(
+          AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
+          true,
+        )
         exo.playWhenReady = !paused
         exo.setPlaybackSpeed(playbackRate)
       }
