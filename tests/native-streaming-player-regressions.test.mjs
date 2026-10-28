@@ -63,7 +63,7 @@ describe('Native and fallback streaming player regressions', () => {
     assert.match(player, /headers: \{ Referer: referer, referer \}/);
     assert.match(player, /preferredForwardBufferDuration: 60/);
     assert.match(player, /surfaceType="textureView"/);
-    assert.match(player, /maxBufferBytes: 60 \* 1024 \* 1024/);
+    assert.match(player, /maxBufferBytes: 128 \* 1024 \* 1024/);
     assert.doesNotMatch(player, /player\.videoTrack\s*=/);
     assert.match(route, /setResolvingHls\(false\);\s*setIsBuffering\(true\);\s*setMountedStream\(resolved\)/);
     assert.match(route, /nativeSeekTargetRef\.current = target/);
