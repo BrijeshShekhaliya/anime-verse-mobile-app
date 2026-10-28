@@ -40,6 +40,7 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
   private val trackSelector = DefaultTrackSelector(context)
   private val loadControl = DefaultLoadControl.Builder()
     .setBufferDurationsMs(60_000, 120_000, 2_500, 5_000)
+    .setTargetBufferBytes(128 * 1024 * 1024)
     .setPrioritizeTimeOverSizeThresholds(true)
     .build()
   private val playerView = PlayerView(context).apply {
@@ -132,7 +133,15 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     applyTrackPreferences()
   }
 
-  fun setReferer(value: String?) { referer = value }
+  fun setReferer(value: String?) {
+    if (referer == value) return
+    referer = value
+    val uri = currentUri
+    if (!uri.isNullOrBlank()) {
+      currentUri = null
+      setUri(uri)
+    }
+  }
   fun setPaused(value: Boolean) { paused = value; player?.playWhenReady = !value }
   fun setPlaybackRate(value: Float) {
     playbackRate = value.coerceIn(0.25f, 3f)
