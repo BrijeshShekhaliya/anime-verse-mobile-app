@@ -1,0 +1,81 @@
+// Shapes returned by the AnimeVerse API (same server as the website).
+export type Languages = {
+  audio: string[];
+  subtitles: string[];
+  sub: boolean;
+  dub: 'full' | 'partial' | null;
+};
+
+export type NextEpisode = { episode: number; airingAt: number } | null;
+
+export type Anime = {
+  id: string;
+  malId?: number | null;
+  title: string;
+  titleRomaji?: string | null;
+  titleJapanese?: string | null;
+  image?: string | null;
+  image2x?: string | null;
+  banner?: string | null;
+  backdrop?: string | null;
+  logo?: string | null;
+  logoAspect?: number | null;
+  synopsis?: string | null;
+  score?: number | null;
+  scoredBy?: number | null;
+  rank?: number | null;
+  members?: number | null;
+  episodes?: number | null;
+  status?: string | null;
+  airing?: boolean;
+  type?: string | null;
+  season?: string | null;
+  year?: number | null;
+  genres?: string[];
+  studios?: string[];
+  duration?: string | null;
+  trailer?: string | null;
+  nextEpisode?: NextEpisode;
+  languages?: Languages;
+  seasonCount?: number | null;
+  episodeCount?: number | null;
+  tmdbStatus?: string | null;
+  tmdbPoster?: string | null;
+  contentRating?: string | null;
+  factsPending?: boolean;
+  source?: string;
+};
+
+export type Relation = {
+  relation: string;
+  id: string | null;
+  kind: string;
+  title: string;
+  image: string | null;
+  format: string | null;
+  year: number | null;
+};
+
+export type AnimeDetail = Anime & {
+  relations?: Relation[];
+  links?: { name: string; url: string; type: string }[];
+  streaming?: { name: string; url: string }[];
+  scoreDistribution?: { score: number; amount: number }[];
+  statusDistribution?: { status: string; amount: number }[];
+  malUrl?: string | null;
+  anilistUrl?: string | null;
+};
+
+export type Character = { name: string; image?: string | null; role: string; voiceActor?: string | null };
+
+export type Home = {
+  spotlight: Anime[];
+  trending: Anime[];
+  seasonNow: Anime[];
+  topRated: Anime[];
+  popular: Anime[];
+  upcoming: Anime[];
+  movies: Anime[];
+};
+
+export type SearchResult = { items: Anime[]; hasNext: boolean };
