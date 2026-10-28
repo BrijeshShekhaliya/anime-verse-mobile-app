@@ -591,11 +591,8 @@ export default function WatchScreen() {
         audioSwitchRequestRef.current += 1;
         setIsSwitchingAudio(false);
         setCurrentAudioTrackId(selection.trackId);
-        sendPlayerCommand(`
-          if (window._hls) {
-            window._hls.audioTrack = ${selection.trackId};
-          }
-        `);
+        setNativeAudioTrackId(selection.trackId);
+        if (server === 'vidrift') sendPlayerCommand(`if(window._hls)window._hls.audioTrack=${selection.trackId};`);
         const track = availableAudioTracks.find((t) => t.id === selection.trackId);
         if (track) showBadge(`Audio: ${track.name || track.lang}`);
         return;
@@ -635,12 +632,16 @@ export default function WatchScreen() {
           throw new Error(`Could not load ${targetMode.toUpperCase()} stream`);
         }
 
-        const capturedTime = currentTimeRef.current;
-        const capturedPlaying = isPlayingRef.current;
-        const capturedSpeed = playbackSpeedRef.current;
-        const capturedQuality = selectedQualityRef.current;
-        const dispatched = applyStreamInPlace(resolved, requestedEpisodeKey, capturedTime, capturedPlaying, capturedSpeed, capturedQuality);
-        if (!dispatched) throw new Error('Player is still preparing. Please try the audio change again.');
+        const capturedTime = nativePlayerTimeRef.current || currentTimeRef.current;
+        if (server === 'vidrift') {
+          const dispatched = applyStreamInPlace(resolved, requestedEpisodeKey, capturedTime, isPlayingRef.current, playbackSpeedRef.current, selectedQualityRef.current);
+          if (!dispatched) throw new Error('Player is still preparing. Please try again.');
+        } else {
+          const switchKey = `${requestedEpisodeKey}:${targetMode}:${resolved.streamUrl}`;
+          setResumeAfterSourceChange({ key: switchKey, time: capturedTime, shouldPlay: isPlayingRef.current });
+          mountedStreamEpisodeKeyRef.current = requestedEpisodeKey;
+          setMountedStream(resolved);
+        }
 
         setCurrentLang(targetMode);
         currentLangRef.current = targetMode;
@@ -669,51 +670,21 @@ export default function WatchScreen() {
     ],
   );
 
-  // Switch Video Resolution (1080p, 720p, 480p, Auto) dynamically in Hls.js
-  const handleSelectQuality = useCallback(
-    (targetHeight: number) => {
-      setSelectedQualityHeight(targetHeight);
-      selectedQualityRef.current = targetHeight;
-      sendPlayerCommand(`
-        if (window._hls) {
-          if (${targetHeight} === -1) {
-            window._hls.currentLevel = -1; // Auto
-          } else {
-            var found = -1;
-            for (var i = 0; i < window._hls.levels.length; i++) {
-              if (window._hls.levels[i].height === ${targetHeight}) {
-                found = i;
-                break;
-              }
-            }
-            if (found !== -1) {
-              window._hls.currentLevel = found;
-            } else {
-              window._hls.currentLevel = window._hls.levels.length - 1;
-            }
-          }
-        }
-      `);
-      showBadge(targetHeight === -1 ? 'Quality: Auto' : `Quality: ${targetHeight}p`);
-    },
-    [sendPlayerCommand, showBadge],
-  );
+  const handleSelectQuality = useCallback((targetHeight: number) => {
+    setSelectedQualityHeight(targetHeight);
+    selectedQualityRef.current = targetHeight;
+    if (server === 'vidrift') sendPlayerCommand(`if(window._hls)window._hls.currentLevel=${targetHeight};`);
+    showBadge(targetHeight === -1 ? 'Quality: Auto' : `Quality: ${targetHeight}p`);
+  }, [server, sendPlayerCommand, showBadge]);
 
   const handleToggleSubtitles = useCallback(
     (enable: boolean) => {
       setSubtitlesEnabled(enable);
       subtitlesEnabledRef.current = enable;
-      sendPlayerCommand(`
-        var v = document.getElementById('player') || document.querySelector('video');
-        if (v && v.textTracks) {
-          for (var i = 0; i < v.textTracks.length; i++) {
-            v.textTracks[i].mode = '${enable ? 'showing' : 'hidden'}';
-          }
-        }
-      `);
+      if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v&&v.textTracks)for(var i=0;i<v.textTracks.length;i++)v.textTracks[i].mode='${enable ? 'showing' : 'hidden'}';`);
       showBadge(enable ? 'Subtitles On' : 'Subtitles Off');
     },
-    [sendPlayerCommand, showBadge],
+    [server, sendPlayerCommand, showBadge],
   );
 
   const handleNextEpisode = useCallback(() => {
