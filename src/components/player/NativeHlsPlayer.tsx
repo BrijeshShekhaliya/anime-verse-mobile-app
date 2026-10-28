@@ -27,15 +27,15 @@ type Props = {
 type Cue = { start: number; end: number; text: string };
 
 function parseCues(raw: string): Cue[] {
-  const normalized = raw.replace(/^\\uFEFF/, '').replace(/\\r/g, '');
-  const blocks = normalized.split(/\\n\\s*\\n/);
+  const normalized = raw.replace(/^\uFEFF/, '').replace(/\r/g, '');
+  const blocks = normalized.split(/\n\s*\n/);
   const cues: Cue[] = [];
   const seconds = (v: string) => {
-    const m = v.trim().match(/(?:(\\d+):)?(\\d{2}):(\\d{2})[.,](\\d{1,3})/);
+    const m = v.trim().match(/(?:(\d+):)?(\d{2}):(\d{2})[.,](\d{1,3})/);
     return m ? Number(m[1] || 0) * 3600 + Number(m[2]) * 60 + Number(m[3]) + Number((m[4] + '00').slice(0, 3)) / 1000 : NaN;
   };
   for (const block of blocks) {
-    const lines = block.split('\\n').map((x) => x.trim()).filter(Boolean);
+    const lines = block.split('\n').map((x) => x.trim()).filter(Boolean);
     const at = lines.findIndex((x) => x.includes('-->'));
     if (at < 0) continue;
     const [a, b] = lines[at].split('-->');
