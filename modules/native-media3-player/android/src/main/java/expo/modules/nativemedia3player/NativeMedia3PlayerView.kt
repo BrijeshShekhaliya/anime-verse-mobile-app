@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
+import android.view.LayoutInflater
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -43,13 +44,8 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     .setTargetBufferBytes(128 * 1024 * 1024)
     .setPrioritizeTimeOverSizeThresholds(true)
     .build()
-  private val playerView = PlayerView(context).apply {
-    useController = false
-    useTextureView = true
-    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
-    setShutterBackgroundColor(android.graphics.Color.BLACK)
-  }
+  private val playerView: PlayerView = LayoutInflater.from(context)
+    .inflate(R.layout.native_media3_player_view, this, false) as PlayerView
   private var player: ExoPlayer? = null
   private var desiredUri: String? = null
   private var currentUri: String? = null
@@ -69,6 +65,8 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
   private val videoTracks = mutableListOf<Triple<TrackGroup, Int, Int>>()
 
   init {
+    playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+    playerView.setShutterBackgroundColor(android.graphics.Color.BLACK)
     addView(playerView, ViewGroup.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
     ensurePlayer()
   }
