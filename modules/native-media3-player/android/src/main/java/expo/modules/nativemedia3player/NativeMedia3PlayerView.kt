@@ -22,11 +22,20 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.views.ExpoView
+import expo.modules.kotlin.viewevent.EventDispatcher
 import kotlin.math.max
 import kotlin.math.roundToInt
 
 @OptIn(UnstableApi::class)
 class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
+  val onLoad by EventDispatcher()
+  val onProgress by EventDispatcher()
+  val onBuffer by EventDispatcher()
+  val onAudioTracks by EventDispatcher()
+  val onTextTracks by EventDispatcher()
+  val onVideoTracks by EventDispatcher()
+  val onEnd by EventDispatcher()
+  val onError by EventDispatcher()
   private val mainHandler = Handler(Looper.getMainLooper())
   private val trackSelector = DefaultTrackSelector(context)
   private val loadControl = DefaultLoadControl.Builder()
