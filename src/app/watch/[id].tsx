@@ -93,7 +93,9 @@ export default function WatchScreen() {
   const activeWidth = layoutDimensions.width || width;
   const activeHeight = layoutDimensions.height || height;
   const isPhysicalLandscape = activeWidth > activeHeight;
-  const isFullscreenView = isFullscreen || isPhysicalLandscape;
+  // Do not expand the player to the full portrait viewport while the OS is
+  // still rotating. Fullscreen presentation follows measured landscape layout.
+  const isFullscreenView = isPhysicalLandscape;
 
   const [currentSeason, setCurrentSeason] = useState<number>(Math.max(1, parseInt(paramSeason || '1', 10) || 1));
   const [currentEp, setCurrentEp] = useState<number>(Math.max(1, parseInt(paramEp || '1', 10) || 1));
@@ -217,14 +219,14 @@ export default function WatchScreen() {
   }, []);
 
   const enterFullscreen = useCallback(() => {
+    // Request rotation first; the fullscreen layout/status bar follow measured
+    // landscape geometry instead of flashing a portrait-sized fullscreen view.
     setIsFullscreen(true);
-    RNStatusBar.setHidden(true, 'none');
     enterLandscape();
   }, [enterLandscape]);
 
   const exitFullscreen = useCallback(() => {
     setIsFullscreen(false);
-    RNStatusBar.setHidden(false, 'none');
     restoreOrientation();
   }, [restoreOrientation]);
 
@@ -245,10 +247,8 @@ export default function WatchScreen() {
         orientation === ScreenOrientation.Orientation.LANDSCAPE_RIGHT;
       if (isLand && !isFullscreen) {
         setIsFullscreen(true);
-        RNStatusBar.setHidden(true, 'none');
       } else if (!isLand && isFullscreen) {
         setIsFullscreen(false);
-        RNStatusBar.setHidden(false, 'none');
       }
     });
     return () => {
