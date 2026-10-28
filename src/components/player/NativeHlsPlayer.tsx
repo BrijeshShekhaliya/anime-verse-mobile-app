@@ -1,9 +1,11 @@
 import React, { forwardRef, memo, useCallback, useMemo } from 'react';
 import { StyleSheet } from 'react-native';
 import Video, {
+  type OnAudioTracksData,
   type OnBufferData,
   type OnLoadData,
   type OnProgressData,
+  type OnTextTracksData,
   type SelectedTrack,
   type SelectedVideoTrack,
   type TextTrackType,
@@ -27,7 +29,6 @@ export type NativeSubtitle = {
 type Props = {
   uri: string;
   referer?: string;
-  startAtSeconds?: number;
   paused: boolean;
   playbackRate: number;
   fitMode: 'contain' | 'cover' | 'fill';
@@ -59,7 +60,6 @@ const HLS_BUFFER_CONFIG = {
 const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
   uri,
   referer,
-  startAtSeconds = 0,
   paused,
   playbackRate,
   fitMode,
@@ -97,7 +97,7 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
     [selectedQualityHeight],
   );
   const selectedAudioTrack: SelectedTrack = useMemo(
-    () => selectedAudioTrackId === null ? { type: 'auto' } : { type: 'index', value: selectedAudioTrackId },
+    () => selectedAudioTrackId === null ? { type: 'system' } : { type: 'index', value: selectedAudioTrackId },
     [selectedAudioTrackId],
   );
   const selectedTextTrack: SelectedTrack = useMemo(
@@ -125,7 +125,7 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
     onBuffer(Boolean(event.isBuffering));
   }, [onBuffer]);
 
-  const handleAudioTracks = useCallback((event: { audioTracks: { index: number; title?: string; language?: string }[] }) => {
+  const handleAudioTracks = useCallback((event: OnAudioTracksData) => {
     onAudioTracks((event.audioTracks || []).map((track) => ({
       id: track.index,
       name: track.title || track.language || `Audio ${track.index + 1}`,
@@ -134,7 +134,7 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
     })));
   }, [onAudioTracks]);
 
-  const handleTextTracks = useCallback((event: { textTracks: { index: number; title?: string; language?: string }[] }) => {
+  const handleTextTracks = useCallback((event: OnTextTracksData) => {
     onTextTracks((event.textTracks || []).map((track) => ({
       id: track.index,
       name: track.title || track.language || `Subtitle ${track.index + 1}`,
@@ -158,7 +158,6 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
       selectedVideoTrack={selectedVideoTrack}
       selectedAudioTrack={selectedAudioTrack}
       selectedTextTrack={selectedTextTrack}
-      startAtTime={startAtSeconds > 0 ? startAtSeconds : undefined}
       onLoad={handleLoad}
       onProgress={handleProgress}
       onBuffer={handleBuffer}
