@@ -51,7 +51,9 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     setShutterBackgroundColor(android.graphics.Color.BLACK)
   }
   private var player: ExoPlayer? = null
+  private var desiredUri: String? = null
   private var currentUri: String? = null
+  private var loadedReferer: String? = null
   private var referer: String? = null
   private var paused = false
   private var playbackRate = 1f
@@ -113,8 +115,14 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
   }
 
   fun setUri(value: String?) {
-    if (value.isNullOrBlank() || value == currentUri) return
+    desiredUri = value
+  }
+
+  fun loadIfNeeded() {
+    val value = desiredUri
+    if (value.isNullOrBlank() || (value == currentUri && referer == loadedReferer)) return
     currentUri = value
+    loadedReferer = referer
     lastReadyUri = null
     lastTracksSignature = ""
     emit("onBuffer", mapOf("buffering" to true))
@@ -143,13 +151,7 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
   }
 
   fun setReferer(value: String?) {
-    if (referer == value) return
     referer = value
-    val uri = currentUri
-    if (!uri.isNullOrBlank()) {
-      currentUri = null
-      setUri(uri)
-    }
   }
   fun setPaused(value: Boolean) { paused = value; player?.playWhenReady = !value }
   fun setPlaybackRate(value: Float) {
