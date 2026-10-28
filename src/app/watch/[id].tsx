@@ -23,6 +23,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView, type WebViewProps } from 'react-native-webview';
+import NativeHlsPlayer, { type NativePlayerTrack, type NativeVideoLevel } from '@/components/player/NativeHlsPlayer';
 import { EpisodeBadges } from '@/components/Badges';
 import { BottomSheet } from '@/components/BottomSheet';
 import { Icon } from '@/components/Icon';
@@ -143,6 +144,12 @@ export default function WatchScreen() {
   const [dislikeCount, setDislikeCount] = useState<number>(18);
 
   const webViewRef = useRef<any>(null);
+  const nativeVideoRef = useRef<any>(null);
+  const nativePlayerTimeRef = useRef(0);
+  const nativeSourceKeyRef = useRef<string | null>(null);
+  const [nativeAudioTrackId, setNativeAudioTrackId] = useState<number | null>(null);
+  const [nativeTextTrackId, setNativeTextTrackId] = useState<number | null>(null);
+  const [resumeAfterSourceChange, setResumeAfterSourceChange] = useState<{ key: string; time: number; shouldPlay: boolean } | null>(null);
   const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const advisoryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -152,21 +159,8 @@ export default function WatchScreen() {
   const recordedEpRef = useRef<string | null>(null);
   const progressBarWidthRef = useRef<number>(width);
 
-  // Keep the Hianime document stable for the lifetime of this watch screen.
-  // Changing WebView source.html reloads the document and interrupts playback,
-  // so later episode/language changes are applied through window.switchStream.
-  const initialDocumentStreamRef = useRef<StreamData | null>(null);
-  const initialDocumentEpisodeKeyRef = useRef<string | null>(null);
   const mountedStreamEpisodeKeyRef = useRef<string | null>(null);
-  const mountedStreamRef = useRef<StreamData | null>(mountedStream);
-  const playerDocumentReadyRef = useRef(false);
-  const activePlayerStreamKeyRef = useRef<string | null>(null);
   const audioSwitchRequestRef = useRef(0);
-  mountedStreamRef.current = mountedStream;
-  if (!initialDocumentStreamRef.current && mountedStream?.streamUrl) {
-    initialDocumentStreamRef.current = mountedStream;
-    initialDocumentEpisodeKeyRef.current = `${currentSeason}:${currentEp}`;
-  }
 
   // Live state refs to capture values synchronously during stream switches
   const currentTimeRef = useRef<number>(0);
@@ -534,83 +528,58 @@ export default function WatchScreen() {
     };
   }, [resetHideTimer]);
 
-  // Send JavaScript command into WebView
+  // JavaScript injection is only used for the VidRift iframe fallback.
   const sendPlayerCommand = useCallback((code: string) => {
-    webViewRef.current?.injectJavaScript(`(function(){ ${code} })(); true;`);
+    if (server === 'vidrift') webViewRef.current?.injectJavaScript(`(function(){ ${code} })(); true;`);
+  }, [server]);
+  const seekNativePlayer = useCallback((time: number) => {
+    const target = Math.max(0, time);
+    nativeVideoRef.current?.seek?.(target);
+    nativePlayerTimeRef.current = target;
+    currentTimeRef.current = target;
   }, []);
 
   // Controls Actions
   const handleTogglePlay = useCallback(() => {
-    sendPlayerCommand(
-      "var v = document.getElementById('player') || document.querySelector('video'); if (v) { if (v.paused) { v.play(); } else { v.pause(); } }",
-    );
-    setIsPlaying((prev) => !prev);
+    setIsPlaying((prev) => { isPlayingRef.current = !prev; return !prev; });
     resetHideTimer();
-  }, [sendPlayerCommand, resetHideTimer]);
+  }, [resetHideTimer]);
 
   const handleRewind10 = useCallback(() => {
-    sendPlayerCommand(
-      "var v = document.getElementById('player') || document.querySelector('video'); if (v) { v.currentTime = Math.max(0, v.currentTime - 10); }",
-    );
-    setCurrentTime((t) => Math.max(0, t - 10));
-    resetHideTimer();
-  }, [sendPlayerCommand, resetHideTimer]);
+    const next = Math.max(0, nativePlayerTimeRef.current - 10);
+    if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.currentTime=${next};`); else seekNativePlayer(next);
+    setCurrentTime(next); resetHideTimer();
+  }, [server, sendPlayerCommand, seekNativePlayer, resetHideTimer]);
 
   const handleForward10 = useCallback(() => {
-    sendPlayerCommand(
-      "var v = document.getElementById('player') || document.querySelector('video'); if (v) { v.currentTime = v.currentTime + 10; }",
-    );
-    setCurrentTime((t) => t + 10);
-    resetHideTimer();
-  }, [sendPlayerCommand, resetHideTimer]);
+    const next = Math.min(duration || Number.MAX_SAFE_INTEGER, nativePlayerTimeRef.current + 10);
+    if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.currentTime=${next};`); else seekNativePlayer(next);
+    setCurrentTime(next); resetHideTimer();
+  }, [duration, server, sendPlayerCommand, seekNativePlayer, resetHideTimer]);
 
   const handleSeek = useCallback(
     (targetSec: number) => {
       const clamped = Math.max(0, Math.min(duration, targetSec));
       setCurrentTime(clamped);
-      sendPlayerCommand(
-        `var v = document.getElementById('player') || document.querySelector('video'); if (v) { v.currentTime = ${clamped}; }`,
-      );
+      if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.currentTime=${clamped};`); else seekNativePlayer(clamped);
       resetHideTimer();
     },
-    [duration, sendPlayerCommand, resetHideTimer],
+    [duration, server, sendPlayerCommand, seekNativePlayer, resetHideTimer],
   );
 
-  const handleSetSpeed = useCallback(
-    (speed: number) => {
-      setPlaybackSpeed(speed);
-      playbackSpeedRef.current = speed;
-      sendPlayerCommand(
-        `var v = document.getElementById('player') || document.querySelector('video'); if (v) { v.playbackRate = ${speed}; }`,
-      );
-    },
-    [sendPlayerCommand],
-  );
+  const handleSetSpeed = useCallback((speed: number) => {
+    setPlaybackSpeed(speed); playbackSpeedRef.current = speed;
+    if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.playbackRate=${speed};`);
+  }, [server, sendPlayerCommand]);
 
-  // Apply a resolved stream to the existing player document without changing
-  // the WebView source. The key prevents repeated renders from restarting HLS.
-  const applyStreamInPlace = useCallback(
-    (stream: StreamData, episodeKey: string, resumeTime = 0, shouldPlay = true, speed = playbackSpeedRef.current, quality = selectedQualityRef.current) => {
-      if (!stream?.streamUrl || !playerDocumentReadyRef.current) return false;
-      const streamKey = `${episodeKey}:${stream.mode}:${stream.streamUrl}`;
-      if (activePlayerStreamKeyRef.current === streamKey) return true;
-      const subtitles = JSON.stringify(
-        (stream.subtitles || []).map((sub, idx) => ({
-          label: sub.label || sub.lang || 'English',
-          lang: sub.lang || 'en',
-          src: toFullUrl(sub.src),
-          default: sub.default || idx === 0,
-        })),
-      );
-      const url = toFullUrl(stream.streamUrl);
-      sendPlayerCommand(
-        `if (window.switchStream) { window.switchStream(${JSON.stringify(url)}, ${subtitles}, ${resumeTime}, ${shouldPlay}, ${speed}, ${quality}, ${JSON.stringify(episodeKey)}); }`,
-      );
-      activePlayerStreamKeyRef.current = streamKey;
-      return true;
-    },
-    [sendPlayerCommand],
-  );
+  // The separate-stream in-place switch is retained only for VidRift. HiAnime
+  // source changes are delegated to the native Video source prop.
+  const applyStreamInPlace = useCallback((stream: StreamData, episodeKey: string, resumeTime = 0, shouldPlay = true, speed = playbackSpeedRef.current, quality = selectedQualityRef.current) => {
+    if (server !== 'vidrift' || !stream?.streamUrl) return false;
+    const subtitles = JSON.stringify((stream.subtitles || []).map((sub, idx) => ({label:sub.label || sub.lang || 'English',lang:sub.lang || 'en',src:toFullUrl(sub.src),default:sub.default || idx === 0})));
+    sendPlayerCommand(`if(window.switchStream)window.switchStream(${JSON.stringify(toFullUrl(stream.streamUrl))},${subtitles},${resumeTime},${shouldPlay},${speed},${quality},${JSON.stringify(episodeKey)});`);
+    return true;
+  }, [server, sendPlayerCommand]);
 
   // Switch Audio Track
   // Path A: in-place Hls.js audioTrack switch when real alternate tracks exist in manifest
