@@ -167,7 +167,21 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
 
   private fun applyTrackPreferences() {
     val builder = trackSelector.buildUponParameters()
-      .setMaxVideoSize(Int.MAX_VALUE, if (selectedQualityHeight < 0) Int.MAX_VALUE else selectedQualityHeight)
+    if (selectedQualityHeight < 0) {
+      // Auto restores ExoPlayer's adaptive bitrate selection.
+      builder.clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+      builder.setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
+    } else {
+      // Prefer an exact rendition when the master exposes it; otherwise cap
+      // adaptive selection at the requested height rather than upscaling above it.
+      val exact = videoTracks.firstOrNull { it.third == selectedQualityHeight }
+      if (exact != null) {
+        builder.setOverrideForType(TrackSelectionOverride(exact.first, listOf(exact.second)))
+      } else {
+        builder.clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+        builder.setMaxVideoSize(Int.MAX_VALUE, selectedQualityHeight)
+      }
+    }
     val audio = selectedAudioTrackId
     if (audio == null || audio < 0) {
       builder.clearOverridesOfType(C.TRACK_TYPE_AUDIO)
