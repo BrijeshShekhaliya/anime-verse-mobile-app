@@ -51,7 +51,7 @@ describe('Expo Go compatible streaming player regressions', () => {
     assert.match(player, /availableSubtitleTracks/);
     assert.match(player, /availableVideoTracks/);
     assert.match(player, /onAudioTracks\(toAudioTracks\(player\)\)/);
-    assert.match(player, /onTextTracks\(toTextTracks\(player\)\)/);
+    assert.match(player, /onTextTracks\\(textTracks\\)/);
     assert.match(player, /onVideoTracks\(toVideoLevels\(player\)\)/);
   });
 
