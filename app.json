@@ -39,16 +39,7 @@
           "backgroundColor": "#000000"
         }
       ],
-      "expo-video",
-      [
-        "react-native-video",
-        {
-          "androidExtensions": {
-            "useExoplayerHls": true,
-            "useExoplayerDash": true
-          }
-        }
-      ]
+      "expo-video"
     ],
     "experiments": {
       "typedRoutes": true
