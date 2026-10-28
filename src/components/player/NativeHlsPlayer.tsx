@@ -156,6 +156,8 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
     if (!source) return;
     let active = true;
     onBuffer(true);
+    setHasEmbeddedSubtitleTracks(false);
+    setExternalSubtitleCues([]);
     player.replaceAsync(source).then(() => {
       if (!active) return;
       if (paused) player.pause();
@@ -258,7 +260,6 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
       }),
       player.addListener('availableAudioTracksChange', publishTracks),
       player.addListener('availableSubtitleTracksChange', publishTracks),
-      player.addListener('availableVideoTracksChange', publishTracks),
       player.addListener('playToEnd', onEnd),
     ];
     return () => subscriptions.forEach((subscription) => subscription.remove());
