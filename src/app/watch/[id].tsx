@@ -886,13 +886,20 @@ export default function WatchScreen() {
   }, [nativeTextTrackId]);
 
   const onNativePlayerVideoTracks = useCallback((tracks: NativeVideoLevel[]) => {
-    setAvailableLevels(tracks.filter((track) => track.height > 0).map((track) => ({
+    const levels = tracks.filter((track) => track.height > 0).map((track) => ({
       index: track.index,
       height: track.height,
       width: track.width,
       bitrate: track.bitrate,
-    })));
-  }, []);
+    }));
+    setAvailableLevels(levels);
+    const targetHeight = selectedQualityRef.current;
+    if (server === 'hianime' && targetHeight > 0) {
+      const match = levels.find((level) => level.height === targetHeight);
+      setSelectedQualityHeight(match ? targetHeight : -1);
+      selectedQualityRef.current = match ? targetHeight : -1;
+    }
+  }, [server]);
 
   const onNativePlayerError = useCallback((message: string) => {
     setIsBuffering(false);
