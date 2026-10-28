@@ -25,7 +25,7 @@ jobs:
       - name: TypeScript check
         run: npm run typecheck
       - name: Generate Android native project
-        run: npx expo prebuild --platform android --non-interactive
+        run: npx expo prebuild --platform android --no-install
       - name: Compile Android debug APK
         working-directory: android
         run: ./gradlew assembleDebug --no-daemon
