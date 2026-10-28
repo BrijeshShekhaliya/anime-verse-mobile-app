@@ -230,14 +230,12 @@ export default function WatchScreen() {
   }, []);
 
   const enterFullscreen = useCallback(() => {
-    // Request rotation first; the fullscreen layout/status bar follow measured
-    // landscape geometry instead of flashing a portrait-sized fullscreen view.
-    setIsFullscreen(true);
+    // Request rotation; the visual layout waits for measured landscape geometry.
     enterLandscape();
   }, [enterLandscape]);
 
   const exitFullscreen = useCallback(() => {
-    setIsFullscreen(false);
+    // The view and status bar return to portrait when the measured bounds do.
     restoreOrientation();
   }, [restoreOrientation]);
 
