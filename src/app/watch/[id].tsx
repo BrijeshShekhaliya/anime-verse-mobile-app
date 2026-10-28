@@ -591,9 +591,9 @@ export default function WatchScreen() {
   // the WebView source. The key prevents repeated renders from restarting HLS.
   const applyStreamInPlace = useCallback(
     (stream: StreamData, episodeKey: string, resumeTime = 0, shouldPlay = true, speed = playbackSpeedRef.current, quality = selectedQualityRef.current) => {
-      if (!stream?.streamUrl || !playerDocumentReadyRef.current) return;
+      if (!stream?.streamUrl || !playerDocumentReadyRef.current) return false;
       const streamKey = `${episodeKey}:${stream.mode}:${stream.streamUrl}`;
-      if (activePlayerStreamKeyRef.current === streamKey) return;
+      if (activePlayerStreamKeyRef.current === streamKey) return true;
       const subtitles = JSON.stringify(
         (stream.subtitles || []).map((sub, idx) => ({
           label: sub.label || sub.lang || 'English',
@@ -607,6 +607,7 @@ export default function WatchScreen() {
         `if (window.switchStream) { window.switchStream(${JSON.stringify(url)}, ${subtitles}, ${resumeTime}, ${shouldPlay}, ${speed}, ${quality}, ${JSON.stringify(episodeKey)}); }`,
       );
       activePlayerStreamKeyRef.current = streamKey;
+      return true;
     },
     [sendPlayerCommand],
   );
@@ -669,7 +670,8 @@ export default function WatchScreen() {
         const capturedPlaying = isPlayingRef.current;
         const capturedSpeed = playbackSpeedRef.current;
         const capturedQuality = selectedQualityRef.current;
-        applyStreamInPlace(resolved, `${currentSeason}:${currentEp}`, capturedTime, capturedPlaying, capturedSpeed, capturedQuality);
+        const dispatched = applyStreamInPlace(resolved, requestedEpisodeKey, capturedTime, capturedPlaying, capturedSpeed, capturedQuality);
+        if (!dispatched) throw new Error('Player is still preparing. Please try the audio change again.');
 
         setCurrentLang(targetMode);
         currentLangRef.current = targetMode;
@@ -2032,8 +2034,15 @@ export default function WatchScreen() {
                 <PressableScale
                   key={s.season_number}
                   onPress={() => {
+                    const nextEpisodeKey = `${s.season_number}:1`;
+                    currentEpisodeKeyRef.current = nextEpisodeKey;
+                    audioSwitchRequestRef.current += 1;
+                    setIsSwitchingAudio(false);
                     setCurrentSeason(s.season_number);
                     setCurrentEp(1);
+                    setCurrentTime(0);
+                    setBufferedTime(0);
+                    setIsPlaying(true);
                   }}
                   style={[styles.seasonTab, currentSeason === s.season_number && styles.seasonTabActive]}
                 >
