@@ -27,6 +27,7 @@ import expo.modules.kotlin.views.ExpoView
 import expo.modules.kotlin.viewevent.EventDispatcher
 import kotlin.math.max
 import kotlin.math.roundToInt
+import java.util.Locale
 
 @OptIn(UnstableApi::class)
 class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
@@ -226,11 +227,19 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
         when (format.sampleMimeType?.let { androidx.media3.common.MimeTypes.getTrackType(it) } ?: C.TRACK_TYPE_UNKNOWN) {
           C.TRACK_TYPE_AUDIO -> {
             newAudio.add(group to trackIndex)
-            audioOut.add(mapOf("id" to ai++, "name" to (format.label ?: format.language ?: "Audio ${ai}"), "lang" to (format.language ?: ""), "type" to "audio"))
+            val id = ai++
+            val language = format.language ?: ""
+            val readableLanguage = language.takeIf { it.isNotBlank() && it != "und" }
+              ?.let { Locale.forLanguageTag(it).getDisplayLanguage(Locale.ENGLISH) }
+            audioOut.add(mapOf("id" to id, "name" to (format.label ?: readableLanguage ?: "Audio ${id + 1}"), "lang" to language, "type" to "audio"))
           }
           C.TRACK_TYPE_TEXT -> {
             newText.add(group to trackIndex)
-            textOut.add(mapOf("id" to ti++, "name" to (format.label ?: format.language ?: "Subtitle ${ti}"), "lang" to (format.language ?: ""), "type" to "text"))
+            val id = ti++
+            val language = format.language ?: ""
+            val readableLanguage = language.takeIf { it.isNotBlank() && it != "und" }
+              ?.let { Locale.forLanguageTag(it).getDisplayLanguage(Locale.ENGLISH) }
+            textOut.add(mapOf("id" to id, "name" to (format.label ?: readableLanguage ?: "Subtitle ${id + 1}"), "lang" to language, "type" to "text"))
           }
           C.TRACK_TYPE_VIDEO -> {
             newVideo.add(Triple(group, trackIndex, format.height))
