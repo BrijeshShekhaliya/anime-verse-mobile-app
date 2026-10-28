@@ -6,14 +6,15 @@ const route = await readFile(new URL('../src/app/watch/[id].tsx', import.meta.ur
 const player = await readFile(new URL('../src/components/player/NativeHlsPlayer.tsx', import.meta.url), 'utf8');
 
 describe('Player source-level regressions', () => {
-  test('HiAnime route uses the native player instead of generating HLS HTML', () => {
+  test('HiAnime route uses Expo Video instead of generating HLS HTML', () => {
     assert.match(route, /import NativeHlsPlayer/);
     assert.match(route, /<NativeHlsPlayer/);
     assert.match(route, /server === 'hianime' \?/);
     assert.match(route, /source=\{\{ uri: vidriftEmbedUrl \}\}/);
     assert.doesNotMatch(route, /new Hls\(/);
     assert.doesNotMatch(route, /const hianimeHtml/);
-    assert.equal((player.match(/<Video\b/g) || []).length, 1);
+    assert.equal((player.match(/<VideoView\b/g) || []).length, 1);
+    assert.match(player, /from 'expo-video'/);
   });
 
   test('A separate Sub/Dub stream change retains the playback position', () => {
@@ -35,12 +36,14 @@ describe('Player source-level regressions', () => {
     assert.match(route, /setResumeAfterSourceChange\(null\)/);
   });
 
-  test('Native player uses native buffering and reports audio, subtitle and video tracks', () => {
-    assert.match(player, /minLoadRetryCount: 3/);
-    assert.match(player, /bufferForPlaybackAfterRebufferMs: 5000/);
-    assert.match(player, /automaticallyWaitsToMinimizeStalling/);
-    assert.match(player, /onAudioTracks=\{handleAudioTracks\}/);
-    assert.match(player, /onTextTracks=\{handleTextTracks\}/);
-    assert.match(player, /onVideoTracks=\{handleVideoTracks\}/);
+  test('Expo Video player keeps one view and configures adaptive HLS buffering', () => {
+    assert.equal((player.match(/<VideoView\b/g) || []).length, 1);
+    assert.match(player, /player\.replaceAsync\(source\)/);
+    assert.match(player, /contentType: 'hls'/);
+    assert.match(player, /preferredForwardBufferDuration: 50/);
+    assert.match(player, /player\.maxResolution/);
+    assert.match(player, /availableAudioTracks/);
+    assert.match(player, /availableSubtitleTracks/);
+    assert.match(player, /availableVideoTracks/);
   });
 });
