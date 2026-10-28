@@ -9,6 +9,7 @@ import Video, {
   type SelectedTrack,
   type SelectedVideoTrack,
   type TextTrackType,
+  type OnVideoTracksData,
   type VideoRef,
 } from 'react-native-video';
 
@@ -26,6 +27,8 @@ export type NativeSubtitle = {
   default?: boolean;
 };
 
+export type NativeVideoLevel = { index: number; height: number; width: number; bitrate: number };
+
 type Props = {
   uri: string;
   referer?: string;
@@ -42,6 +45,7 @@ type Props = {
   onBuffer: (buffering: boolean) => void;
   onAudioTracks: (tracks: NativePlayerTrack[]) => void;
   onTextTracks: (tracks: NativePlayerTrack[]) => void;
+  onVideoTracks: (levels: NativeVideoLevel[]) => void;
   onEnd: () => void;
   onError: (message: string) => void;
 };
@@ -73,6 +77,7 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
   onBuffer,
   onAudioTracks,
   onTextTracks,
+  onVideoTracks,
   onEnd,
   onError,
 }, forwardedRef) {
@@ -111,7 +116,16 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
 
   const handleLoad = useCallback((event: OnLoadData) => {
     onLoad(event.duration || 0);
-  }, [onLoad]);
+    onAudioTracks((event.audioTracks || []).map((track) => ({
+      id: track.index, name: track.title || track.language || `Audio ${track.index + 1}`, lang: track.language || '', type: 'audio' as const,
+    })));
+    onTextTracks((event.textTracks || []).map((track) => ({
+      id: track.index, name: track.title || track.language || `Subtitle ${track.index + 1}`, lang: track.language || '', type: 'text' as const,
+    })));
+    onVideoTracks((event.videoTracks || []).map((track) => ({
+      index: track.index, height: track.height || 0, width: track.width || 0, bitrate: track.bitrate || 0,
+    })));
+  }, [onLoad, onAudioTracks, onTextTracks, onVideoTracks]);
 
   const handleProgress = useCallback((event: OnProgressData) => {
     onProgress(
@@ -143,6 +157,12 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
     })));
   }, [onTextTracks]);
 
+  const handleVideoTracks = useCallback((event: OnVideoTracksData) => {
+    onVideoTracks((event.videoTracks || []).map((track) => ({
+      index: track.index, height: track.height || 0, width: track.width || 0, bitrate: track.bitrate || 0,
+    })));
+  }, [onVideoTracks]);
+
   return (
     <Video
       ref={forwardedRef}
@@ -163,6 +183,7 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
       onBuffer={handleBuffer}
       onAudioTracks={handleAudioTracks}
       onTextTracks={handleTextTracks}
+      onVideoTracks={handleVideoTracks}
       onEnd={onEnd}
       onError={(event) => onError(event.error?.errorString || event.error?.errorException || 'Native stream playback failed')}
       automaticallyWaitsToMinimizeStalling
