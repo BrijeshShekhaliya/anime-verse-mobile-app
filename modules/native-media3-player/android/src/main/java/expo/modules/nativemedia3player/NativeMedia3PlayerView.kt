@@ -215,6 +215,7 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     tracks.groups.forEach { groupInfo ->
       val group = groupInfo.mediaTrackGroup
       for (trackIndex in 0 until group.length) {
+        if (!groupInfo.isTrackSupported(trackIndex)) continue
         val format = group.getFormat(trackIndex)
         when (format.sampleMimeType?.let { androidx.media3.common.MimeTypes.getTrackType(it) } ?: C.TRACK_TYPE_UNKNOWN) {
           C.TRACK_TYPE_AUDIO -> {
