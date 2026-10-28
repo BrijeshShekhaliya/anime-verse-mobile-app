@@ -109,6 +109,7 @@ export default function WatchScreen() {
   const [currentAudioTrackId, setCurrentAudioTrackId] = useState<number>(0);
   const [hasInBandAlternateAudio, setHasInBandAlternateAudio] = useState<boolean>(false);
   const [currentLang, setCurrentLang] = useState<'sub' | 'dub'>('sub');
+  const [playerPreferencesLoaded, setPlayerPreferencesLoaded] = useState<boolean>(false);
   const [isSwitchingAudio, setIsSwitchingAudio] = useState<boolean>(false);
 
   const [availableLevels, setAvailableLevels] = useState<VideoLevelInfo[]>([]);
@@ -176,16 +177,30 @@ export default function WatchScreen() {
   const streamCacheRef = useRef<Map<string, { data: StreamData; expiresAt: number }>>(new Map());
   const inflightResolutionsRef = useRef<Map<string, Promise<StreamData>>>(new Map());
 
-  // Restore saved audio language preference on mount
+  // Load playback preferences together before resolving a stream. Previously
+  // the stream resolver could start before the saved server/audio mode arrived,
+  // producing avoidable cold-start requests and sometimes choosing the wrong mode.
   useEffect(() => {
-    AsyncStorage.getItem('animeverse_lang')
-      .then((saved) => {
-        if (saved === 'dub' || saved === 'sub') {
-          setCurrentLang(saved);
-          currentLangRef.current = saved;
-        }
-      })
-      .catch(() => {});
+    let active = true;
+    Promise.all([
+      AsyncStorage.getItem('animeverse_lang').catch(() => null),
+      AsyncStorage.getItem(SERVER_STORAGE_KEY).catch(() => null),
+      AsyncStorage.getItem(AUTOPLAY_STORAGE_KEY).catch(() => null),
+    ]).then(([savedLang, savedServer, savedAutoplay]) => {
+      if (!active) return;
+      if (savedLang === 'dub' || savedLang === 'sub') {
+        setCurrentLang(savedLang);
+        currentLangRef.current = savedLang;
+      }
+      if (savedServer === 'hianime' || savedServer === 'vidrift') {
+        setServer(savedServer as ServerType);
+      }
+      if (savedAutoplay !== null) setAutoplay(savedAutoplay === '1');
+      setPlayerPreferencesLoaded(true);
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   // Unlock orientation sensor on unmount
@@ -328,17 +343,6 @@ export default function WatchScreen() {
     else changeFitMode('contain');
   }, [fitMode, changeFitMode]);
 
-  // Load saved preferences
-  useEffect(() => {
-    AsyncStorage.getItem(SERVER_STORAGE_KEY).then((val) => {
-      if (val === 'hianime' || val === 'vidrift') setServer(val as ServerType);
-    }).catch(() => {});
-
-    AsyncStorage.getItem(AUTOPLAY_STORAGE_KEY).then((val) => {
-      if (val !== null) setAutoplay(val === '1');
-    }).catch(() => {});
-  }, []);
-
   // Fetch anime detail
   const { data: anime } = useFetch(() => api.detail(String(id)), [id]);
 
@@ -425,7 +429,7 @@ export default function WatchScreen() {
 
   // Resolve stream URL for current episode/season
   useEffect(() => {
-    if (server !== 'hianime' || !anime?.title) return;
+    if (!playerPreferencesLoaded || server !== 'hianime' || !anime?.title) return;
 
     let cancelled = false;
     currentEpisodeKeyRef.current = `${currentSeason}:${currentEp}`;
@@ -471,7 +475,7 @@ export default function WatchScreen() {
     return () => {
       cancelled = true;
     };
-  }, [server, anime?.title, anime?.titleRomaji, currentSeason, currentEp, currentEpHasDub, resolveStreamWithCache]);
+  }, [playerPreferencesLoaded, server, anime?.title, anime?.titleRomaji, currentSeason, currentEp, currentEpHasDub, resolveStreamWithCache]);
 
   // Alternate Sub/Dub streams are resolved on demand instead of during cold
   // start. Eager prefetch ran before HLS reported in-band audio tracks, creating
