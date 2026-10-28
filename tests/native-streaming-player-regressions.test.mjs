@@ -60,7 +60,9 @@ describe('Expo Go compatible streaming player regressions', () => {
     assert.match(player, /headers: \{ Referer: referer, referer \}/);
     assert.match(player, /preferredForwardBufferDuration: 60/);
     assert.match(player, /surfaceType="textureView"/);
-    assert.match(player, /player\.videoTrack = exact/);
+    assert.match(player, /maxBufferBytes: 60 \* 1024 \* 1024/);
+    assert.doesNotMatch(player, /player\.videoTrack\s*=/);
+    assert.match(route, /setResolvingHls\(false\);\s*setIsBuffering\(true\);\s*setMountedStream\(resolved\)/);
     assert.match(route, /resolveStreamWithCache\(/);
     assert.match(route, /api\.resolveStream\(/);
     assert.doesNotMatch(route, /cdn\.jsdelivr\.net\/npm\/hls\.js/);
