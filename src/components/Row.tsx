@@ -1,5 +1,5 @@
 import { router, type Href } from 'expo-router';
-import { FlatList, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Platform, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeIn } from 'react-native-reanimated';
 import { Icon } from './Icon';
 import { PosterCard } from './PosterCard';
@@ -34,14 +34,16 @@ export function Row({ title, sub, items, more, ranked }: { title: string; sub?: 
       <FlatList
         horizontal
         data={data}
-        keyExtractor={(a) => a.id}
+        keyExtractor={(a, i) => `${a.id}-${i}`}
         renderItem={({ item, index }) => <PosterCard anime={item} index={index} width={ranked ? 136 : 124} rank={ranked ? index + 1 : undefined} />}
         contentContainerStyle={{ paddingHorizontal: 16, gap: 12 }}
         showsHorizontalScrollIndicator={false}
         decelerationRate="fast"
         snapToInterval={(ranked ? 136 : 124) + 12}
-        initialNumToRender={5}
-        windowSize={5}
+        initialNumToRender={4}
+        maxToRenderPerBatch={4}
+        windowSize={3}
+        removeClippedSubviews={Platform.OS === 'android'}
       />
     </Animated.View>
   );

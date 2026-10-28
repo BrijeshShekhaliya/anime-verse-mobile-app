@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AnimeVerse — Discover Anime</title>
+  <meta name="description" content="Discover trending anime, ratings, release schedules and which titles are available subbed or dubbed.">
+  <meta name="theme-color" content="#000000">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%2032%2032'%3E%3Cdefs%3E%3ClinearGradient%20id%3D'g'%20x1%3D'0'%20y1%3D'0'%20x2%3D'1'%20y2%3D'1'%3E%3Cstop%20offset%3D'0'%20stop-color%3D'%23ff8a3d'%2F%3E%3Cstop%20offset%3D'1'%20stop-color%3D'%23ff3d6e'%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D'32'%20height%3D'32'%20rx%3D'9'%20fill%3D'url(%23g)'%2F%3E%3Cpath%20d%3D'M17.6%207.2a9.2%209.2%200%201%200%207.6%2014.4%2010.4%2010.4%200%200%201-7.6-14.4z'%20fill%3D'%23fff'%2F%3E%3Cpath%20d%3D'M22.6%205.5l1%202.6%202.6%201-2.6%201-1%202.6-1-2.6-2.6-1%202.6-1z'%20fill%3D'%23fff'%2F%3E%3C%2Fsvg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Lato:wght@400;700;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css?v=5.5">
+</head>
+<body>
+  <a class="skip-link" href="#app">Skip to content</a>
+  <div class="route-progress" id="routeProgress" aria-hidden="true"></div>
+  <button class="to-top" id="toTop" aria-label="Back to top">
+    <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6M6 11.5l6-6 6 6" stroke-width="2.6"/></svg>
+  </button>
+
+  <header class="nav" id="nav">
+    <div class="nav-inner">
+      <a href="/" class="logo" data-link aria-label="AnimeVerse home">
+        <svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="lg1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff8a3d"/><stop offset="1" stop-color="#ff3d6e"/></linearGradient></defs><rect width="32" height="32" rx="9" fill="url(#lg1)"/><path class="logo-moon" d="M17.6 7.2a9.2 9.2 0 1 0 7.6 14.4 10.4 10.4 0 0 1-7.6-14.4z" fill="#fff"/><path class="logo-spark" d="M22.6 5.5l1 2.6 2.6 1-2.6 1-1 2.6-1-2.6-2.6-1 2.6-1z" fill="#fff"/></svg>
+        <span>Anime<b>Verse</b></span>
+      </a>
+      <nav class="nav-links" aria-label="Main">
+        <a href="/" data-link data-nav="home">Home</a>
+        <a href="/browse" data-link data-nav="browse">Browse</a>
+        <a href="/browse?dub=1" data-link data-nav="dubbed">Dubbed</a>
+        <a href="/schedule" data-link data-nav="schedule">Schedule</a>
+      </nav>
+      <button class="icon-btn search-trigger" id="searchOpen" aria-label="Search anime">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle fill="currentColor" stroke="none" opacity=".2" cx="10.5" cy="10.5" r="7"/><circle cx="10.5" cy="10.5" r="7"/><path d="M16 16l4.5 4.5" stroke-width="2.8"/></svg>
+        <span class="search-hint"><span class="search-hint-text" id="searchHint">Search anime</span></span>
+        <kbd>/</kbd>
+      </button>
+      <button class="icon-btn menu-btn" id="menuBtn" aria-label="Open menu" aria-expanded="false">
+        <svg class="ic menu-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h10"/><path d="M4 17h16"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="app" tabindex="-1"></main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <div>
+        <a href="/" class="logo" data-link>
+          <svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="lg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff8a3d"/><stop offset="1" stop-color="#ff3d6e"/></linearGradient></defs><rect width="32" height="32" rx="9" fill="url(#lg2)"/><path class="logo-moon" d="M17.6 7.2a9.2 9.2 0 1 0 7.6 14.4 10.4 10.4 0 0 1-7.6-14.4z" fill="#fff"/><path class="logo-spark" d="M22.6 5.5l1 2.6 2.6 1-2.6 1-1 2.6-1-2.6-2.6-1 2.6-1z" fill="#fff"/></svg>
+          <span>Anime<b>Verse</b></span>
+        </a>
+        <p class="footer-note">Anime discovery: ratings, schedules and sub/dub availability. AnimeVerse does not host or stream video. Use the official links on each title to watch.</p>
+      </div>
+      <div class="footer-cols">
+        <div>
+          <h4>Explore</h4>
+          <a href="/browse?order=score" data-link>Top rated</a>
+          <a href="/browse?status=airing" data-link>Airing now</a>
+          <a href="/browse?status=upcoming" data-link>Upcoming</a>
+          <a href="/browse?type=movie" data-link>Movies</a>
+        </div>
+        <div>
+          <h4>Data from</h4>
+          <a href="https://jikan.moe" target="_blank" rel="noopener">Jikan / MyAnimeList</a>
+          <a href="https://anilist.co" target="_blank" rel="noopener">AniList</a>
+          <a href="https://github.com/MAL-Dubs/MAL-Dubs" target="_blank" rel="noopener">MAL-Dubs</a>
+        </div>
+      </div>
+    </div>
+    <p class="footer-status" id="footerStatus"></p>
+  </footer>
+
+  <div class="search-overlay" id="searchOverlay" role="dialog" aria-modal="true" aria-label="Search" hidden>
+    <div class="search-panel">
+      <div class="search-bar">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle fill="currentColor" stroke="none" opacity=".2" cx="10.5" cy="10.5" r="7"/><circle cx="10.5" cy="10.5" r="7"/><path d="M16 16l4.5 4.5" stroke-width="2.8"/></svg>
+        <input id="searchInput" type="search" placeholder="Search any anime: English, Japanese or romaji title…" autocomplete="off" spellcheck="false">
+        <span class="search-spin" aria-hidden="true"></span>
+        <button class="link-mini" id="searchClear" type="button">Clear</button>
+        <button class="icon-btn" id="searchClose" aria-label="Close search">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke-width="2.4"/></svg>
+        </button>
+      </div>
+      <div class="search-results" id="searchResults" aria-live="polite"></div>
+      <div class="search-foot" aria-hidden="true">
+        <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>Enter</kbd> open</span><span><kbd>Esc</kbd> close</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="trailerModal" role="dialog" aria-modal="true" aria-label="Trailer" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-body">
+      <button class="icon-btn modal-close" data-close aria-label="Close trailer">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke-width="2.4"/></svg>
+      </button>
+      <div class="modal-frame" id="trailerFrame"></div>
+    </div>
+  </div>
+
+  <script src="/hls.min.js" defer></script>
+  <script src="/app.js?v=6.5" defer></script>
+</body>
+</html>

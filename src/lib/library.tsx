@@ -74,7 +74,12 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     AsyncStorage.getItem(KEY)
       .then((raw) => {
-        if (raw) setState({ ...EMPTY, ...JSON.parse(raw) });
+        if (!raw) return;
+        const saved: State = { ...EMPTY, ...JSON.parse(raw) };
+        // Older versions added every opened page to history; keep only titles
+        // that have watch progress.
+        saved.history = saved.history.filter((h) => saved.progress[h.anime.id]);
+        setState(saved);
       })
       .catch(() => {})
       .finally(() => setReady(true));
@@ -90,10 +95,13 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   }, [state, ready]);
 
   const recordView = useCallback((a: Anime) => {
-    setState((s) => ({
-      ...s,
-      history: [{ anime: slim(a), at: Date.now() }, ...s.history.filter((h) => h.anime.id !== a.id)].slice(0, HISTORY_MAX),
-    }));
+    setState((s) => {
+      if (s.history[0]?.anime.id === a.id) return s;
+      return {
+        ...s,
+        history: [{ anime: slim(a), at: Date.now() }, ...s.history.filter((h) => h.anime.id !== a.id)].slice(0, HISTORY_MAX),
+      };
+    });
   }, []);
 
   const removeHistory = useCallback((id: string) => {
@@ -119,6 +127,16 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   const setProgress = useCallback(
     (a: Anime, episode: number, total: number | null, watch?: { url: string; name: string } | null) => {
       setState((s) => {
+        const existing = s.progress[a.id];
+        if (
+          existing &&
+          existing.episode === episode &&
+          existing.total === total &&
+          existing.watchUrl === (watch?.url ?? existing.watchUrl) &&
+          existing.watchName === (watch?.name ?? existing.watchName)
+        ) {
+          return s;
+        }
         const progress = { ...s.progress };
         if (episode <= 0) delete progress[a.id];
         else {
@@ -131,7 +149,13 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
             updatedAt: Date.now(),
           };
         }
-        return { ...s, progress };
+        // History is what you've actually watched, so it's recorded here
+        // (not when a detail page is opened).
+        const history =
+          episode > 0
+            ? [{ anime: slim(a), at: Date.now() }, ...s.history.filter((h) => h.anime.id !== a.id)].slice(0, HISTORY_MAX)
+            : s.history;
+        return { ...s, progress, history };
       });
     },
     []

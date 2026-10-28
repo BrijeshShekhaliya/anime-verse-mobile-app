@@ -1,11 +1,13 @@
 // The website's custom icon set (soft filled shapes with a duotone layer),
 // ported to react-native-svg so the app looks like the same product.
-import Svg, { Circle, Defs, LinearGradient, Path, Rect, Stop } from 'react-native-svg';
+import Svg, { Circle, Defs, LinearGradient, Path, Rect, Stop, Text as SvgText } from 'react-native-svg';
 
 export type IconName =
   | 'play' | 'info' | 'star' | 'left' | 'right' | 'down' | 'search' | 'home' | 'browse' | 'calendar'
   | 'bookmark' | 'bookmarkOn' | 'clock' | 'x' | 'check' | 'mic' | 'cc' | 'ext' | 'shield' | 'plus'
-  | 'minus' | 'trash' | 'spark' | 'history' | 'list';
+  | 'minus' | 'trash' | 'spark' | 'history' | 'list'
+  | 'settings' | 'fullscreen' | 'exitFullscreen' | 'pause' | 'skip' | 'cast' | 'thumbUp' | 'thumbDown' | 'download' | 'more'
+  | 'rewind10' | 'forward10' | 'fastForward' | 'aspectRatio';
 
 type Props = { name: IconName; size?: number; color?: string; strokeWidth?: number };
 
@@ -162,6 +164,112 @@ export function Icon({ name, size = 22, color = '#fff', strokeWidth = 2 }: Props
       break;
     case 'spark':
       body = <Path {...solid} d="M12 2l2.2 6.3L20.5 10.5l-6.3 2.2L12 19l-2.2-6.3L3.5 10.5l6.3-2.2z" />;
+      break;
+    case 'settings':
+      body = (
+        <>
+          <Circle {...s} cx="12" cy="12" r="3" />
+          <Path {...s} d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z" />
+        </>
+      );
+      break;
+    case 'fullscreen':
+      body = (
+        <>
+          {/* Crunchyroll diagonal expand arrows */}
+          <Path {...s} strokeWidth={2.4} d="M15 3h6v6M21 3l-7 7M9 21H3v-6M3 21l7-7" />
+        </>
+      );
+      break;
+    case 'exitFullscreen':
+      body = (
+        <>
+          {/* Crunchyroll diagonal contract arrows */}
+          <Path {...s} strokeWidth={2.4} d="M21 9h-6V3M15 9l6-6M3 15h6v6M9 15L3 21" />
+        </>
+      );
+      break;
+    case 'rewind10':
+      body = (
+        <>
+          {/* Crunchyroll Counter-clockwise circular arrow */}
+          <Path {...s} strokeWidth={2.2} d="M12 3.5A8.5 8.5 0 1 0 20.5 12" />
+          <Path {...solid} d="M7 3.5l5-3.5v7z" />
+          <SvgText x="12" y="15.2" fill={color} fontSize="9" fontWeight="800" textAnchor="middle" fontFamily="sans-serif">
+            10
+          </SvgText>
+        </>
+      );
+      break;
+    case 'forward10':
+      body = (
+        <>
+          {/* Crunchyroll Clockwise circular arrow */}
+          <Path {...s} strokeWidth={2.2} d="M12 3.5A8.5 8.5 0 1 1 3.5 12" />
+          <Path {...solid} d="M17 3.5l-5-3.5v7z" />
+          <SvgText x="12" y="15.2" fill={color} fontSize="9" fontWeight="800" textAnchor="middle" fontFamily="sans-serif">
+            10
+          </SvgText>
+        </>
+      );
+      break;
+    case 'fastForward':
+      body = <Path {...solid} d="M4 5.5v13a1 1 0 001.5.86L12 13.2V18.5a1 1 0 001.5.86l8-5.5a1 1 0 000-1.72l-8-5.5A1 1 0 0012 7.5v5.3L5.5 6.36A1 1 0 004 7.22z" />;
+      break;
+    case 'aspectRatio':
+      body = (
+        <>
+          <Rect {...s} x="3" y="5" width="18" height="14" rx="2" strokeWidth={1.8} />
+          <Path {...s} strokeWidth={1.8} d="M7 9l3 3M17 15l-3-3" />
+        </>
+      );
+      break;
+    case 'pause':
+      body = (
+        <>
+          <Rect {...solid} x="6" y="5" width="4" height="14" rx="1.5" />
+          <Rect {...solid} x="14" y="5" width="4" height="14" rx="1.5" />
+        </>
+      );
+      break;
+    case 'skip':
+      body = (
+        <>
+          <Path {...solid} d="M5 5.5v13a1 1 0 001.5.86l9-6.5a1 1 0 000-1.72l-9-6.5A1 1 0 005 5.5z" />
+          <Rect {...solid} x="17" y="5" width="2.5" height="14" rx="1" />
+        </>
+      );
+      break;
+    case 'cast':
+      body = (
+        <>
+          <Path {...s} d="M2 16.1A5 5 0 017 21m-5-9a9 9 0 019 9m-9-13a13 13 0 0113 13H2" />
+          <Path {...s} d="M2 20h.01" strokeWidth={3} />
+        </>
+      );
+      break;
+    case 'thumbUp':
+      body = <Path {...s} d="M14 9V5a3 3 0 00-3-3l-4 9v11h11.28a2 2 0 002-1.7l1.38-9a2 2 0 00-2-2.3zM7 22H4a2 2 0 01-2-2v-7a2 2 0 012-2h3" />;
+      break;
+    case 'thumbDown':
+      body = <Path {...s} d="M10 15v4a3 3 0 003 3l4-9V2H5.72a2 2 0 00-2 1.7l-1.38 9a2 2 0 002 2.3zm7-13h3a2 2 0 012 2v7a2 2 0 01-2 2h-3" />;
+      break;
+    case 'download':
+      body = (
+        <>
+          <Path {...s} d="M12 3v13m0 0l-4-4m4 4l4-4" />
+          <Path {...s} d="M5 21h14" />
+        </>
+      );
+      break;
+    case 'more':
+      body = (
+        <>
+          <Circle {...solid} cx="12" cy="5" r="1.5" />
+          <Circle {...solid} cx="12" cy="12" r="1.5" />
+          <Circle {...solid} cx="12" cy="19" r="1.5" />
+        </>
+      );
       break;
   }
   return (

@@ -79,3 +79,53 @@ export type Home = {
 };
 
 export type SearchResult = { items: Anime[]; hasNext: boolean };
+
+export type Episode = {
+  episode_number: number;
+  season_number: number;
+  name: string;
+  overview?: string;
+  still_path?: string | null;
+  air_date?: string | null;
+  runtime?: number | null;
+  hasSub?: boolean;
+  hasDub?: boolean;
+};
+
+export type SeasonInfo = {
+  season_number: number;
+  name: string;
+  episode_count: number;
+};
+
+export type EpisodesData = {
+  tmdbId?: number | null;
+  showName: string;
+  backdrop?: string | null;
+  seasons: SeasonInfo[];
+  selectedSeason: number;
+  episodes: Episode[];
+  dubCount?: number;
+  subCount?: number;
+};
+
+export type SubtitleTrack = {
+  lang?: string;
+  label: string;
+  kind: string;
+  src: string;
+  default?: boolean;
+};
+
+export type StreamData = {
+  success: boolean;
+  source: string;
+  mode: 'sub' | 'dub';
+  seasonNumber: number;
+  episodeNumber: number;
+  streamUrl: string;
+  rawMasterUrl?: string;
+  referer?: string;
+  subtitles?: SubtitleTrack[];
+};
+

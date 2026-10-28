@@ -13,6 +13,7 @@ import Animated, {
   useAnimatedRef,
   useAnimatedScrollHandler,
   useAnimatedStyle,
+  useReducedMotion,
   useSharedValue,
   withTiming,
   type SharedValue,
@@ -33,8 +34,15 @@ function Slide({ anime, index, width, height, scrollX, active }: { anime: Anime;
   const art = anime.backdrop || anime.banner || anime.image || undefined;
 
   // Slow zoom-out on the slide that's showing (like the website's hero).
+  // Skipped when the phone's "reduce motion" setting is on.
   const zoom = useSharedValue(1.12);
+  const reduceMotion = useReducedMotion();
   useEffect(() => {
+    if (reduceMotion) {
+      cancelAnimation(zoom);
+      zoom.value = 1.04;
+      return;
+    }
     if (active) {
       zoom.value = 1.12;
       zoom.value = withTiming(1.02, { duration: AUTO_MS + 1500, easing: Easing.linear });
@@ -42,7 +50,7 @@ function Slide({ anime, index, width, height, scrollX, active }: { anime: Anime;
       cancelAnimation(zoom);
       zoom.value = 1.12;
     }
-  }, [active, zoom]);
+  }, [active, zoom, reduceMotion]);
 
   // The artwork moves slower than the swipe (parallax); the text fades as the slide leaves.
   const artStyle = useAnimatedStyle(() => {
@@ -173,7 +181,7 @@ export function Hero({ items }: { items: Anime[] }) {
         data={items}
         horizontal
         pagingEnabled
-        keyExtractor={(a) => a.id}
+        keyExtractor={(a, i) => `${a.id}-${i}`}
         renderItem={({ item, index }) => <Slide anime={item} index={index} width={width} height={height} scrollX={scrollX} active={index === active && focused} />}
         extraData={`${active}-${focused}`}
         showsHorizontalScrollIndicator={false}
@@ -195,7 +203,7 @@ export function Hero({ items }: { items: Anime[] }) {
       />
       <View style={styles.dots} pointerEvents="none">
         {items.map((a, i) => (
-          <Dot key={a.id} on={i === active} progress={progress} />
+          <Dot key={`${a.id}-${i}`} on={i === active} progress={progress} />
         ))}
       </View>
     </View>

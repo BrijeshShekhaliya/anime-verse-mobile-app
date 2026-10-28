@@ -29,7 +29,9 @@ export const PosterCard = memo(function PosterCard({
 }) {
   const uri = (HI_DPI && anime.image2x) || anime.image || undefined;
   return (
-    <Animated.View entering={FadeInDown.delay(Math.min(index, 8) * 45).duration(380)} style={{ width }}>
+    // Only the first screenful animates in; later cards (scrolling, next pages)
+    // just appear, which keeps long lists smooth on slower phones.
+    <Animated.View entering={index < 9 ? FadeInDown.delay(index * 40).duration(340) : undefined} style={{ width }}>
       <PressableScale onPress={() => router.push(`/anime/${anime.id}`)} accessibilityRole="button" accessibilityLabel={anime.title}>
         <View style={[styles.poster, { width, height: width * 1.5 }]}>
           {uri ? (

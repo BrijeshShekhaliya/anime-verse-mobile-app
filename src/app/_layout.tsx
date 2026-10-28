@@ -35,6 +35,7 @@ export default function RootLayout() {
         >
           <Stack.Screen name="(tabs)" />
           <Stack.Screen name="anime/[id]" />
+          <Stack.Screen name="watch/[id]" options={{ animation: 'fade' }} />
           <Stack.Screen name="search" options={{ animation: 'fade_from_bottom' }} />
         </Stack>
       </LibraryProvider>

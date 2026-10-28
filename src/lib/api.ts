@@ -1,11 +1,17 @@
 import Constants from 'expo-constants';
-import type { Anime, AnimeDetail, Character, Home, SearchResult } from './types';
+import type { Anime, AnimeDetail, Character, EpisodesData, Home, SearchResult, StreamData } from './types';
 
 // Same backend as the website. Override with EXPO_PUBLIC_API_URL for a local server.
-const BASE: string =
+export const BASE: string =
   process.env.EXPO_PUBLIC_API_URL ||
   (Constants.expoConfig?.extra as { apiUrl?: string } | undefined)?.apiUrl ||
   'https://13.236.161.33.sslip.io';
+
+export const toFullUrl = (url: string) => {
+  if (!url) return '';
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  return `${BASE}${url.startsWith('/') ? '' : '/'}${url}`;
+};
 
 // One request per URL at a time (screens asking for the same thing share it),
 // a short memory so going back is instant, one quiet retry on network blips,
@@ -88,4 +94,39 @@ export const api = {
   },
   schedule: (day: string) => get<Anime[]>(`/schedule/${day}`, 30 * 60 * 1000),
   genres: () => get<string[]>('/genres', 24 * 60 * 60 * 1000),
+  episodes: (id: string, season?: number, refresh?: boolean) => {
+    const qs = new URLSearchParams();
+    if (season) qs.set('season', String(season));
+    if (refresh) qs.set('refresh', '1');
+    const qStr = qs.toString();
+    return get<EpisodesData>(`/anime/${encodeURIComponent(id)}/episodes${qStr ? `?${qStr}` : ''}`, 15 * 60 * 1000);
+  },
+  resolveStream: (
+    params: { title: string; romaji?: string; season: number; episode: number; mode: 'sub' | 'dub' },
+    options?: { forceRefresh?: boolean },
+  ) => {
+    const qs = new URLSearchParams({
+      title: params.title,
+      season: String(params.season),
+      episode: String(params.episode),
+      mode: params.mode,
+    });
+    if (params.romaji) qs.set('romaji', params.romaji);
+    if (options?.forceRefresh) qs.set('refresh', '1');
+    const path = `/stream/resolve?${qs.toString()}`;
+    if (options?.forceRefresh) {
+      memo.delete(path);
+    }
+    return get<StreamData>(path, 30 * 60 * 1000);
+  },
+  clearStreamCache: (params: { title: string; romaji?: string; season: number; episode: number; mode: 'sub' | 'dub' }) => {
+    const qs = new URLSearchParams({
+      title: params.title,
+      season: String(params.season),
+      episode: String(params.episode),
+      mode: params.mode,
+    });
+    if (params.romaji) qs.set('romaji', params.romaji);
+    memo.delete(`/stream/resolve?${qs.toString()}`);
+  },
 };

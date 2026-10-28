@@ -4,15 +4,16 @@ import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Linking, Platform, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import Animated, {
+  Easing,
   Extrapolation,
-  FadeIn,
   FadeInDown,
   interpolate,
   useAnimatedScrollHandler,
   useAnimatedStyle,
+  useReducedMotion,
   useSharedValue,
   withRepeat,
   withSequence,
@@ -22,13 +23,11 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LangBadges } from '@/components/Badges';
 import { Icon, type IconName } from '@/components/Icon';
-import { PosterCard } from '@/components/PosterCard';
 import { PressableScale } from '@/components/PressableScale';
-import { Row, SectionHeader } from '@/components/Row';
 import { Skeleton } from '@/components/Skeleton';
 import { ErrorState } from '@/components/States';
 import { api } from '@/lib/api';
-import { countdown, factsOf, fmtNum, primaryStream } from '@/lib/format';
+import { factsOf } from '@/lib/format';
 import { useLibrary } from '@/lib/library';
 import { colors, fonts, radius, springs } from '@/lib/theme';
 import type { AnimeDetail } from '@/lib/types';
@@ -51,13 +50,6 @@ export default function DetailScreen() {
   const insets = useSafeAreaInsets();
   const heroH = Math.min(460, Math.round(width * 0.95));
   const { data: a, error, loading, reload } = useFetch(() => api.detail(String(id)), [id]);
-  const extras = useFetch(() => api.extras(String(id)), [id]);
-  const lib = useLibrary();
-
-  useEffect(() => {
-    if (a) lib.recordView(a);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [a?.id]);
 
   const scrollY = useSharedValue(0);
   const onScroll = useAnimatedScrollHandler((e) => {
@@ -88,7 +80,6 @@ export default function DetailScreen() {
 
   const art = a.backdrop || a.banner || a.image || undefined;
   const poster = a.tmdbPoster || a.image || undefined;
-  const watch = primaryStream(a.links?.length ? a.links : a.streaming);
   const kicker = a.type === 'Movie' ? 'Movie' : a.seasonCount ? 'Series' : a.type || 'Anime';
   const facts = [
     ...factsOf(a, true),
@@ -152,36 +143,10 @@ export default function DetailScreen() {
             </ScrollView>
           ) : null}
 
-          <Actions anime={a} watch={watch} />
+          <Actions anime={a} />
         </View>
 
         {a.nextEpisode ? <NextEpisode ep={a.nextEpisode.episode} at={a.nextEpisode.airingAt} /> : null}
-        <ProgressTracker anime={a} watch={watch} />
-        <Synopsis text={a.synopsis} />
-        <Ratings anime={a} />
-        <Languages anime={a} />
-        <Related anime={a} />
-        <FanStats anime={a} />
-
-        {extras.data?.characters?.length ? (
-          <Animated.View entering={FadeIn.duration(350)} style={{ marginBottom: 28 }}>
-            <SectionHeader title="Characters & Voice Cast" />
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, gap: 14 }}>
-              {extras.data.characters.map((c, i) => (
-                <Animated.View key={`${c.name}-${i}`} entering={FadeInDown.delay(Math.min(i, 8) * 40)} style={styles.char}>
-                  {c.image ? <Image source={{ uri: c.image }} style={styles.charImg} contentFit="cover" transition={200} /> : <View style={styles.charImg} />}
-                  <Text style={styles.charName} numberOfLines={2}>
-                    {c.name}
-                  </Text>
-                  <Text style={styles.charRole} numberOfLines={1}>
-                    {c.voiceActor || c.role}
-                  </Text>
-                </Animated.View>
-              ))}
-            </ScrollView>
-          </Animated.View>
-        ) : null}
-        <Row title="You might also like" items={extras.data?.recommendations} />
       </Animated.ScrollView>
 
       {/* Floating bar: always shows back / save; turns solid with the title once you scroll */}
@@ -279,19 +244,26 @@ function SaveButton({ anime }: { anime: AnimeDetail }) {
   );
 }
 
-function Actions({ anime, watch }: { anime: AnimeDetail; watch: { name: string; url: string } | null }) {
-  const { inList, toggleList } = useLibrary();
+function Actions({ anime }: { anime: AnimeDetail }) {
+  const { inList, toggleList, progress } = useLibrary();
   const saved = inList(anime.id);
+  const watchedEp = progress[anime.id]?.episode || 0;
+  const nextEp = watchedEp > 0 ? watchedEp + 1 : 1;
+  const watchLabel = watchedEp > 0 ? `Resume Ep ${nextEp}` : 'Watch Episode 1';
+
   return (
     <Animated.View entering={FadeInDown.delay(230).duration(450)} style={styles.actions}>
-      {watch ? (
-        <PressableScale haptic style={styles.primaryBtn} onPress={() => openLink(watch.url)}>
-          <Icon name="play" size={18} color="#000" />
-          <Text style={styles.primaryText} numberOfLines={1}>
-            Watch on {watch.name}
-          </Text>
-        </PressableScale>
-      ) : null}
+      <PressableScale
+        haptic
+        style={styles.primaryBtn}
+        onPress={() => router.push(`/watch/${anime.id}?season=1&ep=${nextEp}` as any)}
+      >
+        <Icon name="play" size={18} color="#000" />
+        <Text style={styles.primaryText} numberOfLines={1}>
+          {watchLabel}
+        </Text>
+      </PressableScale>
+
       <View style={styles.secondaryRow}>
         {anime.trailer ? (
           <PressableScale haptic style={styles.secondaryBtn} onPress={() => openLink(`https://www.youtube.com/watch?v=${anime.trailer}`)}>
@@ -314,217 +286,113 @@ function Actions({ anime, watch }: { anime: AnimeDetail; watch: { name: string; 
   );
 }
 
+// Next-episode card: live badge, rolling Days/Hrs/Min/Sec that tick every
+// second, the exact air time, and how far through the week we are.
+const WEEK = 7 * 86400;
 function NextEpisode({ ep, at }: { ep: number; at: number }) {
-  const [now, setNow] = useState(Date.now() / 1000);
+  const reduce = useReducedMotion();
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now() / 1000), 30000);
+    const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
     return () => clearInterval(t);
   }, []);
-  return (
-    <View style={styles.countdown}>
-      <Icon name="clock" size={18} color={colors.accent} />
-      <Text style={styles.countdownText}>
-        Episode {ep} airs in <Text style={{ color: colors.accent, fontFamily: fonts.black }}>{countdown(at - now)}</Text>
-      </Text>
-    </View>
-  );
-}
+  const left = Math.max(0, at - now);
+  const out = left === 0;
+  const units = [
+    { label: 'Days', value: Math.floor(left / 86400) },
+    { label: 'Hrs', value: Math.floor((left % 86400) / 3600) },
+    { label: 'Min', value: Math.floor((left % 3600) / 60) },
+    { label: 'Sec', value: left % 60 },
+  ];
+  const when = new Date(at * 1000);
+  const whenText =
+    when.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' }) +
+    '  ·  ' +
+    when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
-// "Continue Watching" without a player: the viewer ticks off episodes as they
-// watch them on the official platform, and the home screen picks it up.
-function ProgressTracker({ anime, watch }: { anime: AnimeDetail; watch: { name: string; url: string } | null }) {
-  const { progress, setProgress, clearProgress } = useLibrary();
-  const total = anime.seasonCount && anime.episodeCount ? anime.episodeCount : anime.episodes ?? anime.episodeCount ?? null;
-  const done = progress[anime.id]?.episode ?? 0;
-  const finished = !!total && done >= total;
-  const pct = total ? Math.min(1, done / total) : 0;
-  const w = useSharedValue(pct);
+  // Pulsing live dot and a light sweep across the progress bar.
+  const pulse = useSharedValue(1);
+  const sweep = useSharedValue(0);
   useEffect(() => {
-    w.value = withSpring(pct, springs.soft);
-  }, [pct, w]);
-  const fill = useAnimatedStyle(() => ({ width: `${Math.max(0, Math.min(1, w.value)) * 100}%` }));
+    if (reduce) return;
+    pulse.value = withRepeat(withSequence(withTiming(2.2, { duration: 1100 }), withTiming(1, { duration: 0 })), -1);
+    sweep.value = withRepeat(withTiming(1, { duration: 2200, easing: Easing.inOut(Easing.quad) }), -1);
+  }, [reduce, pulse, sweep]);
+  const ring = useAnimatedStyle(() => ({ transform: [{ scale: pulse.value }], opacity: interpolate(pulse.value, [1, 2.2], [0.6, 0]) }));
 
-  const set = (n: number) => {
-    const next = Math.max(0, total ? Math.min(total, n) : n);
-    setProgress(anime, next, total, watch);
-    haptic(next > done ? 'success' : 'tap');
-  };
+  // How far we are from the last episode (weekly) to this one.
+  const pct = out ? 1 : Math.min(1, Math.max(0.03, 1 - left / WEEK));
+  const [barW, setBarW] = useState(0);
+  const fill = useSharedValue(0);
+  useEffect(() => {
+    fill.value = withTiming(pct, { duration: 900, easing: Easing.out(Easing.cubic) });
+  }, [pct, fill]);
+  const fillStyle = useAnimatedStyle(() => ({ transform: [{ translateX: (fill.value - 1) * barW }] }));
+  const shine = useAnimatedStyle(() => ({ transform: [{ translateX: interpolate(sweep.value, [0, 1], [-80, barW]) }] }));
 
   return (
-    <View style={styles.card}>
-      <View style={styles.cardHead}>
-        <Icon name="history" size={18} color={colors.accent} />
-        <Text style={styles.cardTitle}>Your progress</Text>
-        {done > 0 ? (
-          <PressableScale onPress={() => clearProgress(anime.id)} hitSlop={8}>
-            <Text style={styles.reset}>Reset</Text>
-          </PressableScale>
-        ) : null}
-      </View>
-      <Text style={styles.progressText}>
-        {finished ? 'Finished — nice!' : done ? `Watched ${done}${total ? ` of ${total}` : ''} episodes` : 'Not started yet'}
-      </Text>
-      {total ? (
-        <View style={styles.track}>
-          <Animated.View style={[styles.trackFill, fill]} />
+    <Animated.View entering={FadeInDown.delay(280).duration(450)} style={styles.next}>
+      <LinearGradient colors={['rgba(255,100,10,0.22)', 'rgba(255,100,10,0.04)']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} />
+      <View style={styles.nextHead}>
+        <View style={styles.liveDotWrap}>
+          <Animated.View style={[styles.liveRing, ring]} />
+          <View style={styles.liveDot} />
         </View>
-      ) : null}
-      <View style={styles.stepper}>
-        <PressableScale style={styles.stepBtn} onPress={() => set(done - 1)} disabled={done === 0} accessibilityLabel="One episode less">
-          <Icon name="minus" size={18} color={done === 0 ? colors.surface3 : '#fff'} />
-        </PressableScale>
-        <PressableScale haptic style={[styles.markBtn, finished && { backgroundColor: colors.surface2 }]} onPress={() => set(done + 1)} disabled={finished}>
-          <Icon name="check" size={16} color={finished ? colors.muted : '#000'} />
-          <Text style={[styles.markText, finished && { color: colors.muted }]}>{finished ? 'All watched' : `Mark episode ${done + 1} watched`}</Text>
-        </PressableScale>
-        <PressableScale style={styles.stepBtn} onPress={() => set(done + 1)} disabled={finished} accessibilityLabel="One episode more">
-          <Icon name="plus" size={18} color={finished ? colors.surface3 : '#fff'} />
-        </PressableScale>
+        <Text style={styles.nextKicker}>{out ? 'OUT NOW' : 'NEXT EPISODE'}</Text>
+        <View style={styles.epPill}>
+          <Text style={styles.epPillText}>EP {ep}</Text>
+        </View>
       </View>
-    </View>
-  );
-}
-
-function Synopsis({ text }: { text?: string | null }) {
-  const [open, setOpen] = useState(false);
-  if (!text) return null;
-  return (
-    <View style={styles.section}>
-      <Text style={styles.synopsis} numberOfLines={open ? undefined : 4}>
-        {text}
-      </Text>
-      {text.length > 220 ? (
-        <PressableScale onPress={() => setOpen((o) => !o)} hitSlop={8}>
-          <Text style={styles.more}>{open ? 'Show less' : 'Read more'}</Text>
-        </PressableScale>
-      ) : null}
-    </View>
-  );
-}
-
-function Ratings({ anime }: { anime: AnimeDetail }) {
-  const boxes = [
-    anime.score ? { label: `${anime.source === 'jikan' ? 'MAL' : 'AniList'} score`, value: `${anime.score.toFixed(1)}`, foot: '/ 10', star: true } : null,
-    anime.rank ? { label: 'Ranked', value: `#${anime.rank.toLocaleString()}`, foot: 'all time' } : null,
-    anime.members ? { label: 'Fans', value: fmtNum(anime.members), foot: 'tracking this' } : null,
-    anime.seasonCount ? { label: 'Series', value: String(anime.seasonCount), foot: `${anime.seasonCount === 1 ? 'season' : 'seasons'}${anime.episodeCount ? ` · ${anime.episodeCount} eps` : ''}` } : null,
-  ].filter(Boolean) as { label: string; value: string; foot: string; star?: boolean }[];
-  if (!boxes.length) return null;
-  return (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, gap: 10, marginBottom: 26 }}>
-      {boxes.map((b, i) => (
-        <Animated.View key={b.label} entering={FadeInDown.delay(i * 60)} style={styles.rateBox}>
-          <Text style={styles.rateLabel}>{b.label.toUpperCase()}</Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-            {b.star ? <Icon name="star" size={18} color={colors.star} /> : null}
-            <Text style={styles.rateValue}>{b.value}</Text>
-          </View>
-          <Text style={styles.rateFoot}>{b.foot}</Text>
+      {out ? (
+        <Text style={styles.outNow}>Episode {ep} is out</Text>
+      ) : (
+        <View style={styles.units}>
+          {units.map((u, i) => (
+            <View key={u.label} style={styles.unitWrap}>
+              <View style={styles.unit}>
+                <RollingNumber value={u.value} reduce={reduce} />
+                <Text style={styles.unitLabel}>{u.label}</Text>
+              </View>
+              {i < units.length - 1 ? <Text style={styles.colon}>:</Text> : null}
+            </View>
+          ))}
+        </View>
+      )}
+      <View style={styles.whenRow}>
+        <Icon name="calendar" size={14} color={colors.text2} />
+        <Text style={styles.whenText}>{whenText}</Text>
+      </View>
+      <View style={styles.weekBar} onLayout={(e) => setBarW(e.nativeEvent.layout.width)}>
+        <Animated.View style={[styles.weekFill, fillStyle]}>
+          {!reduce ? (
+            <Animated.View style={[styles.shine, shine]}>
+              <LinearGradient colors={['transparent', 'rgba(255,255,255,0.55)', 'transparent']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={StyleSheet.absoluteFill} />
+            </Animated.View>
+          ) : null}
         </Animated.View>
-      ))}
-    </ScrollView>
+      </View>
+    </Animated.View>
   );
 }
 
-// Only the languages that are actually available.
-function Languages({ anime }: { anime: AnimeDetail }) {
-  const l = anime.languages;
-  const audio = l?.audio?.length ? l.audio : ['Japanese'];
-  const subs = l?.subtitles?.length ? l.subtitles : ['English'];
+// Each new value slides up into place, like a flip clock. One text node that
+// is always on screen; only a transform/opacity plays.
+function RollingNumber({ value, reduce }: { value: number; reduce: boolean }) {
+  const text = String(value).padStart(2, '0');
+  const t = useSharedValue(1);
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current || reduce) {
+      first.current = false;
+      return;
+    }
+    t.value = 0;
+    t.value = withTiming(1, { duration: 280, easing: Easing.out(Easing.cubic) });
+  }, [text, reduce, t]);
+  const style = useAnimatedStyle(() => ({ opacity: 0.25 + t.value * 0.75, transform: [{ translateY: (1 - t.value) * 16 }] }));
   return (
-    <View style={[styles.card, { gap: 14 }]}>
-      <View>
-        <Text style={styles.langHead}>AUDIO</Text>
-        <View style={styles.langList}>
-          {audio.map((lang) => (
-            <View key={lang} style={styles.langChip}>
-              <Icon name="mic" size={15} color={colors.dub} />
-              <Text style={styles.langText}>{lang}</Text>
-              {lang === 'English' && l?.dub === 'partial' ? <Text style={styles.langNote}>some episodes</Text> : null}
-            </View>
-          ))}
-        </View>
-      </View>
-      <View>
-        <Text style={styles.langHead}>SUBTITLES</Text>
-        <View style={styles.langList}>
-          {subs.map((lang) => (
-            <View key={lang} style={styles.langChip}>
-              <Icon name="cc" size={15} color={colors.dub} />
-              <Text style={styles.langText}>{lang}</Text>
-            </View>
-          ))}
-        </View>
-      </View>
-    </View>
-  );
-}
-
-function Related({ anime }: { anime: AnimeDetail }) {
-  const items = useMemo(
-    () =>
-      (anime.relations || [])
-        // AniList can link the same title twice (e.g. as sequel and side story): show it once.
-        .filter((r, i, all) => r.id && r.title && all.findIndex((x) => x.id === r.id) === i)
-        .map((r) => ({ id: r.id as string, title: r.title, image: r.image, type: r.format, year: r.year, relation: r.relation })),
-    [anime.relations]
-  );
-  if (!items.length) return null;
-  return (
-    <View style={{ marginBottom: 28 }}>
-      <SectionHeader title="Related" sub="Seasons, films, spin-offs" />
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, gap: 12 }}>
-        {items.map((r, i) => (
-          <View key={r.id}>
-            <PosterCard anime={r} index={i} width={112} />
-            <Text style={styles.relTag}>{r.relation}</Text>
-          </View>
-        ))}
-      </ScrollView>
-    </View>
-  );
-}
-
-function FanStats({ anime }: { anime: AnimeDetail }) {
-  const dist = (anime.scoreDistribution || []).filter((d) => d.amount);
-  const status = anime.statusDistribution || [];
-  if (!dist.length && !status.length) return null;
-  const max = Math.max(...dist.map((d) => d.amount), 1);
-  const total = dist.reduce((s, d) => s + d.amount, 0);
-  const high = dist.filter((d) => d.score >= 80).reduce((s, d) => s + d.amount, 0);
-  const statusTotal = status.reduce((s, d) => s + d.amount, 0) || 1;
-  const statusColor: Record<string, string> = { Watching: colors.dub, 'Plan to watch': colors.sub, Completed: colors.green, Dropped: colors.danger, 'On hold': colors.star };
-  return (
-    <View style={styles.card}>
-      <Text style={styles.cardTitle}>How fans rated it</Text>
-      {total ? (
-        <Text style={styles.statNote}>
-          <Text style={{ color: colors.green, fontFamily: fonts.black }}>{Math.round((high / total) * 100)}%</Text> rated it 8 or higher · {fmtNum(total)} ratings
-        </Text>
-      ) : null}
-      <View style={styles.dist}>
-        {dist.map((d, i) => (
-          <View key={d.score} style={styles.distCol}>
-            <Animated.View
-              entering={FadeInDown.delay(i * 40).duration(400)}
-              style={[styles.distBar, { height: `${Math.max(4, (d.amount / max) * 100)}%`, backgroundColor: `hsl(${Math.round((d.score / 100) * 120)}, 75%, 52%)` }]}
-            />
-            <Text style={styles.distLabel}>{d.score / 10}</Text>
-          </View>
-        ))}
-      </View>
-      {status.length ? (
-        <View style={{ marginTop: 16, gap: 6 }}>
-          {status.map((s) => (
-            <View key={s.status} style={styles.statusRow}>
-              <View style={[styles.statusDot, { backgroundColor: statusColor[s.status] || colors.muted }]} />
-              <Text style={styles.statusName}>{s.status}</Text>
-              <Text style={styles.statusVal}>{fmtNum(s.amount)}</Text>
-              <Text style={styles.statusPct}>{Math.round((s.amount / statusTotal) * 100)}%</Text>
-            </View>
-          ))}
-        </View>
-      ) : null}
+    <View style={styles.digitBox}>
+      <Animated.Text style={[styles.digit, style]}>{text}</Animated.Text>
     </View>
   );
 }
@@ -572,46 +440,27 @@ const styles = StyleSheet.create({
   secondaryBtn: { flex: 1, height: 46, borderRadius: radius.md, backgroundColor: colors.surface2, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 },
   secondaryOn: { backgroundColor: 'rgba(255,100,10,0.14)' },
   secondaryText: { color: '#fff', fontFamily: fonts.black, fontSize: 13, letterSpacing: 0.4, textTransform: 'uppercase' },
-  countdown: { flexDirection: 'row', alignItems: 'center', gap: 10, marginHorizontal: 16, marginBottom: 16, padding: 14, borderRadius: radius.md, backgroundColor: 'rgba(255,100,10,0.1)', borderWidth: 1, borderColor: 'rgba(255,100,10,0.35)' },
-  countdownText: { color: '#fff', fontFamily: fonts.bold, fontSize: 14 },
-  card: { marginHorizontal: 16, marginBottom: 22, padding: 16, borderRadius: radius.lg, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
-  cardHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  cardTitle: { flex: 1, color: '#fff', fontFamily: fonts.black, fontSize: 16 },
-  reset: { color: colors.muted, fontFamily: fonts.black, fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.5 },
-  progressText: { color: colors.text2, fontFamily: fonts.regular, fontSize: 13.5, marginTop: 8 },
-  track: { height: 6, borderRadius: 3, backgroundColor: colors.surface3, overflow: 'hidden', marginTop: 12 },
-  trackFill: { height: '100%', backgroundColor: colors.accent, borderRadius: 3 },
-  stepper: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 14 },
-  stepBtn: { width: 44, height: 44, borderRadius: radius.md, backgroundColor: colors.surface2, alignItems: 'center', justifyContent: 'center' },
-  markBtn: { flex: 1, height: 44, borderRadius: radius.md, backgroundColor: colors.accent, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingHorizontal: 10 },
-  markText: { color: '#000', fontFamily: fonts.black, fontSize: 13 },
-  section: { paddingHorizontal: 16, marginBottom: 22 },
-  synopsis: { color: '#e4e4e4', fontFamily: fonts.regular, fontSize: 15, lineHeight: 23 },
-  more: { color: colors.accent, fontFamily: fonts.black, fontSize: 12.5, letterSpacing: 0.6, textTransform: 'uppercase', marginTop: 8 },
-  rateBox: { minWidth: 118, padding: 14, borderRadius: radius.md, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
-  rateLabel: { color: colors.muted, fontFamily: fonts.black, fontSize: 10.5, letterSpacing: 1 },
-  rateValue: { color: '#fff', fontFamily: fonts.black, fontSize: 24, marginTop: 4 },
-  rateFoot: { color: colors.muted, fontFamily: fonts.regular, fontSize: 11.5, marginTop: 2 },
-  langHead: { color: colors.muted, fontFamily: fonts.black, fontSize: 11, letterSpacing: 1.4, marginBottom: 10 },
-  langList: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  langChip: { flexDirection: 'row', alignItems: 'center', gap: 7, height: 36, paddingHorizontal: 14, borderRadius: 18, backgroundColor: colors.surface2 },
-  langText: { color: '#fff', fontFamily: fonts.bold, fontSize: 14 },
-  langNote: { color: colors.star, fontFamily: fonts.bold, fontSize: 11.5 },
-  relTag: { position: 'absolute', top: 7, left: 7, color: '#fff', backgroundColor: 'rgba(0,0,0,0.75)', fontFamily: fonts.black, fontSize: 10, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, overflow: 'hidden' },
-  statNote: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12.5, marginTop: 6 },
-  dist: { flexDirection: 'row', alignItems: 'flex-end', gap: 5, height: 120, marginTop: 14 },
-  distCol: { flex: 1, height: '100%', justifyContent: 'flex-end', alignItems: 'center', gap: 5 },
-  distBar: { width: '100%', borderTopLeftRadius: 4, borderTopRightRadius: 4 },
-  distLabel: { color: colors.muted, fontFamily: fonts.bold, fontSize: 10.5 },
-  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  statusDot: { width: 9, height: 9, borderRadius: 3 },
-  statusName: { flex: 1, color: colors.text2, fontFamily: fonts.regular, fontSize: 13.5 },
-  statusVal: { color: '#fff', fontFamily: fonts.bold, fontSize: 13.5 },
-  statusPct: { width: 40, textAlign: 'right', color: colors.muted, fontFamily: fonts.regular, fontSize: 12.5 },
-  char: { width: 92, alignItems: 'center' },
-  charImg: { width: 76, height: 76, borderRadius: 38, backgroundColor: colors.surface2 },
-  charName: { color: '#fff', fontFamily: fonts.bold, fontSize: 12.5, textAlign: 'center', marginTop: 8 },
-  charRole: { color: colors.muted, fontFamily: fonts.regular, fontSize: 11, textAlign: 'center', marginTop: 2 },
+  next: { marginHorizontal: 16, marginBottom: 22, padding: 16, borderRadius: radius.lg, overflow: 'hidden', backgroundColor: colors.surface, borderWidth: 1, borderColor: 'rgba(255,100,10,0.35)' },
+  nextHead: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  liveDotWrap: { width: 12, height: 12, alignItems: 'center', justifyContent: 'center' },
+  liveRing: { position: 'absolute', width: 12, height: 12, borderRadius: 6, backgroundColor: colors.accent },
+  liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.accent },
+  nextKicker: { flex: 1, color: colors.accent, fontFamily: fonts.black, fontSize: 11.5, letterSpacing: 2 },
+  epPill: { paddingHorizontal: 10, height: 24, borderRadius: 12, backgroundColor: colors.accent, justifyContent: 'center' },
+  epPillText: { color: '#000', fontFamily: fonts.black, fontSize: 12 },
+  outNow: { color: '#fff', fontFamily: fonts.black, fontSize: 22, marginTop: 14 },
+  units: { flexDirection: 'row', alignItems: 'flex-start', marginTop: 14 },
+  unitWrap: { flex: 1, flexDirection: 'row', alignItems: 'flex-start' },
+  unit: { flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: radius.md, backgroundColor: 'rgba(0,0,0,0.35)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)' },
+  digitBox: { height: 34, alignSelf: 'stretch', overflow: 'hidden' },
+  digit: { position: 'absolute', left: 0, right: 0, textAlign: 'center', color: '#fff', fontFamily: fonts.black, fontSize: 28, lineHeight: 34, fontVariant: ['tabular-nums'] },
+  unitLabel: { color: colors.muted, fontFamily: fonts.black, fontSize: 10, letterSpacing: 1.2, textTransform: 'uppercase', marginTop: 2 },
+  colon: { color: 'rgba(255,255,255,0.3)', fontFamily: fonts.black, fontSize: 22, lineHeight: 50, paddingHorizontal: 4 },
+  whenRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 14 },
+  whenText: { color: colors.text2, fontFamily: fonts.bold, fontSize: 13 },
+  weekBar: { height: 5, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.08)', overflow: 'hidden', marginTop: 12 },
+  weekFill: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 3, backgroundColor: colors.accent, overflow: 'hidden' },
+  shine: { position: 'absolute', top: 0, bottom: 0, width: 80 },
   topBar: { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10 },
   topRow: { height: 54, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, gap: 12 },
   barTitle: { flex: 1, color: '#fff', fontFamily: fonts.black, fontSize: 16, textAlign: 'center' },

@@ -39,7 +39,7 @@ export default function LibraryScreen() {
       lib.clearHistory();
       return;
     }
-    Alert.alert('Clear history?', 'This removes every title you have viewed.', [
+    Alert.alert('Clear history?', 'This removes every title you have watched.', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Clear', style: 'destructive', onPress: lib.clearHistory },
     ]);
@@ -68,7 +68,7 @@ export default function LibraryScreen() {
           keyExtractor={(p) => p.anime.id}
           contentContainerStyle={styles.list}
           ListEmptyComponent={
-            <EmptyState icon="history" title="Nothing in progress" text="Open any anime and tap “Mark episode watched” to track where you are." action="Browse anime" onAction={() => router.push('/browse')} />
+            <EmptyState icon="history" title="Nothing in progress" text="Start watching any anime and you can pick it up again here." action="Browse anime" onAction={() => router.push('/browse')} />
           }
           renderItem={({ item, index }) => (
             <Animated.View exiting={FadeOut} layout={LinearTransition.springify()} style={{ marginBottom: 18 }}>
@@ -107,7 +107,7 @@ export default function LibraryScreen() {
               </PressableScale>
             ) : undefined
           }
-          ListEmptyComponent={<EmptyState icon="history" title="No history yet" text="Titles you open will show up here." />}
+          ListEmptyComponent={<EmptyState icon="history" title="No history yet" text="Anime you watch will show up here." />}
           renderItem={({ item, index }) => (
             <Animated.View entering={FadeInDown.delay(Math.min(index, 10) * 30)} exiting={FadeOut} layout={LinearTransition.springify()}>
               <PressableScale onPress={() => router.push(`/anime/${item.anime.id}`)} style={styles.historyRow}>

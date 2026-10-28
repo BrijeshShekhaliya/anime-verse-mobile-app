@@ -1,8 +1,8 @@
 import { Image } from 'expo-image';
-import { router } from 'expo-router';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FlatList, ScrollView, StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
-import Animated, { Easing, FadeIn, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
+import { router, useFocusEffect } from 'expo-router';
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { FlatList, Platform, ScrollView, StyleSheet, Text, View, useWindowDimensions, type ScrollViewInstance } from 'react-native';
+import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LangBadges, Score } from '@/components/Badges';
 import { Icon } from '@/components/Icon';
@@ -16,6 +16,12 @@ import type { Anime } from '@/lib/types';
 
 const DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const EASE = Easing.out(Easing.cubic);
+// Every day button is the same width, so the pill only ever slides (a cheap
+// transform) and never resizes, which would re-layout on every frame.
+const DAY_W = 78;
+const DAY_GAP = 8;
+const DAY_PAD = 16;
+const dayX = (i: number) => DAY_PAD + i * (DAY_W + DAY_GAP);
 
 export default function ScheduleScreen() {
   const insets = useSafeAreaInsets();
@@ -61,46 +67,71 @@ export default function ScheduleScreen() {
     if (!lists[day]) loadDay(day).catch(() => {});
   }, [day, lists, loadDay]);
 
+  // Coming back to this tab quietly refreshes the week. The API client hands
+  // back its cached copy while it's still fresh, so this costs no requests
+  // until the data is actually old, and nothing re-renders if it didn't change.
+  const firstFocus = useRef(true);
+  useFocusEffect(
+    useCallback(() => {
+      if (firstFocus.current) {
+        firstFocus.current = false;
+        return;
+      }
+      week.forEach((w) => loadDay(w.key).catch(() => {}));
+    }, [loadDay, week])
+  );
+
   const [now, setNow] = useState(Date.now() / 1000);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now() / 1000), 30000);
     return () => clearInterval(t);
   }, []);
 
-  // Orange pill that glides between days (timed, not springy, so it settles fast).
-  const layouts = useRef<Record<string, { x: number; w: number }>>({});
-  const px = useSharedValue(0);
-  const pw = useSharedValue(0);
-  const placePill = useCallback(
-    (key: string, animate: boolean) => {
-      const l = layouts.current[key];
-      if (!l) return;
-      if (!animate || pw.value === 0) {
-        px.value = l.x;
-        pw.value = l.w;
-      } else {
-        px.value = withTiming(l.x, { duration: 240, easing: EASE });
-        pw.value = withTiming(l.w, { duration: 240, easing: EASE });
-      }
-    },
-    [px, pw]
-  );
-  useEffect(() => placePill(day, true), [day, placePill]);
-  const pill = useAnimatedStyle(() => ({ transform: [{ translateX: px.value }], width: pw.value }));
+  // Orange pill that glides between days. It moves on the UI thread right away;
+  // the list below catches up a moment later (deferred), so a tap never stalls.
+  const dayIndex = Math.max(0, week.findIndex((w) => w.key === day));
+  const px = useSharedValue(dayX(dayIndex));
+  const daysRef = useRef<ScrollViewInstance>(null);
+  const { width: screenW } = useWindowDimensions();
+  useEffect(() => {
+    px.value = withTiming(dayX(dayIndex), { duration: 260, easing: EASE });
+    // Keep the chosen day in view when it's near the edge.
+    daysRef.current?.scrollTo({ x: Math.max(0, dayX(dayIndex) - (screenW - DAY_W) / 2), animated: true });
+  }, [dayIndex, px, screenW]);
+  const pill = useAnimatedStyle(() => ({ transform: [{ translateX: px.value }] }));
 
-  const items = lists[day];
+  // The list renders the deferred day: React draws the pill/labels first and
+  // swaps the (heavier) list right after, instead of both in one frame.
+  const shownDay = useDeferredValue(day);
+
+  const items = lists[shownDay];
   const sorted = useMemo(
     () => (items ? [...items].sort((a, b) => (a.nextEpisode?.airingAt || 9e9) - (b.nextEpisode?.airingAt || 9e9)) : null),
     [items]
   );
   const firstUpcoming = useMemo(() => sorted?.findIndex((a) => (a.nextEpisode?.airingAt || 0) > now) ?? -1, [sorted, now]);
 
+  // Day change: jump the list to the top and fade the new day in.
+  const listRef = useRef<FlatList<Anime>>(null);
+  const fade = useSharedValue(1);
+  const firstDay = useRef(true);
+  useEffect(() => {
+    if (firstDay.current) {
+      firstDay.current = false;
+      return;
+    }
+    listRef.current?.scrollToOffset({ offset: 0, animated: false });
+    fade.value = 0.3;
+    fade.value = withTiming(1, { duration: 180, easing: EASE });
+  }, [shownDay, fade]);
+  const listFade = useAnimatedStyle(() => ({ opacity: fade.value }));
+
   return (
     <View style={styles.screen}>
       <View style={{ paddingTop: insets.top + 12 }}>
         <Text style={styles.title}>Release Schedule</Text>
         <Text style={styles.sub}>New episodes this week, in your local time</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.days}>
+        <ScrollView ref={daysRef} horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.days}>
           <Animated.View style={[styles.pill, pill]} />
           {week.map((w) => {
             const on = w.key === day;
@@ -110,10 +141,6 @@ export default function ScheduleScreen() {
                 key={w.key}
                 haptic
                 onPress={() => setDay(w.key)}
-                onLayout={(e: LayoutChangeEvent) => {
-                  layouts.current[w.key] = { x: e.nativeEvent.layout.x, w: e.nativeEvent.layout.width };
-                  if (w.key === day) placePill(day, false);
-                }}
                 style={styles.day}
                 accessibilityState={{ selected: on }}
               >
@@ -128,7 +155,7 @@ export default function ScheduleScreen() {
 
       {!sorted ? (
         failed ? (
-          <ErrorState message={failed} onRetry={() => { setFailed(null); loadDay(day).catch(() => {}); }} />
+          <ErrorState message={failed} onRetry={() => { setFailed(null); loadDay(shownDay).catch(() => {}); }} />
         ) : (
           <View style={{ padding: 16, gap: 10 }}>
             {[0, 1, 2, 3, 4].map((i) => (
@@ -137,17 +164,22 @@ export default function ScheduleScreen() {
           </View>
         )
       ) : (
-        // A quick crossfade when the day changes; rows don't re-animate one by one.
-        <Animated.View key={day} entering={FadeIn.duration(180)} style={{ flex: 1 }}>
+        // One list that stays mounted: switching days swaps its data and fades it
+        // in, instead of rebuilding the whole list (much cheaper on slower phones).
+        <Animated.View style={[{ flex: 1 }, listFade]}>
           <FlatList
+            ref={listRef}
             data={sorted}
-            // A show can release two episodes on the same day, so the episode is part of the key.
-            keyExtractor={(a) => `${a.id}-${a.nextEpisode?.episode ?? ''}`}
+            // The same show can appear twice in a day (two episodes, even at the
+            // same time), so the key includes the episode and the row position.
+            keyExtractor={(a, i) => `${a.id}-${a.nextEpisode?.episode ?? ''}-${i}`}
             contentContainerStyle={{ padding: 16, gap: 10, paddingBottom: insets.bottom + 100 }}
             ListEmptyComponent={<EmptyState icon="calendar" title="Nothing scheduled" text="No episodes are listed for this day yet." />}
-            initialNumToRender={8}
-            windowSize={7}
-            renderItem={({ item, index }) => <Slot anime={item} now={now} showNow={day === todayKey && index === firstUpcoming && index > 0} />}
+            initialNumToRender={7}
+            maxToRenderPerBatch={6}
+            windowSize={5}
+            removeClippedSubviews={Platform.OS === 'android'}
+            renderItem={({ item, index }) => <Slot anime={item} now={now} showNow={shownDay === todayKey && index === firstUpcoming && index > 0} />}
           />
         </Animated.View>
       )}
@@ -197,14 +229,14 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   title: { color: '#fff', fontFamily: fonts.black, fontSize: 28, paddingHorizontal: 16 },
   sub: { color: colors.muted, fontFamily: fonts.regular, fontSize: 13, paddingHorizontal: 16, marginTop: 4 },
-  days: { paddingHorizontal: 16, paddingVertical: 14, gap: 8 },
-  pill: { position: 'absolute', top: 14, left: 0, height: 60, borderRadius: radius.md, backgroundColor: colors.accent },
-  day: { minWidth: 72, height: 60, borderRadius: radius.md, paddingHorizontal: 12, justifyContent: 'center', borderWidth: 1, borderColor: colors.line },
+  days: { paddingHorizontal: DAY_PAD, paddingVertical: 14, gap: DAY_GAP },
+  pill: { position: 'absolute', top: 14, left: 0, width: DAY_W, height: 60, borderRadius: radius.md, backgroundColor: colors.accent },
+  day: { width: DAY_W, height: 60, borderRadius: radius.md, paddingHorizontal: 10, justifyContent: 'center', borderWidth: 1, borderColor: colors.line },
   dayName: { color: colors.muted, fontFamily: fonts.black, fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.8 },
   dayDate: { color: '#fff', fontFamily: fonts.black, fontSize: 15, marginTop: 1 },
   dayCount: { color: colors.muted, fontFamily: fonts.bold, fontSize: 10.5, marginTop: 1 },
-  dayCountOn: { color: 'rgba(0,0,0,0.6)' },
-  dayOn: { color: '#000' },
+  dayCountOn: { color: 'rgba(255,255,255,0.85)' },
+  dayOn: { color: '#fff' },
   slot: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 10, borderRadius: radius.md, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
   time: { width: 58, color: '#fff', fontFamily: fonts.black, fontSize: 14, textAlign: 'center' },
   thumb: { width: 50, height: 70, borderRadius: radius.sm, backgroundColor: colors.surface2 },

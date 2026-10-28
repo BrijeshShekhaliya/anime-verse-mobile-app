@@ -13,9 +13,10 @@ export function ContinueCard({ item, index = 0, width = 260 }: { item: Progress;
   const a = item.anime;
   const art = a.backdrop || a.banner || a.image || undefined;
   const pct = item.total ? Math.min(1, item.episode / item.total) : 0;
+  const nextEp = item.total && item.episode >= item.total ? item.episode : item.episode + 1;
   return (
     <Animated.View entering={FadeInRight.delay(Math.min(index, 6) * 60).duration(380)} style={{ width }}>
-      <PressableScale onPress={() => router.push(`/anime/${a.id}`)} accessibilityLabel={`Continue ${a.title}`}>
+      <PressableScale onPress={() => router.push(`/watch/${a.id}?ep=${nextEp}` as any)} accessibilityLabel={`Continue ${a.title}`}>
         <View style={[styles.art, { height: width * 0.56 }]}>
           {art && <Image source={{ uri: art }} style={StyleSheet.absoluteFill} contentFit="cover" transition={220} cachePolicy="memory-disk" />}
           <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={StyleSheet.absoluteFill} />

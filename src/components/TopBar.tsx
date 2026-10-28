@@ -25,7 +25,7 @@ export function TopBar({ scrollY, solidAfter = 80 }: { scrollY: SharedValue<numb
             Anime<Text style={{ color: colors.accent }}>Verse</Text>
           </Text>
         </View>
-        <PressableScale haptic onPress={() => router.push('/search')} style={styles.search} accessibilityLabel="Search anime">
+        <PressableScale haptic onPress={() => router.push('/browse?focus=1')} style={styles.search} accessibilityLabel="Search anime">
           <Icon name="search" size={20} color="#fff" />
         </PressableScale>
       </View>

@@ -20,6 +20,19 @@ export function LangBadges({ anime, size = 'sm' }: { anime: Pick<Anime, 'languag
   );
 }
 
+export function EpisodeBadges({ hasSub, hasDub }: { hasSub?: boolean; hasDub?: boolean }) {
+  return (
+    <View style={styles.row}>
+      {hasSub !== false && (
+        <Text style={[styles.chip, { color: colors.sub, backgroundColor: 'rgba(167,167,255,0.14)' }]}>SUB</Text>
+      )}
+      {hasDub && (
+        <Text style={[styles.chip, { color: colors.dub, backgroundColor: 'rgba(42,189,187,0.14)' }]}>DUB</Text>
+      )}
+    </View>
+  );
+}
+
 export function Score({ value, size = 13 }: { value?: number | null; size?: number }) {
   if (!value) return null;
   return (

@@ -12,6 +12,7 @@ import { EmptyState } from '@/components/States';
 import { api } from '@/lib/api';
 import { factsOf } from '@/lib/format';
 import { useLibrary } from '@/lib/library';
+import { rankByQuery } from '@/lib/searchRank';
 import { colors, fonts, radius } from '@/lib/theme';
 import type { Anime } from '@/lib/types';
 
@@ -41,7 +42,7 @@ export default function SearchScreen() {
     const t = setTimeout(() => {
       api
         .search({ q: term })
-        .then((r) => mine === seq.current && setResults(r.items))
+        .then((r) => mine === seq.current && setResults(rankByQuery(r.items, term)))
         .catch(() => mine === seq.current && setResults([]))
         .finally(() => mine === seq.current && setBusy(false));
     }, 320);
