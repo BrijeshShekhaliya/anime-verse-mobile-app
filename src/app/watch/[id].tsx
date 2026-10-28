@@ -431,6 +431,15 @@ export default function WatchScreen() {
   // Resolve stream URL for current episode/season
   useEffect(() => {
     if (!playerPreferencesLoaded || server !== 'hianime' || !anime?.title) return;
+    // If the saved preference is Dub and anime-level metadata does not say
+    // whether Dub exists, wait for episode metadata instead of resolving Sub
+    // first and immediately issuing a second resolver request for Dub.
+    const dubAvailabilityUnknown =
+      currentLangRef.current === 'dub' &&
+      anime.languages?.dub !== 'full' &&
+      anime.languages?.dub !== 'partial' &&
+      !epData;
+    if (dubAvailabilityUnknown) return;
 
     let cancelled = false;
     currentEpisodeKeyRef.current = `${currentSeason}:${currentEp}`;
@@ -476,7 +485,7 @@ export default function WatchScreen() {
     return () => {
       cancelled = true;
     };
-  }, [playerPreferencesLoaded, server, anime?.title, anime?.titleRomaji, currentSeason, currentEp, currentEpHasDub, resolveStreamWithCache]);
+  }, [playerPreferencesLoaded, server, anime?.title, anime?.titleRomaji, anime?.languages?.dub, epData, currentSeason, currentEp, currentEpHasDub, resolveStreamWithCache]);
 
   // Alternate Sub/Dub streams are resolved on demand instead of during cold
   // start. Eager prefetch ran before HLS reported in-band audio tracks, creating
