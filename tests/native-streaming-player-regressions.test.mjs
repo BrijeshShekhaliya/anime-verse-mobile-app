@@ -3,21 +3,24 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const route = await readFile(new URL('../src/app/watch/[id].tsx', import.meta.url), 'utf8');
-const player = await readFile(new URL('../src/components/player/NativeHlsPlayer.tsx', import.meta.url), 'utf8');
+const player = await readFile(new URL('../src/components/player/ExpoVideoHlsPlayer.tsx', import.meta.url), 'utf8');
+const nativePlayer = await readFile(new URL('../src/components/player/NativeHlsPlayer.tsx', import.meta.url), 'utf8');
 const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 const appConfig = JSON.parse(await readFile(new URL('../app.json', import.meta.url), 'utf8'));
 
-describe('Expo Go compatible streaming player regressions', () => {
-  test('HiAnime route renders the Expo Video player and keeps WebView only for VidRift', () => {
+describe('Native and fallback streaming player regressions', () => {
+  test('HiAnime route uses the platform-dispatched player and keeps WebView only for VidRift', () => {
     assert.match(route, /import NativeHlsPlayer/);
     assert.match(route, /server === 'hianime' ?/);
     assert.match(route, /<NativeHlsPlayer/);
+    assert.match(nativePlayer, /Platform\.OS !== 'android'/);
+    assert.match(nativePlayer, /<AndroidMedia3Player/);
     assert.match(route, /source=\{\{ uri: vidriftEmbedUrl \}\}/);
     assert.doesNotMatch(route, /new Hls\(/);
     assert.doesNotMatch(route, /const hianimeHtml/);
   });
 
-  test('Player uses expo-video instead of the unsupported RCTVideo native view', () => {
+  test('Non-Android fallback uses expo-video instead of the unsupported RCTVideo native view', () => {
     assert.match(player, /from 'expo-video'/);
     assert.match(player, /useVideoPlayer\(null/);
     assert.match(player, /<VideoView\b/);
@@ -46,7 +49,7 @@ describe('Expo Go compatible streaming player regressions', () => {
     assert.match(route, /setIsSwitchingAudio\(false\)/);
   });
 
-  test('Expo Video reports supported in-band audio, subtitle and video variant tracks', () => {
+  test('Expo Video fallback reports supported in-band audio, subtitle and video variant tracks', () => {
     assert.match(player, /availableAudioTracks/);
     assert.match(player, /availableSubtitleTracks/);
     assert.match(player, /availableVideoTracks/);
@@ -55,12 +58,12 @@ describe('Expo Go compatible streaming player regressions', () => {
     assert.match(player, /onVideoTracks\(toVideoLevels\(player\)\)/);
   });
 
-  test('HLS headers and buffering configuration are preserved through expo-video', () => {
+  test('HLS headers and buffering configuration are preserved in the Expo Video fallback', () => {
     assert.match(player, /contentType: 'hls'/);
     assert.match(player, /headers: \{ Referer: referer, referer \}/);
     assert.match(player, /preferredForwardBufferDuration: 60/);
     assert.match(player, /surfaceType="textureView"/);
-    assert.match(player, /maxBufferBytes: 60 \* 1024 \* 1024/);
+    assert.match(player, /maxBufferBytes: 128 \* 1024 \* 1024/);
     assert.doesNotMatch(player, /player\.videoTrack\s*=/);
     assert.match(route, /setResolvingHls\(false\);\s*setIsBuffering\(true\);\s*setMountedStream\(resolved\)/);
     assert.match(route, /nativeSeekTargetRef\.current = target/);

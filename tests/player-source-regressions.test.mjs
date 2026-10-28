@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const route = await readFile(new URL('../src/app/watch/[id].tsx', import.meta.url), 'utf8');
-const player = await readFile(new URL('../src/components/player/NativeHlsPlayer.tsx', import.meta.url), 'utf8');
+const player = await readFile(new URL('../src/components/player/ExpoVideoHlsPlayer.tsx', import.meta.url), 'utf8');
+const nativePlayer = await readFile(new URL('../src/components/player/NativeHlsPlayer.tsx', import.meta.url), 'utf8');
 
 describe('Player source-level regressions', () => {
-  test('HiAnime route uses Expo Video instead of generating HLS HTML', () => {
+  test('HiAnime route uses the platform-dispatched player instead of generating HLS HTML', () => {
     assert.match(route, /import NativeHlsPlayer/);
     assert.match(route, /<NativeHlsPlayer/);
+    assert.match(nativePlayer, /Platform\.OS !== 'android'/);
+    assert.match(nativePlayer, /<AndroidMedia3Player/);
     assert.match(route, /server === 'hianime' \?/);
     assert.match(route, /source=\{\{ uri: vidriftEmbedUrl \}\}/);
     assert.doesNotMatch(route, /new Hls\(/);
@@ -36,13 +39,13 @@ describe('Player source-level regressions', () => {
     assert.match(route, /setResumeAfterSourceChange\(null\)/);
   });
 
-  test('Expo Video player keeps one view and configures adaptive HLS buffering', () => {
+  test('Expo Video fallback keeps one view and configures adaptive HLS buffering', () => {
     assert.equal((player.match(/<VideoView\b/g) || []).length, 1);
     assert.match(player, /player\.replaceAsync\(source\)/);
     assert.match(player, /contentType: 'hls'/);
     assert.match(player, /preferredForwardBufferDuration: 60/);
     assert.match(player, /player\.maxResolution/);
-    assert.match(player, /maxBufferBytes: 60 \* 1024 \* 1024/);
+    assert.match(player, /maxBufferBytes: 128 \* 1024 \* 1024/);
     assert.doesNotMatch(player, /player\.videoTrack\s*=/);
     assert.match(player, /player\.maxResolution = null/);
     assert.match(player, /surfaceType="textureView"/);
