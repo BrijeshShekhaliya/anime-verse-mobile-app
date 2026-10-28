@@ -1,12 +1,17 @@
 import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
-import { Tabs } from 'expo-router';
+import { Tabs, type BottomTabBarProps } from 'expo-router/js-tabs';
 import { useEffect } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
+import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Icon, type IconName } from '@/components/Icon';
-import { colors, fonts, springs } from '@/lib/theme';
+import { colors, fonts } from '@/lib/theme';
+
+const EASE = Easing.out(Easing.cubic);
+// Live blur is cheap on iOS but costly on Android (it re-blurs every frame while
+// content scrolls behind it), so Android gets a near-solid bar instead.
+const USE_BLUR = Platform.OS === 'ios';
 
 const TABS: { name: string; title: string; icon: IconName }[] = [
   { name: 'index', title: 'Home', icon: 'home' },
@@ -15,17 +20,13 @@ const TABS: { name: string; title: string; icon: IconName }[] = [
   { name: 'library', title: 'My List', icon: 'list' },
 ];
 
-type BarProps = { state: { index: number; routes: { key: string; name: string }[] }; navigation: { emit: (e: any) => any; navigate: (name: string) => void } };
-
 function TabItem({ tab, focused, onPress }: { tab: (typeof TABS)[number]; focused: boolean; onPress: () => void }) {
-  const scale = useSharedValue(1);
+  // Selected icon lifts slightly; a short eased move, no bounce.
+  const lift = useSharedValue(focused ? 1 : 0);
   useEffect(() => {
-    if (focused) {
-      scale.value = 0.82;
-      scale.value = withSpring(1, springs.bouncy);
-    }
-  }, [focused, scale]);
-  const style = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+    lift.value = withTiming(focused ? 1 : 0, { duration: 200, easing: EASE });
+  }, [focused, lift]);
+  const style = useAnimatedStyle(() => ({ transform: [{ translateY: -2 * lift.value }, { scale: 1 + 0.08 * lift.value }] }));
   const color = focused ? colors.accent : colors.muted;
   return (
     <Pressable onPress={onPress} style={styles.item} accessibilityRole="tab" accessibilityState={{ selected: focused }} accessibilityLabel={tab.title}>
@@ -37,21 +38,23 @@ function TabItem({ tab, focused, onPress }: { tab: (typeof TABS)[number]; focuse
   );
 }
 
-// Frosted tab bar with an orange indicator that springs to the active tab.
-function TabBar({ state, navigation }: BarProps) {
+// Tab bar with an orange indicator that glides to the active tab.
+// Expo Router (SDK 58) gives a custom tab bar `emitter` and `navigateToTab`,
+// not a `navigation` object.
+function TabBar({ state, emitter, navigateToTab }: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const tabW = width / TABS.length;
   const x = useSharedValue(state.index * tabW);
   useEffect(() => {
-    x.value = withSpring(state.index * tabW, springs.soft);
+    x.value = withTiming(state.index * tabW, { duration: 240, easing: EASE });
   }, [state.index, tabW, x]);
   const indicator = useAnimatedStyle(() => ({ transform: [{ translateX: x.value + tabW / 2 - 14 }] }));
 
   return (
     <View style={[styles.bar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-      <BlurView intensity={50} tint="dark" style={StyleSheet.absoluteFill} />
-      <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(14,15,19,0.86)' }]} />
+      {USE_BLUR ? <BlurView intensity={50} tint="dark" style={StyleSheet.absoluteFill} /> : null}
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: USE_BLUR ? 'rgba(14,15,19,0.86)' : 'rgba(14,15,19,0.97)' }]} />
       <Animated.View style={[styles.indicator, indicator]} />
       <View style={styles.row}>
         {TABS.map((tab, i) => {
@@ -64,9 +67,9 @@ function TabBar({ state, navigation }: BarProps) {
               focused={focused}
               onPress={() => {
                 if (!route) return;
-                const ev = navigation.emit({ type: 'tabPress', target: route.key, canPreventDefault: true });
+                const ev = emitter.emit({ type: 'tabPress', target: route.key, canPreventDefault: true });
                 if (Platform.OS !== 'web') Haptics.selectionAsync().catch(() => {});
-                if (!focused && !ev.defaultPrevented) navigation.navigate(route.name);
+                if (!focused && !ev.defaultPrevented) navigateToTab(route.key);
               }}
             />
           );
@@ -78,7 +81,8 @@ function TabBar({ state, navigation }: BarProps) {
 
 export default function TabsLayout() {
   return (
-    <Tabs screenOptions={{ headerShown: false, sceneStyle: { backgroundColor: colors.bg } }} tabBar={(props) => <TabBar {...(props as unknown as BarProps)} />}>
+    // freezeOnBlur: tabs you leave stop re-rendering, so switching stays smooth.
+    <Tabs screenOptions={{ headerShown: false, sceneStyle: { backgroundColor: colors.bg }, freezeOnBlur: true }} tabBar={(props) => <TabBar {...props} />}>
       {TABS.map((t) => (
         <Tabs.Screen key={t.name} name={t.name} options={{ title: t.title }} />
       ))}

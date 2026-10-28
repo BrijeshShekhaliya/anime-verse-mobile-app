@@ -39,11 +39,15 @@ export const PosterCard = memo(function PosterCard({
               {anime.title}
             </Text>
           )}
-          {anime.airing && (
+          {anime.airing ? (
             <View style={styles.tag}>
               <Pill label="● Airing" tone="accent" />
             </View>
-          )}
+          ) : /not yet|upcoming/i.test(anime.status || '') ? (
+            <View style={styles.tag}>
+              <Pill label="Upcoming" />
+            </View>
+          ) : null}
           {rank != null && <Text style={styles.rank}>{rank}</Text>}
         </View>
         <Text style={styles.title} numberOfLines={2}>

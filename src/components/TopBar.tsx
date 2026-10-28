@@ -1,6 +1,6 @@
 import { BlurView } from 'expo-blur';
 import { router } from 'expo-router';
-import { StyleSheet, Text, View } from 'react-native';
+import { Platform, StyleSheet, Text, View } from 'react-native';
 import Animated, { interpolate, useAnimatedStyle, type SharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Icon, LogoMark } from './Icon';
@@ -15,8 +15,8 @@ export function TopBar({ scrollY, solidAfter = 80 }: { scrollY: SharedValue<numb
   return (
     <View style={[styles.wrap, { paddingTop: insets.top }]} pointerEvents="box-none">
       <Animated.View style={[StyleSheet.absoluteFill, bg]}>
-        <BlurView intensity={40} tint="dark" style={StyleSheet.absoluteFill} />
-        <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(14,15,19,0.78)' }]} />
+        {Platform.OS === 'ios' ? <BlurView intensity={40} tint="dark" style={StyleSheet.absoluteFill} /> : null}
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: Platform.OS === 'ios' ? 'rgba(14,15,19,0.78)' : 'rgba(14,15,19,0.96)' }]} />
       </Animated.View>
       <View style={styles.bar}>
         <View style={styles.brand}>

@@ -14,8 +14,10 @@ import Animated, {
   useAnimatedScrollHandler,
   useAnimatedStyle,
   useSharedValue,
+  withRepeat,
   withSequence,
   withSpring,
+  withTiming,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LangBadges } from '@/components/Badges';
@@ -96,8 +98,8 @@ export default function DetailScreen() {
   return (
     <View style={styles.screen}>
       <Animated.ScrollView onScroll={onScroll} scrollEventThrottle={16} contentContainerStyle={{ paddingBottom: insets.bottom + 40 }}>
-        {/* Backdrop */}
-        <View style={{ height: heroH }}>
+        {/* Backdrop: clipped to its box so the parallax never slides over the title. */}
+        <View style={{ height: heroH, overflow: 'hidden' }}>
           <Animated.View style={[StyleSheet.absoluteFill, artStyle]}>
             {art && <Image source={{ uri: art }} style={StyleSheet.absoluteFill} contentFit="cover" transition={300} cachePolicy="memory-disk" />}
           </Animated.View>
@@ -131,6 +133,7 @@ export default function DetailScreen() {
             <Text style={styles.facts}>{facts.join('  ·  ')}</Text>
           </Animated.View>
           <View style={styles.badgeRow}>
+            <StatusBadge anime={a} />
             <LangBadges anime={a} size="md" />
             {a.contentRating ? (
               <View style={styles.age}>
@@ -184,8 +187,8 @@ export default function DetailScreen() {
       {/* Floating bar: always shows back / save; turns solid with the title once you scroll */}
       <View style={[styles.topBar, { paddingTop: insets.top }]} pointerEvents="box-none">
         <Animated.View style={[StyleSheet.absoluteFill, barStyle]}>
-          <BlurView intensity={40} tint="dark" style={StyleSheet.absoluteFill} />
-          <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(14,15,19,0.82)' }]} />
+          {Platform.OS === 'ios' ? <BlurView intensity={40} tint="dark" style={StyleSheet.absoluteFill} /> : null}
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: Platform.OS === 'ios' ? 'rgba(14,15,19,0.82)' : 'rgba(14,15,19,0.97)' }]} />
         </Animated.View>
         <View style={styles.topRow}>
           <RoundButton icon="left" label="Back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} />
@@ -195,6 +198,45 @@ export default function DetailScreen() {
           <SaveButton anime={a} />
         </View>
       </View>
+    </View>
+  );
+}
+
+// Airing / Finished / Upcoming, with a pulsing dot while a show is airing.
+function StatusBadge({ anime }: { anime: AnimeDetail }) {
+  // Series pages use the series-wide status (same source as the facts line),
+  // so a finished Season 1 of a show that's still airing reads "Airing".
+  const t = (anime.tmdbStatus || '').toLowerCase();
+  const s = (anime.status || '').toLowerCase();
+  const kind = t
+    ? t === 'airing'
+      ? 'airing'
+      : t === 'planned' || t === 'in production'
+        ? 'upcoming'
+        : 'finished'
+    : anime.airing || (s.includes('airing') && !s.includes('finished'))
+      ? 'airing'
+      : s.includes('not yet') || s.includes('upcoming')
+        ? 'upcoming'
+        : s
+          ? 'finished'
+          : null;
+  const pulse = useSharedValue(1);
+  useEffect(() => {
+    if (kind !== 'airing') return;
+    pulse.value = withRepeat(withSequence(withTiming(0.35, { duration: 700 }), withTiming(1, { duration: 700 })), -1);
+  }, [kind, pulse]);
+  const dot = useAnimatedStyle(() => ({ opacity: pulse.value }));
+  if (!kind) return null;
+  const look = {
+    airing: { text: 'Airing', color: colors.green, bg: 'rgba(95,208,104,0.14)' },
+    upcoming: { text: 'Upcoming', color: colors.sub, bg: 'rgba(167,167,255,0.14)' },
+    finished: { text: 'Finished', color: colors.text2, bg: 'rgba(255,255,255,0.08)' },
+  }[kind];
+  return (
+    <View style={[styles.status, { backgroundColor: look.bg }]}>
+      <Animated.View style={[styles.statusDotBadge, { backgroundColor: look.color }, dot]} />
+      <Text style={[styles.statusBadgeText, { color: look.color }]}>{look.text}</Text>
     </View>
   );
 }
@@ -422,7 +464,8 @@ function Related({ anime }: { anime: AnimeDetail }) {
   const items = useMemo(
     () =>
       (anime.relations || [])
-        .filter((r) => r.id && r.title)
+        // AniList can link the same title twice (e.g. as sequel and side story): show it once.
+        .filter((r, i, all) => r.id && r.title && all.findIndex((x) => x.id === r.id) === i)
         .map((r) => ({ id: r.id as string, title: r.title, image: r.image, type: r.format, year: r.year, relation: r.relation })),
     [anime.relations]
   );
@@ -516,6 +559,9 @@ const styles = StyleSheet.create({
   badgeRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 12 },
   age: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, height: 24, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255,255,255,0.25)' },
   ageText: { color: '#fff', fontFamily: fonts.black, fontSize: 11.5 },
+  status: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 24, paddingHorizontal: 10, borderRadius: 12 },
+  statusDotBadge: { width: 7, height: 7, borderRadius: 4 },
+  statusBadgeText: { fontFamily: fonts.black, fontSize: 11.5 },
   genres: { gap: 8, paddingVertical: 14, paddingHorizontal: 4 },
   genre: { backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: radius.sm, paddingHorizontal: 12, height: 30, justifyContent: 'center' },
   genreText: { color: '#fff', fontFamily: fonts.bold, fontSize: 12.5 },

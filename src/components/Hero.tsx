@@ -1,12 +1,15 @@
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Platform, StyleSheet, Text, View, useWindowDimensions, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import Animated, {
+  Easing,
   Extrapolation,
+  cancelAnimation,
   interpolate,
+  runOnJS,
   useAnimatedRef,
   useAnimatedScrollHandler,
   useAnimatedStyle,
@@ -24,15 +27,27 @@ import type { Anime } from '@/lib/types';
 
 const AUTO_MS = 6500;
 
-function Slide({ anime, index, width, height, scrollX }: { anime: Anime; index: number; width: number; height: number; scrollX: SharedValue<number> }) {
+function Slide({ anime, index, width, height, scrollX, active }: { anime: Anime; index: number; width: number; height: number; scrollX: SharedValue<number>; active: boolean }) {
   const { inList, toggleList } = useLibrary();
   const saved = inList(anime.id);
   const art = anime.backdrop || anime.banner || anime.image || undefined;
 
+  // Slow zoom-out on the slide that's showing (like the website's hero).
+  const zoom = useSharedValue(1.12);
+  useEffect(() => {
+    if (active) {
+      zoom.value = 1.12;
+      zoom.value = withTiming(1.02, { duration: AUTO_MS + 1500, easing: Easing.linear });
+    } else {
+      cancelAnimation(zoom);
+      zoom.value = 1.12;
+    }
+  }, [active, zoom]);
+
   // The artwork moves slower than the swipe (parallax); the text fades as the slide leaves.
   const artStyle = useAnimatedStyle(() => {
     const p = (scrollX.value - index * width) / width;
-    return { transform: [{ translateX: interpolate(p, [-1, 0, 1], [-width * 0.35, 0, width * 0.35], Extrapolation.CLAMP) }, { scale: 1.08 }] };
+    return { transform: [{ translateX: interpolate(p, [-1, 0, 1], [-width * 0.35, 0, width * 0.35], Extrapolation.CLAMP) }, { scale: zoom.value }] };
   });
   const textStyle = useAnimatedStyle(() => {
     const p = Math.abs((scrollX.value - index * width) / width);
@@ -81,14 +96,20 @@ function Slide({ anime, index, width, height, scrollX }: { anime: Anime; index: 
   );
 }
 
-function Dot({ i, active, width }: { i: number; active: number; width: number }) {
-  const on = i === active;
-  const w = useSharedValue(on ? 22 : 7);
+// Page dots. The current one widens and fills up as its time runs out
+// (same as the website's progress dots).
+function Dot({ on, progress }: { on: boolean; progress: SharedValue<number> }) {
+  const w = useSharedValue(on ? 26 : 7);
   useEffect(() => {
-    w.value = withTiming(on ? 22 : 7, { duration: 280 });
+    w.value = withTiming(on ? 26 : 7, { duration: 260, easing: Easing.out(Easing.cubic) });
   }, [on, w]);
-  const style = useAnimatedStyle(() => ({ width: w.value }));
-  return <Animated.View style={[styles.dot, on && styles.dotOn, style]} key={`${i}-${width}`} />;
+  const box = useAnimatedStyle(() => ({ width: w.value }));
+  const fill = useAnimatedStyle(() => ({ width: on ? `${progress.value * 100}%` : '0%' }));
+  return (
+    <Animated.View style={[styles.dot, box]}>
+      <Animated.View style={[styles.dotFill, fill]} />
+    </Animated.View>
+  );
 }
 
 export function Hero({ items }: { items: Anime[] }) {
@@ -96,28 +117,53 @@ export function Hero({ items }: { items: Anime[] }) {
   const height = Math.min(620, Math.round(width * 1.28));
   const listRef = useAnimatedRef<Animated.FlatList<Anime>>();
   const scrollX = useSharedValue(0);
+  const progress = useSharedValue(0);
   const [active, setActive] = useState(0);
-  const touching = useRef(false);
+  const [dragging, setDragging] = useState(false);
+  const [focused, setFocused] = useState(true);
+  const activeRef = useRef(0);
+  activeRef.current = active;
+
+  // Pause while another tab or screen is on top.
+  useFocusEffect(
+    useCallback(() => {
+      setFocused(true);
+      return () => setFocused(false);
+    }, [])
+  );
 
   const onScroll = useAnimatedScrollHandler((e) => {
     scrollX.value = e.contentOffset.x;
   });
+
+  const goTo = useCallback(
+    (i: number) => {
+      listRef.current?.scrollToOffset({ offset: i * width, animated: true });
+      setActive(i);
+    },
+    [listRef, width]
+  );
+  const advance = useCallback(() => goTo((activeRef.current + 1) % items.length), [goTo, items.length]);
+
+  // The active dot fills over AUTO_MS; when it's full, move to the next slide.
+  // Driven by the animation itself, so it can't get stuck the way a timer plus
+  // touch tracking can when the page is scrolled.
+  useEffect(() => {
+    cancelAnimation(progress);
+    progress.value = 0;
+    if (items.length < 2 || dragging || !focused) return;
+    progress.value = withTiming(1, { duration: AUTO_MS, easing: Easing.linear }, (done) => {
+      if (done) runOnJS(advance)();
+    });
+  }, [active, dragging, focused, items.length, advance, progress]);
+
   const onMomentumEnd = useCallback(
-    (e: NativeSyntheticEvent<NativeScrollEvent>) => setActive(Math.round(e.nativeEvent.contentOffset.x / width)),
+    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+      setActive(Math.round(e.nativeEvent.contentOffset.x / width));
+      setDragging(false);
+    },
     [width]
   );
-
-  // Advance on its own; pauses while the user is touching the carousel.
-  useEffect(() => {
-    if (items.length < 2) return;
-    const t = setTimeout(() => {
-      if (touching.current) return;
-      const next = (active + 1) % items.length;
-      listRef.current?.scrollToOffset({ offset: next * width, animated: true });
-      setActive(next);
-    }, AUTO_MS);
-    return () => clearTimeout(t);
-  }, [active, items.length, width, listRef]);
 
   if (!items.length) return null;
   return (
@@ -128,18 +174,28 @@ export function Hero({ items }: { items: Anime[] }) {
         horizontal
         pagingEnabled
         keyExtractor={(a) => a.id}
-        renderItem={({ item, index }) => <Slide anime={item} index={index} width={width} height={height} scrollX={scrollX} />}
+        renderItem={({ item, index }) => <Slide anime={item} index={index} width={width} height={height} scrollX={scrollX} active={index === active && focused} />}
+        extraData={`${active}-${focused}`}
         showsHorizontalScrollIndicator={false}
         onScroll={onScroll}
         scrollEventThrottle={16}
+        onScrollBeginDrag={() => setDragging(true)}
+        onScrollEndDrag={(e) => {
+          // A swipe that doesn't fling still has to resume the autoplay.
+          const x = e.nativeEvent.contentOffset.x;
+          if (Math.abs(x / width - Math.round(x / width)) < 0.02) {
+            setActive(Math.round(x / width));
+            setDragging(false);
+          }
+        }}
         onMomentumScrollEnd={onMomentumEnd}
-        onTouchStart={() => (touching.current = true)}
-        onTouchEnd={() => (touching.current = false)}
         getItemLayout={(_, i) => ({ length: width, offset: width * i, index: i })}
+        initialNumToRender={2}
+        windowSize={3}
       />
       <View style={styles.dots} pointerEvents="none">
         {items.map((a, i) => (
-          <Dot key={a.id} i={i} active={active} width={width} />
+          <Dot key={a.id} on={i === active} progress={progress} />
         ))}
       </View>
     </View>
@@ -168,6 +224,6 @@ const styles = StyleSheet.create({
   primaryText: { color: '#000', fontFamily: fonts.black, fontSize: 14, letterSpacing: 0.6, textTransform: 'uppercase' },
   ghost: { width: 46, height: 46, borderRadius: radius.md, borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.35)', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.35)' },
   dots: { position: 'absolute', bottom: 18, left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', gap: 6 },
-  dot: { height: 7, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.35)' },
-  dotOn: { backgroundColor: colors.accent },
+  dot: { height: 7, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.3)', overflow: 'hidden' },
+  dotFill: { height: '100%', backgroundColor: colors.accent },
 });
