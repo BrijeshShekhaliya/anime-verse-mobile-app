@@ -17,6 +17,7 @@ export type NativeMedia3ViewProps = {
   referer?: string;
   paused: boolean;
   playbackRate: number;
+  fitMode: "contain" | "cover" | "fill";
   selectedQualityHeight: number;
   selectedAudioTrackId?: number | null;
   selectedTextTrackId?: number | null;
