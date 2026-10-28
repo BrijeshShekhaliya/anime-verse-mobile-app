@@ -753,6 +753,14 @@ export default function WatchScreen() {
     if (currentEp < maxEp) {
       const nextEp = currentEp + 1;
       currentEpisodeKeyRef.current = `${currentSeason}:${nextEp}`;
+      audioSwitchRequestRef.current += 1;
+      setIsSwitchingAudio(false);
+      nativePlayerTimeRef.current = 0;
+      currentTimeRef.current = 0;
+      isPlayingRef.current = true;
+      setHlsError(null);
+      setResolvingHls(true);
+      setIsBuffering(true);
       setCurrentEp(nextEp);
       setCurrentTime(0);
       setBufferedTime(0);
@@ -852,27 +860,33 @@ export default function WatchScreen() {
       : `https://embed.vidrift.net/embed/anilist/${id}/${currentEp}?${params.toString()}`;
   }, [epData?.tmdbId, currentSeason, currentEp, id]);
 
-  // HiAnime is played directly through the native HLS engine.
+  // HiAnime streams go directly to ExoPlayer. The native source key uses the
+  // episode key attached to the resolved stream, not the currently selected
+  // episode, so a pending resolver result cannot relabel the previous source.
   const nativeStreamKey = mountedStream?.streamUrl
-    ? `${currentSeason}:${currentEp}:${mountedStream.mode}:${mountedStream.streamUrl}`
+    ? `${mountedStreamEpisodeKeyRef.current || `${currentSeason}:${currentEp}`}:${mountedStream.mode}:${mountedStream.streamUrl}`
     : '';
+
+  const nativeSubtitles = useMemo(() => (mountedStream?.subtitles || []).map((sub) => ({
+    label: sub.label || sub.lang || 'English',
+    lang: sub.lang || 'en',
+    src: toFullUrl(sub.src),
+    default: sub.default,
+  })), [mountedStream?.subtitles]);
+
   useEffect(() => {
-    if (server !== 'hianime' || !nativeStreamKey) return;
+    if (server !== 'hianime' || !mountedStream?.streamUrl || !nativeStreamKey) return;
     if (nativeSourceKeyRef.current === nativeStreamKey) return;
-    const isFirstSource = nativeSourceKeyRef.current === null;
-    const resumeTime = nativePlayerTimeRef.current || currentTimeRef.current;
     nativeSourceKeyRef.current = nativeStreamKey;
-    if (!isFirstSource && resumeTime > 0) {
-      setResumeAfterSourceChange({ key: nativeStreamKey, time: resumeTime, shouldPlay: isPlayingRef.current });
-    }
     setAvailableAudioTracks([]);
     setAvailableLevels([]);
     setNativeAudioTrackId(null);
     setNativeTextTrackId(null);
     setHasInBandAlternateAudio(false);
+    setCurrentAudioTrackId(0);
     setIsBuffering(true);
     setHlsError(null);
-  }, [server, nativeStreamKey]);
+  }, [server, mountedStream?.streamUrl, nativeStreamKey]);
 
   const onNativePlayerLoad = useCallback((loadedDuration: number) => {
     if (loadedDuration > 0) setDuration(loadedDuration);
@@ -902,7 +916,12 @@ export default function WatchScreen() {
     const audio = tracks.filter((track) => track.type === 'audio');
     setAvailableAudioTracks(audio.map(({ id, name, lang }) => ({ id, name, lang })));
     setHasInBandAlternateAudio(audio.length > 1);
-    if (audio.length > 0 && nativeAudioTrackId === null) setNativeAudioTrackId(audio[0].id);
+    if (audio.length > 0 && nativeAudioTrackId === null) {
+      const wanted = audio.find((track) => track.name.toLowerCase().includes(currentLangRef.current === 'dub' ? 'english' : 'japanese'));
+      const initial = wanted || audio[0];
+      setNativeAudioTrackId(initial.id);
+      setCurrentAudioTrackId(initial.id);
+    }
   }, [nativeAudioTrackId]);
 
   const onNativePlayerTextTracks = useCallback((tracks: NativePlayerTrack[]) => {
@@ -912,6 +931,15 @@ export default function WatchScreen() {
       setNativeTextTrackId((english || text[0]).id);
     }
   }, [nativeTextTrackId]);
+
+  const onNativePlayerVideoTracks = useCallback((tracks: NativeVideoLevel[]) => {
+    setAvailableLevels(tracks.filter((track) => track.height > 0).map((track) => ({
+      index: track.index,
+      height: track.height,
+      width: track.width,
+      bitrate: track.bitrate,
+    })));
+  }, []);
 
   const onNativePlayerError = useCallback((message: string) => {
     setIsBuffering(false);
@@ -1019,17 +1047,13 @@ export default function WatchScreen() {
               selectedAudioTrackId={nativeAudioTrackId}
               selectedTextTrackId={nativeTextTrackId}
               subtitlesEnabled={subtitlesEnabled}
-              subtitles={(mountedStream.subtitles || []).map((sub) => ({
-                label: sub.label || sub.lang || 'English',
-                lang: sub.lang || 'en',
-                src: toFullUrl(sub.src),
-                default: sub.default,
-              }))}
+              subtitles={nativeSubtitles}
               onLoad={onNativePlayerLoad}
               onProgress={onNativePlayerProgress}
               onBuffer={setIsBuffering}
               onAudioTracks={onNativePlayerAudioTracks}
               onTextTracks={onNativePlayerTextTracks}
+              onVideoTracks={onNativePlayerVideoTracks}
               onEnd={() => { if (autoplay) handleNextEpisode(); }}
               onError={onNativePlayerError}
             />
