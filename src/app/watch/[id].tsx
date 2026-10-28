@@ -674,6 +674,8 @@ export default function WatchScreen() {
     setSelectedQualityHeight(targetHeight);
     selectedQualityRef.current = targetHeight;
     if (server === 'vidrift') sendPlayerCommand(`if(window._hls)window._hls.currentLevel=${targetHeight};`);
+    // Native HLS uses resolution-based track selection; the native engine chooses
+    // the closest available resolution when exact variants differ.
     showBadge(targetHeight === -1 ? 'Quality: Auto' : `Quality: ${targetHeight}p`);
   }, [server, sendPlayerCommand, showBadge]);
 
@@ -1726,6 +1728,12 @@ export default function WatchScreen() {
                     currentEpisodeKeyRef.current = nextEpisodeKey;
                     audioSwitchRequestRef.current += 1;
                     setIsSwitchingAudio(false);
+                    nativePlayerTimeRef.current = 0;
+                    currentTimeRef.current = 0;
+                    isPlayingRef.current = true;
+                    setHlsError(null);
+                    setResolvingHls(true);
+                    setIsBuffering(true);
                     setCurrentSeason(s.season_number);
                     setCurrentEp(1);
                     setCurrentTime(0);
@@ -1750,10 +1758,21 @@ export default function WatchScreen() {
                 <PressableScale
                   key={ep.episode_number}
                   onPress={() => {
+                    const nextEpisodeKey = `${currentSeason}:${ep.episode_number}`;
+                    currentEpisodeKeyRef.current = nextEpisodeKey;
+                    audioSwitchRequestRef.current += 1;
+                    setIsSwitchingAudio(false);
+                    nativePlayerTimeRef.current = 0;
+                    currentTimeRef.current = 0;
+                    isPlayingRef.current = true;
+                    setHlsError(null);
+                    setResolvingHls(true);
+                    setIsBuffering(true);
                     setCurrentEp(ep.episode_number);
                     setAllEpisodesOpen(false);
                     setCurrentTime(0);
                     setBufferedTime(0);
+                    setIsPlaying(true);
                     resetHideTimer();
                   }}
                   style={[styles.sheetEpCard, active && styles.sheetEpCardActive]}
