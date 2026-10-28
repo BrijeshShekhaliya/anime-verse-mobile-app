@@ -10,6 +10,7 @@ import Video, {
   type SelectedVideoTrack,
   type TextTrackType,
   type OnVideoTracksData,
+  type ISO639_1,
   type VideoRef,
 } from 'react-native-video';
 
@@ -89,7 +90,7 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
     bufferConfig: HLS_BUFFER_CONFIG,
     textTracks: subtitles.map((subtitle) => ({
       title: subtitle.label,
-      language: subtitle.lang || 'en',
+      language: (subtitle.lang || 'en') as ISO639_1,
       type: 'text/vtt' as TextTrackType,
       uri: subtitle.src,
     })),
@@ -172,9 +173,6 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
       resizeMode={fitMode}
       rate={playbackRate}
       progressUpdateInterval={400}
-      bufferConfig={HLS_BUFFER_CONFIG}
-      minLoadRetryCount={3}
-      maxBitRate={0}
       selectedVideoTrack={selectedVideoTrack}
       selectedAudioTrack={selectedAudioTrack}
       selectedTextTrack={selectedTextTrack}
