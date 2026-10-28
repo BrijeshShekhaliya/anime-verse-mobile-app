@@ -45,6 +45,7 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     .build()
   private val playerView = PlayerView(context).apply {
     useController = false
+    useTextureView = true
     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
     layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
     setShutterBackgroundColor(android.graphics.Color.BLACK)
@@ -131,6 +132,14 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     player?.prepare()
     player?.playWhenReady = !paused
     applyTrackPreferences()
+  }
+
+  fun setFitMode(value: String) {
+    playerView.resizeMode = when (value) {
+      "cover" -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+      "fill" -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+      else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+    }
   }
 
   fun setReferer(value: String?) {
