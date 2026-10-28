@@ -148,6 +148,20 @@ export default function WatchScreen() {
   const recordedEpRef = useRef<string | null>(null);
   const progressBarWidthRef = useRef<number>(width);
 
+  // Keep the Hianime document stable for the lifetime of this watch screen.
+  // Changing WebView source.html reloads the document and interrupts playback,
+  // so later episode/language changes are applied through window.switchStream.
+  const initialDocumentStreamRef = useRef<StreamData | null>(null);
+  const initialDocumentEpisodeKeyRef = useRef<string | null>(null);
+  const mountedStreamRef = useRef<StreamData | null>(mountedStream);
+  const playerDocumentReadyRef = useRef(false);
+  const activePlayerStreamKeyRef = useRef<string | null>(null);
+  mountedStreamRef.current = mountedStream;
+  if (!initialDocumentStreamRef.current && mountedStream?.streamUrl) {
+    initialDocumentStreamRef.current = mountedStream;
+    initialDocumentEpisodeKeyRef.current = `${currentSeason}:${currentEp}`;
+  }
+
   // Live state refs to capture values synchronously during stream switches
   const currentTimeRef = useRef<number>(0);
   const isPlayingRef = useRef<boolean>(true);
@@ -456,28 +470,10 @@ export default function WatchScreen() {
     };
   }, [server, anime?.title, anime?.titleRomaji, currentSeason, currentEp, currentEpHasDub, resolveStreamWithCache]);
 
-  // Pre-fetch alternate Sub/Dub stream in the background if episode supports Dub
-  useEffect(() => {
-    if (server !== 'hianime' || !anime?.title || !currentEpHasDub || hasInBandAlternateAudio) return;
-    const alternateMode = currentLang === 'sub' ? 'dub' : 'sub';
-    resolveStreamWithCache(
-      anime.title,
-      anime.titleRomaji || undefined,
-      currentSeason,
-      currentEp,
-      alternateMode,
-    ).catch(() => {});
-  }, [
-    server,
-    anime?.title,
-    anime?.titleRomaji,
-    currentSeason,
-    currentEp,
-    currentEpHasDub,
-    hasInBandAlternateAudio,
-    currentLang,
-    resolveStreamWithCache,
-  ]);
+  // Alternate Sub/Dub streams are resolved on demand instead of during cold
+  // start. Eager prefetch ran before HLS reported in-band audio tracks, creating
+  // an unnecessary second resolver request for many episodes. The resolver
+  // cache and in-flight deduplication still apply when the user changes audio.
 
   // Show opening Content Advisory badge for 6 seconds on episode start
   useEffect(() => {
@@ -574,6 +570,30 @@ export default function WatchScreen() {
     [sendPlayerCommand],
   );
 
+  // Apply a resolved stream to the existing player document without changing
+  // the WebView source. The key prevents repeated renders from restarting HLS.
+  const applyStreamInPlace = useCallback(
+    (stream: StreamData, episodeKey: string, resumeTime = 0, shouldPlay = true, speed = playbackSpeedRef.current, quality = selectedQualityRef.current) => {
+      if (!stream?.streamUrl || !playerDocumentReadyRef.current) return;
+      const streamKey = `${episodeKey}:${stream.mode}:${stream.streamUrl}`;
+      if (activePlayerStreamKeyRef.current === streamKey) return;
+      const subtitles = JSON.stringify(
+        (stream.subtitles || []).map((sub, idx) => ({
+          label: sub.label || sub.lang || 'English',
+          lang: sub.lang || 'en',
+          src: toFullUrl(sub.src),
+          default: sub.default || idx === 0,
+        })),
+      );
+      const url = toFullUrl(stream.streamUrl);
+      sendPlayerCommand(
+        `if (window.switchStream) { window.switchStream(${JSON.stringify(url)}, ${subtitles}, ${resumeTime}, ${shouldPlay}, ${speed}, ${quality}, ${JSON.stringify(episodeKey)}); }`,
+      );
+      activePlayerStreamKeyRef.current = streamKey;
+    },
+    [sendPlayerCommand],
+  );
+
   // Switch Audio Track
   // Path A: in-place Hls.js audioTrack switch when real alternate tracks exist in manifest
   // Path B: separate-stream fallback preserving position, state, speed, quality, subtitles
@@ -623,21 +643,7 @@ export default function WatchScreen() {
         const capturedPlaying = isPlayingRef.current;
         const capturedSpeed = playbackSpeedRef.current;
         const capturedQuality = selectedQualityRef.current;
-        const subTracksJson = JSON.stringify(
-          (resolved.subtitles || []).map((s, idx) => ({
-            label: s.label || s.lang || 'English',
-            lang: s.lang || 'en',
-            src: toFullUrl(s.src),
-            default: s.default || idx === 0,
-          })),
-        );
-
-        const proxiedStreamUrl = toFullUrl(resolved.streamUrl);
-        sendPlayerCommand(`
-          if (window.switchStream) {
-            window.switchStream(${JSON.stringify(proxiedStreamUrl)}, ${subTracksJson}, ${capturedTime}, ${capturedPlaying}, ${capturedSpeed}, ${capturedQuality});
-          }
-        `);
+        applyStreamInPlace(resolved, `${currentSeason}:${currentEp}`, capturedTime, capturedPlaying, capturedSpeed, capturedQuality);
 
         setCurrentLang(targetMode);
         currentLangRef.current = targetMode;
@@ -662,6 +668,7 @@ export default function WatchScreen() {
       resolveStreamWithCache,
       sendPlayerCommand,
       showBadge,
+      applyStreamInPlace,
     ],
   );
 
@@ -817,11 +824,13 @@ export default function WatchScreen() {
       : `https://embed.vidrift.net/embed/anilist/${id}/${currentEp}?${params.toString()}`;
   }, [epData?.tmdbId, currentSeason, currentEp, id]);
 
-  // HiAnime clean native HLS HTML — initialized with mountedStream for stability
+  // HiAnime clean native HLS HTML. Only the first stream seeds the document;
+  // episode and separate-audio changes are switched in-place below.
+  const documentStream = initialDocumentStreamRef.current || mountedStream;
   const hianimeHtml = useMemo(() => {
-    if (!mountedStream?.streamUrl) return '';
-    const proxiedUrl = toFullUrl(mountedStream.streamUrl);
-    const subTracks = (mountedStream.subtitles || [])
+    if (!documentStream?.streamUrl) return '';
+    const proxiedUrl = toFullUrl(documentStream.streamUrl);
+    const subTracks = (documentStream.subtitles || [])
       .map(
         (s, idx) =>
           `<track kind="subtitles" label="${s.label || s.lang || 'English'}" srclang="${s.lang || 'en'}" src="${toFullUrl(s.src)}" ${s.default ? 'default' : idx === 0 ? 'default' : ''}>`,
@@ -886,7 +895,7 @@ export default function WatchScreen() {
         <script>
           var video = document.getElementById('player');
           var streamSrc = "${proxiedUrl}";
-          var epToken = "${currentSeason}:${currentEp}";
+          var epToken = "${initialDocumentEpisodeKeyRef.current || `${currentSeason}:${currentEp}`}";
 
           function post(type, payload) {
             if (window.ReactNativeWebView) {
@@ -1028,8 +1037,9 @@ export default function WatchScreen() {
           }
 
           // Switch to alternate stream in-place without reloading HTML
-          window.switchStream = function(newUrl, newSubs, resumeSec, shouldPlay, rate, targetQuality) {
+          window.switchStream = function(newUrl, newSubs, resumeSec, shouldPlay, rate, targetQuality, newEpToken) {
             if (!video) return;
+            if (newEpToken) epToken = newEpToken;
 
             while (video.firstChild) {
               video.removeChild(video.firstChild);
@@ -1077,7 +1087,11 @@ export default function WatchScreen() {
       </body>
       </html>
     `;
-  }, [mountedStream?.streamUrl, currentSeason, currentEp]);
+  }, [documentStream?.streamUrl, documentStream?.subtitles]);
+
+  // Keep the source object stable too; changing source object identity can
+  // trigger unnecessary reloads on some native WebView versions.
+  const hianimeSource = useMemo(() => ({ html: hianimeHtml }), [hianimeHtml]);
 
   // Code injected before content loads
   const injectedCode = useMemo(
@@ -1117,6 +1131,26 @@ export default function WatchScreen() {
   `,
     [],
   );
+
+  // Synchronize later streams only after the first HTML document has finished loading.
+  useEffect(() => {
+    if (server !== 'hianime' || !mountedStream?.streamUrl || !playerDocumentReadyRef.current) return;
+    applyStreamInPlace(mountedStream, `${currentSeason}:${currentEp}`);
+  }, [server, mountedStream, currentSeason, currentEp, applyStreamInPlace]);
+
+  const handlePlayerLoadEnd = useCallback(() => {
+    if (server !== 'hianime') return;
+    playerDocumentReadyRef.current = true;
+    const initialStream = initialDocumentStreamRef.current;
+    if (initialStream) {
+      const initialKey = `${initialDocumentEpisodeKeyRef.current || `${currentSeason}:${currentEp}`}:${initialStream.mode}:${initialStream.streamUrl}`;
+      activePlayerStreamKeyRef.current = initialKey;
+    }
+    const latestStream = mountedStreamRef.current;
+    if (latestStream?.streamUrl) {
+      applyStreamInPlace(latestStream, currentEpisodeKeyRef.current);
+    }
+  }, [server, currentSeason, currentEp, applyStreamInPlace]);
 
   // WebView message listener
   const handleWebViewMessage = useCallback(
@@ -1223,7 +1257,8 @@ export default function WatchScreen() {
         {/* Stream View (HiAnime or VidRift) - Persistent Native WebView (NEVER UNMOUNTED) */}
         <MobileWebView
           ref={webViewRef}
-          source={server === 'vidrift' ? { uri: vidriftEmbedUrl } : { html: hianimeHtml }}
+          source={server === 'vidrift' ? { uri: vidriftEmbedUrl } : hianimeSource}
+          onLoadEnd={handlePlayerLoadEnd}
           style={styles.webView}
           containerStyle={{ backgroundColor: '#000000' }}
           javaScriptEnabled={true}
