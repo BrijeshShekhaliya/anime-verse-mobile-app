@@ -1,20 +1,12 @@
-import React, { forwardRef, memo, useCallback, useMemo } from 'react';
+import React, {
+  forwardRef,
+  memo,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+} from 'react';
 import { StyleSheet } from 'react-native';
-import Video, {
-  type OnAudioTracksData,
-  type OnBufferData,
-  type OnLoadData,
-  type OnProgressData,
-  type OnTextTracksData,
-  type SelectedTrack,
-  SelectedTrackType,
-  type SelectedVideoTrack,
-  SelectedVideoTrackType,
-  type TextTrackType,
-  type OnVideoTracksData,
-  type ISO639_1,
-  type VideoRef,
-} from 'react-native-video';
+import { VideoView, useVideoPlayer, type VideoSource } from 'expo-video';
 
 export type NativePlayerTrack = {
   id: number;
@@ -30,7 +22,16 @@ export type NativeSubtitle = {
   default?: boolean;
 };
 
-export type NativeVideoLevel = { index: number; height: number; width: number; bitrate: number };
+export type NativeVideoLevel = {
+  index: number;
+  height: number;
+  width: number;
+  bitrate: number;
+};
+
+export type NativeVideoPlayerHandle = {
+  seek: (time: number) => void;
+};
 
 type Props = {
   uri: string;
@@ -41,6 +42,8 @@ type Props = {
   selectedQualityHeight: number;
   selectedAudioTrackId?: number | null;
   selectedTextTrackId?: number | null;
+  // Kept in the adapter contract for the watch screen. expo-video v58 exposes
+  // in-band HLS subtitle tracks, but does not expose a sidecar WebVTT injection API.
   subtitles: NativeSubtitle[];
   subtitlesEnabled: boolean;
   onLoad: (duration: number) => void;
@@ -53,18 +56,50 @@ type Props = {
   onError: (message: string) => void;
 };
 
-const HLS_BUFFER_CONFIG = {
-  minBufferMs: 15000,
-  maxBufferMs: 50000,
-  bufferForPlaybackMs: 2500,
-  bufferForPlaybackAfterRebufferMs: 5000,
-  backBufferDurationMs: 30000,
-  maxHeapAllocationPercent: 0.5,
-  minBackBufferMemoryReservePercent: 0.1,
-  minBufferMemoryReservePercent: 0.1,
+const BUFFER_OPTIONS = {
+  minBufferForPlayback: 2.5,
+  preferredForwardBufferDuration: 50,
+  prioritizeTimeOverSizeThreshold: true,
 };
 
-const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
+function toAudioTracks(player: ReturnType<typeof useVideoPlayer>): NativePlayerTrack[] {
+  return player.availableAudioTracks.map((track, index) => ({
+    id: index,
+    name: track.name || track.label || track.language || `Audio ${index + 1}`,
+    lang: track.language || '',
+    type: 'audio',
+  }));
+}
+
+function toTextTracks(player: ReturnType<typeof useVideoPlayer>): NativePlayerTrack[] {
+  return player.availableSubtitleTracks.map((track, index) => ({
+    id: index,
+    name: track.name || track.label || track.language || `Subtitle ${index + 1}`,
+    lang: track.language || '',
+    type: 'text',
+  }));
+}
+
+function toVideoLevels(player: ReturnType<typeof useVideoPlayer>): NativeVideoLevel[] {
+  return player.availableVideoTracks.map((track, index) => {
+    // Track metadata differs slightly between platform implementations. Read it
+    // defensively so a missing bitrate/size never breaks playback.
+    const value = track as unknown as {
+      size?: { width?: number; height?: number };
+      width?: number;
+      height?: number;
+      bitrate?: number;
+    };
+    return {
+      index,
+      width: value.size?.width || value.width || 0,
+      height: value.size?.height || value.height || 0,
+      bitrate: value.bitrate || 0,
+    };
+  });
+}
+
+const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function NativeHlsPlayer({
   uri,
   referer,
   paused,
@@ -73,7 +108,6 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
   selectedQualityHeight,
   selectedAudioTrackId = null,
   selectedTextTrackId = null,
-  subtitles,
   subtitlesEnabled,
   onLoad,
   onProgress,
@@ -84,117 +118,132 @@ const NativeHlsPlayer = forwardRef<VideoRef, Props>(function NativeHlsPlayer({
   onEnd,
   onError,
 }, forwardedRef) {
-  const source = useMemo(() => ({
-    uri,
-    type: 'm3u8' as const,
-    ...(referer ? { headers: { Referer: referer, referer } } : {}),
-    minLoadRetryCount: 3,
-    bufferConfig: HLS_BUFFER_CONFIG,
-    textTracks: subtitles.map((subtitle) => ({
-      title: subtitle.label,
-      language: (subtitle.lang || 'en') as ISO639_1,
-      type: 'text/vtt' as TextTrackType,
-      uri: subtitle.src,
-    })),
-  }), [uri, referer, subtitles]);
+  const player = useVideoPlayer(null, (instance) => {
+    instance.timeUpdateEventInterval = 0.4;
+    instance.bufferOptions = BUFFER_OPTIONS;
+    instance.keepScreenOnWhilePlaying = true;
+    instance.staysActiveInBackground = false;
+  });
 
-  const selectedVideoTrack: SelectedVideoTrack = useMemo(
-    () => selectedQualityHeight < 0
-      ? { type: SelectedVideoTrackType.AUTO }
-      : { type: SelectedVideoTrackType.RESOLUTION, value: selectedQualityHeight },
-    [selectedQualityHeight],
-  );
-  const selectedAudioTrack: SelectedTrack = useMemo(
-    () => selectedAudioTrackId === null
-      ? { type: SelectedTrackType.SYSTEM }
-      : { type: SelectedTrackType.INDEX, value: selectedAudioTrackId },
-    [selectedAudioTrackId],
-  );
-  const selectedTextTrack: SelectedTrack = useMemo(
-    () => !subtitlesEnabled
-      ? { type: SelectedTrackType.DISABLED }
-      : selectedTextTrackId === null
-        ? { type: SelectedTrackType.SYSTEM }
-        : { type: SelectedTrackType.INDEX, value: selectedTextTrackId },
-    [subtitlesEnabled, selectedTextTrackId],
-  );
+  useImperativeHandle(forwardedRef, () => ({
+    seek: (time: number) => {
+      player.currentTime = Math.max(0, time);
+    },
+  }), [player]);
 
-  const handleLoad = useCallback((event: OnLoadData) => {
-    onLoad(event.duration || 0);
-    onAudioTracks((event.audioTracks || []).map((track) => ({
-      id: track.index, name: track.title || track.language || `Audio ${track.index + 1}`, lang: track.language || '', type: 'audio' as const,
-    })));
-    onTextTracks((event.textTracks || []).map((track) => ({
-      id: track.index, name: track.title || track.language || `Subtitle ${track.index + 1}`, lang: track.language || '', type: 'text' as const,
-    })));
-    onVideoTracks((event.videoTracks || []).map((track) => ({
-      index: track.index, height: track.height || 0, width: track.width || 0, bitrate: track.bitrate || 0,
-    })));
-  }, [onLoad, onAudioTracks, onTextTracks, onVideoTracks]);
+  const source: VideoSource | null = uri
+    ? {
+        uri,
+        contentType: 'hls',
+        ...(referer ? { headers: { Referer: referer, referer } } : {}),
+        useCaching: false,
+      }
+    : null;
 
-  const handleProgress = useCallback((event: OnProgressData) => {
-    onProgress(
-      Math.max(0, event.currentTime || 0),
-      Math.max(0, event.seekableDuration || 0),
-      Math.max(0, event.playableDuration || 0),
-    );
-  }, [onProgress]);
+  // Keep one VideoPlayer instance alive across source, orientation and control
+  // changes. Replacing its source avoids remounting the native rendering surface.
+  useEffect(() => {
+    if (!source) return;
+    let active = true;
+    onBuffer(true);
+    onError('');
+    player.replaceAsync(source).then(() => {
+      if (!active) return;
+      if (paused) player.pause();
+      else player.play();
+    }).catch((error: unknown) => {
+      if (!active) return;
+      onBuffer(false);
+      onError(error instanceof Error ? error.message : 'Unable to load the HLS stream');
+    });
+    return () => {
+      active = false;
+    };
+  }, [player, uri, referer, onBuffer, onError]);
 
-  const handleBuffer = useCallback((event: OnBufferData) => {
-    onBuffer(Boolean(event.isBuffering));
-  }, [onBuffer]);
+  useEffect(() => {
+    if (paused) player.pause();
+    else if (uri) player.play();
+  }, [player, paused, uri]);
 
-  const handleAudioTracks = useCallback((event: OnAudioTracksData) => {
-    onAudioTracks((event.audioTracks || []).map((track) => ({
-      id: track.index,
-      name: track.title || track.language || `Audio ${track.index + 1}`,
-      lang: track.language || '',
-      type: 'audio' as const,
-    })));
-  }, [onAudioTracks]);
+  useEffect(() => {
+    player.playbackRate = playbackRate;
+  }, [player, playbackRate]);
 
-  const handleTextTracks = useCallback((event: OnTextTracksData) => {
-    onTextTracks((event.textTracks || []).map((track) => ({
-      id: track.index,
-      name: track.title || track.language || `Subtitle ${track.index + 1}`,
-      lang: track.language || '',
-      type: 'text' as const,
-    })));
-  }, [onTextTracks]);
+  useEffect(() => {
+    if (selectedAudioTrackId === null || selectedAudioTrackId < 0) return;
+    const track = player.availableAudioTracks[selectedAudioTrackId];
+    if (track) player.audioTrack = track;
+  }, [player, selectedAudioTrackId]);
 
-  const handleVideoTracks = useCallback((event: OnVideoTracksData) => {
-    onVideoTracks((event.videoTracks || []).map((track) => ({
-      index: track.index, height: track.height || 0, width: track.width || 0, bitrate: track.bitrate || 0,
-    })));
-  }, [onVideoTracks]);
+  useEffect(() => {
+    if (!subtitlesEnabled) {
+      player.subtitleTrack = null;
+      return;
+    }
+    if (selectedTextTrackId !== null && selectedTextTrackId >= 0) {
+      const track = player.availableSubtitleTracks[selectedTextTrackId];
+      if (track) player.subtitleTrack = track;
+    }
+  }, [player, selectedTextTrackId, subtitlesEnabled]);
+
+  useEffect(() => {
+    if (selectedQualityHeight < 0) {
+      player.maxResolution = null;
+      return;
+    }
+    // expo-video exposes an adaptive resolution cap rather than selecting a
+    // platform-specific track index.
+    player.maxResolution = {
+      width: Math.round((selectedQualityHeight * 16) / 9),
+      height: selectedQualityHeight,
+    };
+  }, [player, selectedQualityHeight]);
+
+  const publishTracks = useCallback(() => {
+    onAudioTracks(toAudioTracks(player));
+    onTextTracks(toTextTracks(player));
+    onVideoTracks(toVideoLevels(player));
+  }, [player, onAudioTracks, onTextTracks, onVideoTracks]);
+
+  useEffect(() => {
+    const subscriptions = [
+      player.addListener('sourceLoad', (event) => {
+        onLoad(event.duration || player.duration || 0);
+        publishTracks();
+        onBuffer(false);
+      }),
+      player.addListener('timeUpdate', (event) => {
+        onProgress(
+          Math.max(0, event.currentTime || 0),
+          Math.max(0, player.duration || 0),
+          Math.max(0, event.bufferedPosition || 0),
+        );
+      }),
+      player.addListener('statusChange', (event) => {
+        if (event.status === 'loading') onBuffer(true);
+        if (event.status === 'readyToPlay') onBuffer(false);
+        if (event.status === 'error') {
+          onBuffer(false);
+          const error = event.error as unknown as { message?: string } | undefined;
+          onError(error?.message || 'Native HLS playback failed');
+        }
+      }),
+      player.addListener('availableAudioTracksChange', publishTracks),
+      player.addListener('availableSubtitleTracksChange', publishTracks),
+      player.addListener('availableVideoTracksChange', publishTracks),
+      player.addListener('playToEnd', onEnd),
+    ];
+    return () => subscriptions.forEach((subscription) => subscription.remove());
+  }, [player, onLoad, onProgress, onBuffer, onError, onEnd, publishTracks]);
 
   return (
-    <Video
-      ref={forwardedRef}
-      source={source}
+    <VideoView
+      player={player}
       style={StyleSheet.absoluteFill}
-      paused={paused}
-      resizeMode={fitMode === 'fill' ? 'stretch' : fitMode}
-      rate={playbackRate}
-      progressUpdateInterval={400}
-      selectedVideoTrack={selectedVideoTrack}
-      selectedAudioTrack={selectedAudioTrack}
-      selectedTextTrack={selectedTextTrack}
-      onLoad={handleLoad}
-      onProgress={handleProgress}
-      onBuffer={handleBuffer}
-      onAudioTracks={handleAudioTracks}
-      onTextTracks={handleTextTracks}
-      onVideoTracks={handleVideoTracks}
-      onEnd={onEnd}
-      onError={(event) => onError(event.error?.errorString || event.error?.errorException || 'Native stream playback failed')}
-      automaticallyWaitsToMinimizeStalling
-      ignoreSilentSwitch="ignore"
-      playInBackground={false}
-      playWhenInactive={false}
-      preventsDisplaySleepDuringVideoPlayback
-      repeat={false}
-      controls={false}
+      nativeControls={false}
+      contentFit={fitMode}
+      allowsPictureInPicture={false}
     />
   );
 });
