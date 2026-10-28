@@ -4,9 +4,11 @@ import { readFile } from 'node:fs/promises';
 
 const route = await readFile(new URL('../src/app/watch/[id].tsx', import.meta.url), 'utf8');
 const player = await readFile(new URL('../src/components/player/NativeHlsPlayer.tsx', import.meta.url), 'utf8');
+const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+const appConfig = JSON.parse(await readFile(new URL('../app.json', import.meta.url), 'utf8'));
 
-describe('Native streaming player architecture regressions', () => {
-  test('HiAnime route renders the native player and keeps WebView only for VidRift', () => {
+describe('Expo Go compatible streaming player regressions', () => {
+  test('HiAnime route renders the Expo Video player and keeps WebView only for VidRift', () => {
     assert.match(route, /import NativeHlsPlayer/);
     assert.match(route, /server === 'hianime' ?/);
     assert.match(route, /<NativeHlsPlayer/);
@@ -15,12 +17,19 @@ describe('Native streaming player architecture regressions', () => {
     assert.doesNotMatch(route, /const hianimeHtml/);
   });
 
-  test('Native player has exactly one Video surface, without a fullscreen duplicate', () => {
-    assert.equal((player.match(/<Video\b/g) || []).length, 1);
-    assert.doesNotMatch(player, /<Modal\b/);
-    assert.match(player, /automaticallyWaitsToMinimizeStalling/);
-    assert.match(player, /bufferForPlaybackAfterRebufferMs: 5000/);
-    assert.match(player, /minLoadRetryCount: 3/);
+  test('Player uses expo-video instead of the unsupported RCTVideo native view', () => {
+    assert.match(player, /from 'expo-video'/);
+    assert.match(player, /useVideoPlayer\(null/);
+    assert.match(player, /<VideoView\b/);
+    assert.doesNotMatch(player, /from 'react-native-video'/);
+    assert.equal(pkg.dependencies['react-native-video'], undefined);
+    assert.equal(appConfig.expo.plugins.some((plugin) => Array.isArray(plugin) && plugin[0] === 'react-native-video'), false);
+  });
+
+  test('One persistent VideoView is used for source changes and orientation changes', () => {
+    assert.equal((player.match(/<VideoView\b/g) || []).length, 1);
+    assert.match(player, /player\.replaceAsync\(source\)/);
+    assert.match(player, /useImperativeHandle/);
   });
 
   test('Native media updates preserve the playhead for audio-only stream changes', () => {
@@ -37,14 +46,19 @@ describe('Native streaming player architecture regressions', () => {
     assert.match(route, /setIsSwitchingAudio\(false\)/);
   });
 
-  test('Native player exposes audio, subtitle and video variant tracks', () => {
-    assert.match(player, /onAudioTracks=\{handleAudioTracks\}/);
-    assert.match(player, /onTextTracks=\{handleTextTracks\}/);
-    assert.match(player, /onVideoTracks=\{handleVideoTracks\}/);
-    assert.match(route, /onVideoTracks=\{onNativePlayerVideoTracks\}/);
+  test('Expo Video reports supported in-band audio, subtitle and video variant tracks', () => {
+    assert.match(player, /availableAudioTracks/);
+    assert.match(player, /availableSubtitleTracks/);
+    assert.match(player, /availableVideoTracks/);
+    assert.match(player, /onAudioTracks\(toAudioTracks\(player\)\)/);
+    assert.match(player, /onTextTracks\(textTracks\)/);
+    assert.match(player, /onVideoTracks\(toVideoLevels\(player\)\)/);
   });
 
-  test('API request contract remains in the existing resolver and no HLS.js CDN is embedded in the route', () => {
+  test('HLS headers and buffering configuration are preserved through expo-video', () => {
+    assert.match(player, /contentType: 'hls'/);
+    assert.match(player, /headers: \{ Referer: referer, referer \}/);
+    assert.match(player, /preferredForwardBufferDuration: 50/);
     assert.match(route, /resolveStreamWithCache\(/);
     assert.match(route, /api\.resolveStream\(/);
     assert.doesNotMatch(route, /cdn\.jsdelivr\.net\/npm\/hls\.js/);
