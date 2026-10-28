@@ -153,6 +153,7 @@ export default function WatchScreen() {
   // so later episode/language changes are applied through window.switchStream.
   const initialDocumentStreamRef = useRef<StreamData | null>(null);
   const initialDocumentEpisodeKeyRef = useRef<string | null>(null);
+  const mountedStreamEpisodeKeyRef = useRef<string | null>(null);
   const mountedStreamRef = useRef<StreamData | null>(mountedStream);
   const playerDocumentReadyRef = useRef(false);
   const activePlayerStreamKeyRef = useRef<string | null>(null);
@@ -449,6 +450,7 @@ export default function WatchScreen() {
         if (cancelled || currentEpisodeKeyRef.current !== `${currentSeason}:${currentEp}`) return;
         if (res && res.streamUrl) {
           setHlsStream(res);
+          mountedStreamEpisodeKeyRef.current = `${currentSeason}:${currentEp}`;
           setMountedStream(res);
           setHlsError(null);
         } else {
@@ -1135,7 +1137,11 @@ export default function WatchScreen() {
   // Synchronize later streams only after the first HTML document has finished loading.
   useEffect(() => {
     if (server !== 'hianime' || !mountedStream?.streamUrl || !playerDocumentReadyRef.current) return;
-    applyStreamInPlace(mountedStream, `${currentSeason}:${currentEp}`);
+    const streamEpisodeKey = mountedStreamEpisodeKeyRef.current;
+    // Never relabel the previous episode's stream as the newly selected episode
+    // while its resolver request is still in flight.
+    if (!streamEpisodeKey || streamEpisodeKey !== currentEpisodeKeyRef.current) return;
+    applyStreamInPlace(mountedStream, streamEpisodeKey);
   }, [server, mountedStream, currentSeason, currentEp, applyStreamInPlace]);
 
   const handlePlayerLoadEnd = useCallback(() => {
@@ -1147,8 +1153,9 @@ export default function WatchScreen() {
       activePlayerStreamKeyRef.current = initialKey;
     }
     const latestStream = mountedStreamRef.current;
-    if (latestStream?.streamUrl) {
-      applyStreamInPlace(latestStream, currentEpisodeKeyRef.current);
+    const latestStreamEpisodeKey = mountedStreamEpisodeKeyRef.current;
+    if (latestStream?.streamUrl && latestStreamEpisodeKey === currentEpisodeKeyRef.current) {
+      applyStreamInPlace(latestStream, latestStreamEpisodeKey);
     }
   }, [server, currentSeason, currentEp, applyStreamInPlace]);
 
