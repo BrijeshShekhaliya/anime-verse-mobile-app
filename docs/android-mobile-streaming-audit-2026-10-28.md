@@ -21,7 +21,7 @@ This branch is for `BrijeshShekhaliya/anime-verse-mobile-app` only. No website U
 - Increase the mobile ExoPlayer buffer memory cap from 60 MiB to 128 MiB; keep `preferredForwardBufferDuration: 60` and `minBufferForPlayback: 3.5` so startup does not wait for a full minute.
 
 ## Not yet complete / required validation
-This is not a claim that streaming is now perfect or that a new native player is finished. A custom native Media3 module has not been implemented in this branch yet. The buffer change needs a real Android build and tests on the target device/network.
+This is not a claim that streaming is now perfect or that the native player is verified. The Media3 module has been authored but its Gradle compilation and real-device playback tests are still outstanding. The current environment could not run the repository's npm/Gradle build, and no CI result was available at audit time.
 
 Validation matrix still required:
 1. Cold start on Wi-Fi and mobile data; record time-to-first-frame.
