@@ -40,8 +40,10 @@ describe('Player source-level regressions', () => {
     assert.equal((player.match(/<VideoView\b/g) || []).length, 1);
     assert.match(player, /player\.replaceAsync\(source\)/);
     assert.match(player, /contentType: 'hls'/);
-    assert.match(player, /preferredForwardBufferDuration: 50/);
+    assert.match(player, /preferredForwardBufferDuration: 60/);
     assert.match(player, /player\.maxResolution/);
+    assert.match(player, /player\.videoTrack = exact/);
+    assert.match(player, /surfaceType="textureView"/);
     assert.match(player, /availableAudioTracks/);
     assert.match(player, /availableSubtitleTracks/);
     assert.match(player, /availableVideoTracks/);
