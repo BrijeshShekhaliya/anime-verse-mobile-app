@@ -17,6 +17,7 @@ class NativeMedia3PlayerModule : Module() {
       Prop("selectedAudioTrackId") { view: NativeMedia3PlayerView, value: Int? -> view.setSelectedAudioTrackId(value) }
       Prop("selectedTextTrackId") { view: NativeMedia3PlayerView, value: Int? -> view.setSelectedTextTrackId(value) }
       Prop("subtitlesEnabled") { view: NativeMedia3PlayerView, value: Boolean -> view.setSubtitlesEnabled(value) }
+      OnViewDidUpdateProps { view: NativeMedia3PlayerView -> view.loadIfNeeded() }
       AsyncFunction("seek") { view: NativeMedia3PlayerView, time: Double -> view.seekToSeconds(time) }
       OnViewDestroys { view: NativeMedia3PlayerView -> view.releasePlayer() }
     }
