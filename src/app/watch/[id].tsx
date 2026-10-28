@@ -125,6 +125,7 @@ export default function WatchScreen() {
   const [bufferedTime, setBufferedTime] = useState<number>(0);
   const [duration, setDuration] = useState<number>(1429); // fallback ~23:49
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
+  const [isBuffering, setIsBuffering] = useState<boolean>(false);
   const [controlsVisible, setControlsVisible] = useState<boolean>(true);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
   const [autoplay, setAutoplay] = useState<boolean>(true);
@@ -912,6 +913,9 @@ export default function WatchScreen() {
           var video = document.getElementById('player');
           var streamSrc = "${proxiedUrl}";
           var epToken = "${initialDocumentEpisodeKeyRef.current || `${currentSeason}:${currentEp}`}";
+          var stallRecoveryTimer = null;
+          var stallRecoveryAttempts = 0;
+          var MAX_STALL_RECOVERIES = 2;
 
           function post(type, payload) {
             if (window.ReactNativeWebView) {
@@ -1055,6 +1059,8 @@ export default function WatchScreen() {
           // Switch to alternate stream in-place without reloading HTML
           window.switchStream = function(newUrl, newSubs, resumeSec, shouldPlay, rate, targetQuality, newEpToken) {
             if (!video) return;
+            if (stallRecoveryTimer) { clearTimeout(stallRecoveryTimer); stallRecoveryTimer = null; }
+            stallRecoveryAttempts = 0;
             if (newEpToken) epToken = newEpToken;
 
             while (video.firstChild) {
@@ -1097,8 +1103,22 @@ export default function WatchScreen() {
           video.addEventListener('play', function() { post('play'); });
           video.addEventListener('pause', function() { post('pause'); });
           video.addEventListener('ended', function() { post('ended'); });
-          video.addEventListener('waiting', function() { post('buffering', { isBuffering: true }); });
-          video.addEventListener('playing', function() { post('buffering', { isBuffering: false }); });
+          video.addEventListener('waiting', function() {
+            post('buffering', { isBuffering: true });
+            if (video.paused || stallRecoveryTimer || stallRecoveryAttempts >= MAX_STALL_RECOVERIES) return;
+            stallRecoveryTimer = setTimeout(function() {
+              stallRecoveryTimer = null;
+              if (!video || video.paused || video.readyState >= 3 || !window._hls) return;
+              if (stallRecoveryAttempts < MAX_STALL_RECOVERIES) {
+                stallRecoveryAttempts++;
+                try { window._hls.startLoad(); } catch (e) {}
+              }
+            }, 5000);
+          });
+          video.addEventListener('playing', function() {
+            if (stallRecoveryTimer) { clearTimeout(stallRecoveryTimer); stallRecoveryTimer = null; }
+            post('buffering', { isBuffering: false });
+          });
         </script>
       </body>
       </html>
@@ -1198,11 +1218,14 @@ export default function WatchScreen() {
           setHasInBandAlternateAudio(Boolean(data.hasInBand));
         } else if (data.type === 'levels') {
           if (Array.isArray(data.levels)) setAvailableLevels(data.levels);
+        } else if (data.type === 'buffering') {
+          setIsBuffering(Boolean(data.isBuffering));
         } else if (data.type === 'play') {
           setIsPlaying(true);
           isPlayingRef.current = true;
         } else if (data.type === 'pause') {
           setIsPlaying(false);
+          setIsBuffering(false);
           isPlayingRef.current = false;
         } else if (data.type === 'ended' || data.type === 'vidrift:ended' || data.type === 'vidrift:nextup-play') {
           if (autoplay) handleNextEpisode();
@@ -1322,6 +1345,12 @@ export default function WatchScreen() {
             >
               <Text style={styles.switchServerText}>Play with VidRift</Text>
             </PressableScale>
+          </View>
+        )}
+
+        {server === 'hianime' && isBuffering && isPlaying && !resolvingHls && !hlsError && (
+          <View style={[StyleSheet.absoluteFill, { alignItems: 'center', justifyContent: 'center' }]} pointerEvents="none">
+            <ActivityIndicator size="large" color={colors.accent} />
           </View>
         )}
 
