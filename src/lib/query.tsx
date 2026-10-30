@@ -9,10 +9,11 @@
 // - If a refresh fails, the saved copy stays on screen.
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister';
-import { focusManager, QueryClient } from '@tanstack/react-query';
+import { focusManager, QueryClient, type Query } from '@tanstack/react-query';
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client';
 import { useEffect, type ReactNode } from 'react';
 import { AppState, Platform } from 'react-native';
+import { chunkedStorage } from './chunkedStorage';
 
 const DAY = 24 * 60 * 60 * 1000;
 const MAX_AGE = 3 * DAY; // a saved copy older than this is not shown
@@ -30,14 +31,54 @@ export const queryClient = new QueryClient({
   },
 });
 
-// Only data that is worth having instantly on the next launch is saved.
-const SAVED = new Set(['home', 'detail', 'extras', 'genres', 'schedule', 'episodes', 'seasons', 'guide']);
+// Only data that is worth having instantly on the next launch is saved:
+// always Home, Schedule and genres; of the per-title data (anime pages,
+// episode lists...) and Browse grids, only the most recently used.
+const ALWAYS = new Set(['home', 'genres', 'schedule']);
+const RECENT = new Set(['detail', 'extras', 'episodes', 'seasons', 'guide', 'browse']);
+const RECENT_MAX = 40;
 
+// The most recently updated queries of one kind, worked out once per save.
+let recentAt = 0;
+const recentSets = new Map<string, Set<Query>>();
+function isRecent(q: Query) {
+  const kind = String(q.queryKey[0]);
+  if (Date.now() - recentAt > 1000) {
+    recentSets.clear();
+    recentAt = Date.now();
+  }
+  let set = recentSets.get(kind);
+  if (!set) {
+    const all = queryClient
+      .getQueryCache()
+      .findAll({ queryKey: [kind] })
+      .filter((x) => x.state.status === 'success')
+      .sort((a, b) => b.state.dataUpdatedAt - a.state.dataUpdatedAt);
+    set = new Set(all.slice(0, RECENT_MAX));
+    recentSets.set(kind, set);
+  }
+  return set.has(q);
+}
+
+const shouldSave = (q: Query) => {
+  if (q.state.status !== 'success') return false;
+  const kind = String(q.queryKey[0]);
+  if (ALWAYS.has(kind)) return true;
+  // Browse without a search (the default grid and filter links), not every typed search.
+  if (kind === 'browse' && (q.queryKey[1] as { q?: string } | undefined)?.q) return false;
+  return RECENT.has(kind) && isRecent(q);
+};
+
+// Saved in pieces: Android can't read back one stored value over ~2 MB.
+const KEY = 'animeverse:query:v2';
 const persister = createAsyncStoragePersister({
-  storage: AsyncStorage,
-  key: 'animeverse:query:v1',
+  storage: chunkedStorage,
+  key: KEY,
   throttleTime: 2000,
 });
+// Earlier builds saved everything as one value, which could grow past that
+// limit; delete it (deleting works even when reading doesn't).
+AsyncStorage.removeItem('animeverse:query:v1').catch(() => {});
 
 // React Native has no window focus: treat "app came back to the foreground"
 // as focus, so stale screens refresh when the user returns.
@@ -58,13 +99,7 @@ export function QueryProvider({ children, onRestored }: { children: ReactNode; o
         persister,
         maxAge: MAX_AGE,
         buster: 'v1', // change when the saved data's shape changes
-        dehydrateOptions: {
-          shouldDehydrateQuery: (q) =>
-            q.state.status === 'success' &&
-            (SAVED.has(String(q.queryKey[0])) ||
-              // Browse without a search (the default grid and filter links), not every typed search.
-              (q.queryKey[0] === 'browse' && !(q.queryKey[1] as { q?: string } | undefined)?.q)),
-        },
+        dehydrateOptions: { shouldDehydrateQuery: shouldSave },
       }}
       onSuccess={onRestored}
       onError={onRestored}

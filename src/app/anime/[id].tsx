@@ -1,7 +1,7 @@
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams, useNavigation } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
 import { memo, useEffect, useRef, useState } from 'react';
 import { Linking, Platform, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
@@ -58,6 +58,20 @@ export default function DetailScreen() {
   const insets = useSafeAreaInsets();
   const heroH = Math.round(width * 1.25);
   const reduce = useReducedMotion();
+
+  // The episode list and recommendations are drawn once the open transition
+  // has finished, so the page starts appearing the moment it's tapped.
+  const navigation = useNavigation();
+  const [opened2, setOpened2] = useState(false);
+  useEffect(() => {
+    const done = () => setOpened2(true);
+    const unsub = navigation.addListener('transitionEnd' as never, done);
+    const t = setTimeout(done, 350); // in case the event never comes
+    return () => {
+      unsub();
+      clearTimeout(t);
+    };
+  }, [navigation]);
 
   // Saved page (instant), or the tapped card while the full page loads.
   const detail = useDetail(String(id));
@@ -218,7 +232,13 @@ export default function DetailScreen() {
           ]}
         />
 
-        {tab === 'episodes' ? (
+        {!opened2 ? (
+          // Until the open transition has finished, a light placeholder (the
+          // long episode list is drawn right after, so the page opens at once).
+          <View style={styles.epList}>
+            <EpisodeSkeleton thumbW={Math.round((width - 32) * 0.46)} />
+          </View>
+        ) : tab === 'episodes' ? (
           <Animated.View key="episodes" entering={FadeIn.duration(220)}>
             <PressableScale haptic disabled={seasonList.length < 2} onPress={() => setSeasonOpen(true)} style={styles.seasonRow} scaleTo={0.99}>
               {seasonList.length > 1 ? <Icon name="down" size={16} color="#fff" /> : null}

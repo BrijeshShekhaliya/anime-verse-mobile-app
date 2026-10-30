@@ -45,19 +45,23 @@ export default function RootLayout() {
           <LibraryProvider>
             <SettingsProvider>
             <StatusBar style="light" />
+            {/* Screen transitions: a quick native cross-fade, both when a page opens
+                and when you go back (it stays smooth on any phone). */}
             <Stack
               screenOptions={{
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.bg },
-                animation: 'slide_from_right',
+                animation: 'fade',
+                animationDuration: 200, // iOS; Android's native fade is already short
+                gestureEnabled: true,
               }}
             >
               <Stack.Screen name="(tabs)" />
               <Stack.Screen name="anime/[id]" />
               <Stack.Screen name="watch/[id]" options={{ animation: 'fade' }} />
-              <Stack.Screen name="search" options={{ animation: 'fade_from_bottom' }} />
+              <Stack.Screen name="search" />
               <Stack.Screen name="settings" />
-              <Stack.Screen name="welcome" options={{ animation: 'fade', gestureEnabled: false }} />
+              <Stack.Screen name="welcome" options={{ animation: 'fade', animationDuration: 300, gestureEnabled: false }} />
             </Stack>
             </SettingsProvider>
           </LibraryProvider>

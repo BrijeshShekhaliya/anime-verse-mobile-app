@@ -89,8 +89,8 @@ export default function TabsLayout() {
         <Tabs.Screen
           key={t.name}
           name={t.name}
-          // Browse cross-fades in (quick), so opening search from Home feels like one motion.
-          options={t.name === 'browse' ? { title: t.title, animation: 'fade', transitionSpec: { animation: 'timing', config: { duration: 180 } } } : { title: t.title }}
+          // Every tab cross-fades in quickly (also makes opening search from Home feel like one motion).
+          options={{ title: t.title, animation: 'fade', transitionSpec: { animation: 'timing', config: { duration: 160 } } }}
         />
       ))}
     </Tabs>
