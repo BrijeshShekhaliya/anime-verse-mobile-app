@@ -162,31 +162,50 @@ export const api = {
 
       // 1. If provider was already verified for this anime season & audio language, use it directly
       if (rememberedProvider === 'hianime') {
+        let hiStream: StreamData | null = null;
         try {
-          const hiStream = await resolveHiAnimeDirect(params, options?.forceRefresh);
+          hiStream = await resolveHiAnimeDirect(params, options?.forceRefresh);
           if (hiStream && hiStream.streamUrl) {
-            return hiStream;
+            if (!isHindiTarget || hasAudioLanguage(hiStream.audioTracks, 'hindi')) {
+              return hiStream;
+            }
           }
         } catch {
-          // HiAnime failed or timed out; purge memory and failover to AnimeRulz
-          if (memoryKey) providerMemory.delete(memoryKey);
+          // HiAnime failed or requested dub unavailable for this episode
         }
-        return resolveAnimeRulzDirect(
-          {
-            id: params.id,
-            anilistId: params.anilistId,
-            title: params.title,
-            episode: params.episode,
-            season: params.season,
-            mode: params.mode,
-          },
-          options?.forceRefresh,
-        );
+
+        // HiAnime lacked Hindi (or failed). Check if AnimeRulz has Hindi:
+        let multiStream: StreamData | null = null;
+        try {
+          multiStream = await resolveAnimeRulzDirect(
+            {
+              id: params.id,
+              anilistId: params.anilistId,
+              title: params.title,
+              episode: params.episode,
+              season: params.season,
+              mode: params.mode,
+            },
+            options?.forceRefresh,
+          );
+          if (multiStream && multiStream.streamUrl && hasAudioLanguage(multiStream.audioTracks, 'hindi')) {
+            return multiStream;
+          }
+        } catch {
+          // AnimeRulz failed
+        }
+
+        // If neither provider has Hindi for this episode, gracefully fall back to Japanese (Sub)
+        // without corrupting the season's Hindi memory:
+        if (multiStream && multiStream.streamUrl) return multiStream;
+        if (hiStream && hiStream.streamUrl) return hiStream;
+        return resolveHiAnimeDirect({ ...params, mode: 'sub' }, options?.forceRefresh);
       }
 
       if (rememberedProvider === 'animerulz') {
+        let multiStream: StreamData | null = null;
         try {
-          const multiStream = await resolveAnimeRulzDirect(
+          multiStream = await resolveAnimeRulzDirect(
             {
               id: params.id,
               anilistId: params.anilistId,
@@ -198,13 +217,29 @@ export const api = {
             options?.forceRefresh,
           );
           if (multiStream && multiStream.streamUrl) {
-            return multiStream;
+            if (!isHindiTarget || hasAudioLanguage(multiStream.audioTracks, 'hindi')) {
+              return multiStream;
+            }
           }
         } catch {
-          // AnimeRulz failed; purge memory and failover to HiAnime
-          if (memoryKey) providerMemory.delete(memoryKey);
+          // AnimeRulz failed
         }
-        return resolveHiAnimeDirect(params, options?.forceRefresh);
+
+        // AnimeRulz lacked Hindi (or failed). Check if HiAnime has Hindi:
+        let hiStream: StreamData | null = null;
+        try {
+          hiStream = await resolveHiAnimeDirect(params, options?.forceRefresh);
+          if (hiStream && hiStream.streamUrl && hasAudioLanguage(hiStream.audioTracks, 'hindi')) {
+            return hiStream;
+          }
+        } catch {
+          // HiAnime failed
+        }
+
+        // If neither provider has Hindi for this episode, gracefully fall back to Japanese (Sub):
+        if (multiStream && multiStream.streamUrl) return multiStream;
+        if (hiStream && hiStream.streamUrl) return hiStream;
+        return resolveHiAnimeDirect({ ...params, mode: 'sub' }, options?.forceRefresh);
       }
 
       // 2. Standard flow / unremembered provider:
@@ -235,30 +270,34 @@ export const api = {
         }
 
         // AnimeRulz does NOT have Hindi (or failed). Check if HiAnime has it!
+        let hiStream: StreamData | null = null;
         try {
-          const hiStream = await resolveHiAnimeDirect(params, options?.forceRefresh);
+          hiStream = await resolveHiAnimeDirect(params, options?.forceRefresh);
           if (hiStream && hiStream.streamUrl) {
             if (hasAudioLanguage(hiStream.audioTracks, 'hindi')) {
               if (memoryKey) providerMemory.set(memoryKey, 'hianime');
               return hiStream;
             }
-            // If HiAnime also lacks Hindi, return AnimeRulz if available (preferred fast stream)
-            if (multiStream && multiStream.streamUrl) {
-              if (memoryKey) providerMemory.set(memoryKey, 'animerulz');
-              return multiStream;
-            }
-            return hiStream;
           }
         } catch {
           // HiAnime failed
         }
 
-        // If HiAnime failed but AnimeRulz succeeded, return AnimeRulz
+        // Neither provider has Hindi for this episode!
+        // Fall back gracefully to original Japanese (Sub):
+        // 1. If AnimeRulz already returned a stream (Japanese/raw), return it immediately (0 new calls!)
         if (multiStream && multiStream.streamUrl) {
+          if (memoryKey) providerMemory.set(memoryKey, 'animerulz');
           return multiStream;
         }
 
-        throw new Error('Stream currently unavailable on all providers');
+        // 2. If HiAnime already returned a stream, return it!
+        if (hiStream && hiStream.streamUrl) {
+          return hiStream;
+        }
+
+        // 3. Otherwise resolve HiAnime in sub (Japanese) mode directly:
+        return resolveHiAnimeDirect({ ...params, mode: 'sub' }, options?.forceRefresh);
       }
 
       // Non-Hindi: if AnimeRulz succeeded, return immediately (sub-second fast path)

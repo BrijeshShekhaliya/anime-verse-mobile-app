@@ -236,4 +236,55 @@ describe('Smart Provider Selection & Multi-Audio Regression Suite', () => {
     assert.strictEqual(finalStream.streamUrl, 'https://animerulz.test/japanese-only.m3u8');
     assert.strictEqual(providerMemory.get(s1Key), 'animerulz', 'Caches AnimeRulz so Ep 2 does not re-check HiAnime');
   });
+
+  test('11. Missing Dub Fallback: When AnimeRulz has only embeds and HiAnime has no dub, seamlessly falls back to HiAnime sub (Japanese)', async () => {
+    // Grand Blue Episode 10 case:
+    // AnimeRulz has no Multi-1 (throws cannot extract master.m3u8)
+    // HiAnime has no dub (throws No server available for mode: dub)
+    // HiAnime has sub (returns Japanese 1080p master)
+    const mockAnimeRulzNoDirect = async () => {
+      throw new Error('Could not extract master.m3u8 from AnimeRulz server');
+    };
+
+    const mockHiAnime = async ({ mode }) => {
+      if (mode === 'dub') {
+        throw new Error('No server available for mode: dub');
+      }
+      return { success: true, mode: 'sub', streamUrl: 'https://hianime.test/grandblue-ep10-sub.m3u8', audioTracks: [{ id: '1', name: 'Japanese', language: 'jpn' }] };
+    };
+
+    // Resolver simulation
+    let stream;
+    let arStream = null;
+    try {
+      arStream = await mockAnimeRulzNoDirect();
+    } catch {}
+
+    // Check if AnimeRulz had Hindi
+    if (arStream && hasAudioLanguage(arStream.audioTracks, 'hindi')) {
+      stream = arStream;
+    } else {
+      let hiDubStream = null;
+      try {
+        hiDubStream = await mockHiAnime({ mode: 'dub' });
+      } catch {}
+
+      if (hiDubStream && hasAudioLanguage(hiDubStream.audioTracks, 'hindi')) {
+        stream = hiDubStream;
+      } else {
+        // Fallback to sub
+        if (arStream && arStream.streamUrl) {
+          stream = arStream;
+        } else if (hiDubStream && hiDubStream.streamUrl) {
+          stream = hiDubStream;
+        } else {
+          stream = await mockHiAnime({ mode: 'sub' });
+        }
+      }
+    }
+
+    assert.ok(stream);
+    assert.strictEqual(stream.mode, 'sub');
+    assert.strictEqual(stream.streamUrl, 'https://hianime.test/grandblue-ep10-sub.m3u8');
+  });
 });

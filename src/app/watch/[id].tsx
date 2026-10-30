@@ -24,7 +24,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView, type WebViewProps } from 'react-native-webview';
 import NativeHlsPlayer, { type NativePlayerTrack, type NativeVideoLevel } from '@/components/player/NativeHlsPlayer';
-import { isAudioLanguageMatch } from '@/components/player/ExpoVideoHlsPlayer';
+import { isAudioLanguageMatch, hasAudioLanguage } from '@/components/player/ExpoVideoHlsPlayer';
 import { isStreamUrlExpired } from '@/services/animerulzClient';
 import { EpisodeBadges } from '@/components/Badges';
 import { Icon } from '@/components/Icon';
@@ -567,6 +567,13 @@ export default function WatchScreen() {
           mountedStreamEpisodeKeyRef.current = resolvedEpisodeKey;
           setMountedStream(res);
           setHlsError(null);
+
+          // If user preferred Hindi, but stream only has Japanese (Sub) without Hindi:
+          const isPrefHindi = preferredAudioNameRef.current?.includes('hindi');
+          const hasHindi = res.audioTracks && hasAudioLanguage(res.audioTracks, 'hindi');
+          if (isPrefHindi && !hasHindi && res.mode === 'sub') {
+            showBadge('Hindi dub unavailable — Playing in Japanese');
+          }
         } else {
           setHlsError('Stream currently unavailable. Tap to retry or switch server.');
         }
