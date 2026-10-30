@@ -1,4 +1,7 @@
-import Constants from 'expo-constants';
+let Constants: any = null;
+try {
+  Constants = require('expo-constants')?.default || require('expo-constants');
+} catch {}
 import type { Anime, AnimeDetail, Character, EpisodesData, Home, SearchResult, StreamData } from './types';
 import {
   fetchDetail,
@@ -13,6 +16,14 @@ import {
 } from '@/services/anilistClient';
 import { resolveAnimeRulzDirect, isStreamUrlExpired } from '@/services/animerulzClient';
 import { resolveHiAnimeDirect } from '@/services/hianimeClient';
+import { hasAudioLanguage } from './audioMatch';
+import {
+  providerMemory,
+  getProviderMemoryKey,
+  clearProviderMemory,
+} from './providerSelection';
+
+export { providerMemory, getProviderMemoryKey, clearProviderMemory };
 
 export type { SearchParams };
 
@@ -133,19 +144,34 @@ export const api = {
       season: number;
       episode: number;
       mode: 'sub' | 'dub';
+      preferredAudio?: string;
     },
     options?: { forceRefresh?: boolean },
   ): Promise<StreamData> => {
-    const key = `stream:${params.id || ''}:${params.anilistId || ''}:${params.title}:${params.season}:${params.episode}:${params.mode}`.toLowerCase();
+    const prefAudio = (params.preferredAudio || '').toLowerCase().trim();
+    const key = `stream:${params.id || ''}:${params.anilistId || ''}:${params.title}:${params.season}:${params.episode}:${params.mode}:${prefAudio}`.toLowerCase();
     if (options?.forceRefresh) memo.delete(key);
     const cachedEntry = memo.get(key);
     if (cachedEntry && isStreamUrlExpired((cachedEntry.data as StreamData)?.streamUrl)) {
       memo.delete(key);
     }
     return cached<StreamData>(key, 30 * 60 * 1000, async () => {
-      // 1. Try AnimeRulz Multi-Audio default resolver first
-      try {
-        const multiStream = await resolveAnimeRulzDirect(
+      const isHindiTarget = prefAudio === 'hindi' || prefAudio === 'hin' || prefAudio === 'hi';
+      const memoryKey = isHindiTarget ? getProviderMemoryKey(params, 'hindi') : null;
+      const rememberedProvider = memoryKey ? providerMemory.get(memoryKey) : null;
+
+      // 1. If provider was already verified for this anime season & audio language, use it directly
+      if (rememberedProvider === 'hianime') {
+        try {
+          const hiStream = await resolveHiAnimeDirect(params, options?.forceRefresh);
+          if (hiStream && hiStream.streamUrl) {
+            return hiStream;
+          }
+        } catch {
+          // HiAnime failed or timed out; purge memory and failover to AnimeRulz
+          if (memoryKey) providerMemory.delete(memoryKey);
+        }
+        return resolveAnimeRulzDirect(
           {
             id: params.id,
             anilistId: params.anilistId,
@@ -156,14 +182,91 @@ export const api = {
           },
           options?.forceRefresh,
         );
+      }
+
+      if (rememberedProvider === 'animerulz') {
+        try {
+          const multiStream = await resolveAnimeRulzDirect(
+            {
+              id: params.id,
+              anilistId: params.anilistId,
+              title: params.title,
+              episode: params.episode,
+              season: params.season,
+              mode: params.mode,
+            },
+            options?.forceRefresh,
+          );
+          if (multiStream && multiStream.streamUrl) {
+            return multiStream;
+          }
+        } catch {
+          // AnimeRulz failed; purge memory and failover to HiAnime
+          if (memoryKey) providerMemory.delete(memoryKey);
+        }
+        return resolveHiAnimeDirect(params, options?.forceRefresh);
+      }
+
+      // 2. Standard flow / unremembered provider:
+      // Try AnimeRulz Multi-Audio default resolver first
+      let multiStream: StreamData | null = null;
+      try {
+        multiStream = await resolveAnimeRulzDirect(
+          {
+            id: params.id,
+            anilistId: params.anilistId,
+            title: params.title,
+            episode: params.episode,
+            season: params.season,
+            mode: params.mode,
+          },
+          options?.forceRefresh,
+        );
+      } catch {
+        // AnimeRulz failed or episode unavailable
+      }
+
+      // If user specifically requested Hindi audio:
+      if (isHindiTarget) {
+        // Check if AnimeRulz actually has Hindi audio
+        if (multiStream && multiStream.streamUrl && hasAudioLanguage(multiStream.audioTracks, 'hindi')) {
+          if (memoryKey) providerMemory.set(memoryKey, 'animerulz');
+          return multiStream;
+        }
+
+        // AnimeRulz does NOT have Hindi (or failed). Check if HiAnime has it!
+        try {
+          const hiStream = await resolveHiAnimeDirect(params, options?.forceRefresh);
+          if (hiStream && hiStream.streamUrl) {
+            if (hasAudioLanguage(hiStream.audioTracks, 'hindi')) {
+              if (memoryKey) providerMemory.set(memoryKey, 'hianime');
+              return hiStream;
+            }
+            // If HiAnime also lacks Hindi, return AnimeRulz if available (preferred fast stream)
+            if (multiStream && multiStream.streamUrl) {
+              if (memoryKey) providerMemory.set(memoryKey, 'animerulz');
+              return multiStream;
+            }
+            return hiStream;
+          }
+        } catch {
+          // HiAnime failed
+        }
+
+        // If HiAnime failed but AnimeRulz succeeded, return AnimeRulz
         if (multiStream && multiStream.streamUrl) {
           return multiStream;
         }
-      } catch {
-        // Graceful silent fallback to HiAnime
+
+        throw new Error('Stream currently unavailable on all providers');
       }
 
-      // 2. High-speed fallback to HiAnime direct resolver
+      // Non-Hindi: if AnimeRulz succeeded, return immediately (sub-second fast path)
+      if (multiStream && multiStream.streamUrl) {
+        return multiStream;
+      }
+
+      // AnimeRulz failed; fall back to HiAnime
       return resolveHiAnimeDirect(params, options?.forceRefresh);
     });
   },
@@ -185,10 +288,14 @@ export const api = {
         memo.delete(k);
       }
     }
+    clearProviderMemory(params);
   },
 
   seedDetail,
   getCachedDetail,
   getCachedEpisodes,
   buildAnilistSeasons,
+  providerMemory,
+  getProviderMemoryKey,
+  clearProviderMemory,
 };

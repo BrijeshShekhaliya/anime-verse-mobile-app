@@ -468,7 +468,8 @@ export default function WatchScreen() {
         anime?.anilistId ||
         initialAnilistId ||
         undefined;
-      const key = `${id}:${targetAnilistId || ''}:${title}:${season}:${episode}:${mode}`;
+      const prefAudio = (preferredAudioNameRef.current || '').toLowerCase().trim();
+      const key = `${id}:${targetAnilistId || ''}:${title}:${season}:${episode}:${mode}:${prefAudio}`;
       if (!force) {
         const hit = streamCacheRef.current.get(key);
         if (hit && Date.now() < hit.expiresAt && !isStreamUrlExpired(hit.data.streamUrl)) {
@@ -485,7 +486,7 @@ export default function WatchScreen() {
       const promise = (async () => {
         try {
           const res = await api.resolveStream(
-            { id, anilistId: targetAnilistId, title, romaji, season, episode, mode },
+            { id, anilistId: targetAnilistId, title, romaji, season, episode, mode, preferredAudio: prefAudio },
             { forceRefresh: force },
           );
           if (res && res.streamUrl) {

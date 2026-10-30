@@ -525,19 +525,10 @@ export async function resolveAnimeRulzDirect(
     throw new Error('Could not extract master.m3u8 from AnimeRulz server');
   }
 
-  // Fast in-band audio tracks resolution with pre-seeded standard multi-audio fallback
-  const DEFAULT_MULTI_TRACKS: StreamAudioTrack[] = [
-    { id: 'hls-audio-0', name: 'Japanese', language: 'jpn', groupId: 'audio', isDefault: false, isAutoselect: true, uri: null, channels: null },
-    { id: 'hls-audio-1', name: 'English', language: 'eng', groupId: 'audio', isDefault: false, isAutoselect: true, uri: null, channels: null },
-    { id: 'hls-audio-2', name: 'Hindi', language: 'hin', groupId: 'audio', isDefault: false, isAutoselect: true, uri: null, channels: null },
-    { id: 'hls-audio-3', name: 'Tamil', language: 'tam', groupId: 'audio', isDefault: false, isAutoselect: true, uri: null, channels: null },
-    { id: 'hls-audio-4', name: 'Telugu', language: 'tel', groupId: 'audio', isDefault: false, isAutoselect: true, uri: null, channels: null },
-  ];
-
   let audioTracks: StreamAudioTrack[] = [];
   try {
     const manCtrl = new AbortController();
-    const manTimer = setTimeout(() => manCtrl.abort(), 1500); // 1.5s fast manifest timeout
+    const manTimer = setTimeout(() => manCtrl.abort(), 2500); // 2.5s fast manifest timeout
     const manifestText = await fetch(masterM3u8, {
       headers: { 'User-Agent': USER_AGENT, Referer: referer },
       signal: manCtrl.signal,
@@ -548,10 +539,6 @@ export async function resolveAnimeRulzDirect(
     audioTracks = parseHlsAudioTracks(manifestText, masterM3u8);
   } catch {
     // Non-fatal if manifest inspection times out; native ExoPlayer parses all renditions dynamically
-  }
-
-  if (!audioTracks || audioTracks.length === 0) {
-    audioTracks = DEFAULT_MULTI_TRACKS;
   }
 
   const result: StreamData = {
