@@ -412,17 +412,22 @@ function ActionIcons({ anime, name }: { anime: AnimeDetail; name: string }) {
 function BottomBar({ anime, currentSeason = 1, bottom }: { anime: AnimeDetail; currentSeason?: number; bottom: number }) {
   const { inList, toggleList, progress } = useLibrary();
   const saved = inList(anime.id);
-  const watchedEp = progress[anime.id]?.episode || 0;
-  const nextEp = watchedEp > 0 ? watchedEp + 1 : 1;
+  const userProgress = progress[anime.id];
+  const watchedEp = userProgress?.episode || 0;
+  const isCompleted = Boolean(userProgress?.completed);
+  // If the episode is completed, prompt next episode; if paused/stopped halfway, continue THIS episode!
+  const targetEp = watchedEp > 0 ? (isCompleted ? watchedEp + 1 : watchedEp) : 1;
+  const isDoneAll = Boolean(anime.episodes && watchedEp >= anime.episodes && isCompleted);
+
   const pop = useSharedValue(1);
   const popStyle = useAnimatedStyle(() => ({ transform: [{ scale: pop.value }] }));
   return (
     <View style={[styles.bottomBar, { paddingBottom: bottom + 10 }]} pointerEvents="box-none">
       <LinearGradient colors={['transparent', 'rgba(0,0,0,0.92)', '#000']} locations={[0, 0.45, 1]} style={StyleSheet.absoluteFill} pointerEvents="none" />
-      <PressableScale haptic style={styles.primaryBtn} scaleTo={0.97} onPress={() => router.push(`/watch/${anime.id}?season=${currentSeason}&ep=${nextEp}` as any)}>
+      <PressableScale haptic style={styles.primaryBtn} scaleTo={0.97} onPress={() => router.push(`/watch/${anime.id}?season=${currentSeason}&ep=${targetEp}` as any)}>
         <Icon name="play" size={20} color="#000" />
         <Text style={styles.primaryText} numberOfLines={1}>
-          {watchedEp > 0 ? `Continue E${nextEp}` : 'Start Watching E1'}
+          {watchedEp > 0 ? (isDoneAll ? 'Replay E1' : `Continue E${targetEp}`) : 'Start Watching E1'}
         </Text>
       </PressableScale>
       <Animated.View style={popStyle}>

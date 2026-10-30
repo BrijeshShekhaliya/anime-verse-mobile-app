@@ -193,6 +193,9 @@ export default function WatchScreen() {
 
   // Live state refs to capture values synchronously during stream switches
   const currentTimeRef = useRef<number>(0);
+  const durationRef = useRef<number>(1429);
+  const lastProgressCompletedRef = useRef<boolean>(false);
+  const lastProgressSavedTimeRef = useRef<number>(0);
   const isPlayingRef = useRef<boolean>(true);
   const playbackSpeedRef = useRef<number>(1.0);
   const subtitlesEnabledRef = useRef<boolean>(true);
@@ -419,16 +422,35 @@ export default function WatchScreen() {
     return false;
   }, [currentEpisodeObj?.hasDub, epData?.dubCount, currentEp, anime?.languages?.dub]);
 
-  // Save progress to library once per episode
+  // Save progress to library once per episode (initially marked as in-progress)
   useEffect(() => {
     if (!anime || currentEp <= 0) return;
     const key = `${anime.id}:${currentSeason}:${currentEp}`;
+    lastProgressCompletedRef.current = false;
+    lastProgressSavedTimeRef.current = 0;
     if (recordedEpRef.current === key) return;
     recordedEpRef.current = key;
 
     const total = epData?.episodes?.length || anime.episodes || anime.episodeCount || null;
-    setProgress(anime, currentEp, total);
+    setProgress(anime, currentEp, total, { completed: false, time: 0 });
   }, [anime, currentSeason, currentEp, epData?.episodes?.length, setProgress]);
+
+  // Persist progress when exiting the screen
+  useEffect(() => {
+    return () => {
+      if (anime && currentEp > 0) {
+        const time = currentTimeRef.current;
+        const dur = durationRef.current;
+        const isCompleted = dur > 0 ? time / dur >= 0.85 : false;
+        const total = epData?.episodes?.length || anime.episodes || anime.episodeCount || null;
+        setProgress(anime, currentEp, total, {
+          time: Math.floor(time),
+          duration: Math.floor(dur),
+          completed: isCompleted || lastProgressCompletedRef.current,
+        });
+      }
+    };
+  }, [anime, currentEp, epData, setProgress]);
 
   // Caching stream resolver: reuses cached resolution and prevents duplicate concurrent requests
   const resolveStreamWithCache = useCallback(
@@ -794,6 +816,11 @@ export default function WatchScreen() {
     if (episodes.length === 0) return;
     const maxEp = episodes[episodes.length - 1].episode_number;
     if (currentEp < maxEp) {
+      if (anime) {
+        lastProgressCompletedRef.current = true;
+        const total = epData?.episodes?.length || anime.episodes || anime.episodeCount || null;
+        setProgress(anime, currentEp, total, { completed: true });
+      }
       const nextEp = currentEp + 1;
       currentEpisodeKeyRef.current = `${currentSeason}:${nextEp}`;
       audioSwitchRequestRef.current += 1;
@@ -1075,9 +1102,27 @@ export default function WatchScreen() {
         }
       }
 
-      // Crunchyroll-Style Background Preload: pre-resolve next episode stream when current episode is >= 70% or > 3 mins
+      // Track playback progress & mark episode completed if watched past 85%
       if (loadedDuration > 0 && time > 0) {
+        durationRef.current = loadedDuration;
         const ratio = time / loadedDuration;
+        const isCompleted = ratio >= 0.85;
+        if (
+          anime &&
+          (isCompleted !== lastProgressCompletedRef.current ||
+            Math.abs(time - lastProgressSavedTimeRef.current) >= 15)
+        ) {
+          lastProgressCompletedRef.current = isCompleted;
+          lastProgressSavedTimeRef.current = time;
+          const total = epData?.episodes?.length || anime?.episodes || anime?.episodeCount || null;
+          setProgress(anime, currentEp, total, {
+            time: Math.floor(time),
+            duration: Math.floor(loadedDuration),
+            completed: isCompleted,
+          });
+        }
+
+        // Crunchyroll-Style Background Preload: pre-resolve next episode stream when current episode is >= 70% or > 3 mins
         const nextEp = currentEp + 1;
         const total = epData?.episodes?.length || anime?.episodes || anime?.episodeCount || 0;
         const nextKey = `${currentSeason}:${nextEp}`;
@@ -1368,7 +1413,14 @@ export default function WatchScreen() {
               onAudioTracks={onNativePlayerAudioTracks}
               onTextTracks={onNativePlayerTextTracks}
               onVideoTracks={onNativePlayerVideoTracks}
-              onEnd={() => { if (autoplay) handleNextEpisode(); }}
+              onEnd={() => {
+                if (anime && currentEp > 0) {
+                  lastProgressCompletedRef.current = true;
+                  const total = epData?.episodes?.length || anime.episodes || anime.episodeCount || null;
+                  setProgress(anime, currentEp, total, { completed: true });
+                }
+                if (autoplay) handleNextEpisode();
+              }}
               onError={onNativePlayerError}
             />
           ) : null

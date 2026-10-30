@@ -21,10 +21,20 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W }: { ite
   const { art: tmdb } = useArt(a as Anime, true);
   const title = useTitle(a);
   const art = backdropOf(a as Anime, tmdb);
-  const done = !!item.total && item.episode >= item.total;
-  const nextEp = done ? item.episode : item.episode + 1;
-  const pct = item.total ? Math.min(1, item.episode / item.total) : 0;
-  const left = item.total ? Math.max(0, item.total - item.episode) : null;
+  const isCompleted = Boolean(item.completed);
+  const done = Boolean(item.total && item.episode >= item.total && isCompleted);
+  // If completed, prompt next episode; if paused/stopped halfway, continue THIS episode!
+  const targetEp = done ? item.episode : isCompleted ? item.episode + 1 : item.episode;
+  const pct = item.total
+    ? Math.min(
+        1,
+        (isCompleted
+          ? item.episode
+          : Math.max(0, item.episode - 1 + (item.duration && item.duration > 0 ? (item.time || 0) / item.duration : 0.5))) /
+          item.total,
+      )
+    : 0;
+  const left = item.total ? Math.max(0, item.total - (isCompleted ? item.episode : item.episode - 1)) : null;
 
   // Progress fills from empty (transform only: no layout work per frame).
   const reduce = useReducedMotion();
@@ -37,9 +47,9 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W }: { ite
   return (
     <Animated.View entering={reduce ? undefined : FadeInRight.delay(Math.min(index, 5) * 70).duration(420)} style={{ width }}>
       <PressableScale
-        onPress={() => router.push(`/watch/${a.id}?ep=${nextEp}` as any)}
+        onPress={() => router.push(`/watch/${a.id}?ep=${targetEp}` as any)}
         scaleTo={0.97}
-        accessibilityLabel={`Continue ${title}, episode ${nextEp}`}
+        accessibilityLabel={`Continue ${title}, episode ${targetEp}`}
       >
         <View style={[styles.art, { height: Math.round(width * 0.56) }]}>
           {art ? (
@@ -48,7 +58,7 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W }: { ite
           <LinearGradient colors={['rgba(0,0,0,0.35)', 'transparent', 'rgba(0,0,0,0.9)']} locations={[0, 0.35, 1]} style={StyleSheet.absoluteFill} />
 
           <View style={styles.epChip}>
-            <Text style={styles.epChipText}>{done ? 'FINISHED' : `EP ${nextEp}`}</Text>
+            <Text style={styles.epChipText}>{done ? 'FINISHED' : `EP ${targetEp}`}</Text>
           </View>
 
           <View style={styles.playWrap} pointerEvents="none">
@@ -62,7 +72,7 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W }: { ite
               {title}
             </Text>
             <Text style={styles.meta} numberOfLines={1}>
-              {done ? 'All episodes watched' : `Episode ${nextEp}`}
+              {done ? 'All episodes watched' : `Episode ${targetEp}`}
               {left ? <Text style={styles.metaDim}>{`  ·  ${left} left`}</Text> : null}
             </Text>
           </View>

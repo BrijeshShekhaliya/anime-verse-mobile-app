@@ -13,10 +13,21 @@ export type SavedTitle = Pick<
 
 export type HistoryEntry = { anime: SavedTitle; at: number };
 export type ListEntry = { anime: SavedTitle; at: number };
+
+export type ProgressOptions = {
+  time?: number;
+  duration?: number;
+  completed?: boolean;
+  watch?: { url: string; name: string } | null;
+};
+
 export type Progress = {
   anime: SavedTitle;
-  episode: number; // episodes watched so far
+  episode: number; // the episode currently watched or last finished
   total: number | null;
+  time?: number;
+  duration?: number;
+  completed?: boolean; // true only when finished (>85% or ended)
   watchUrl: string | null; // official platform to continue on
   watchName: string | null;
   updatedAt: number;
@@ -58,7 +69,12 @@ type Library = State & {
   clearHistory: () => void;
   inList: (id: string) => boolean;
   toggleList: (a: Anime) => boolean;
-  setProgress: (a: Anime, episode: number, total: number | null, watch?: { url: string; name: string } | null) => void;
+  setProgress: (
+    a: Anime,
+    episode: number,
+    total: number | null,
+    extra?: ProgressOptions | { url: string; name: string } | null,
+  ) => void;
   clearProgress: (id: string) => void;
   continueWatching: Progress[];
   addSearch: (q: string) => void;
@@ -126,30 +142,70 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   );
 
   const setProgress = useCallback(
-    (a: Anime, episode: number, total: number | null, watch?: { url: string; name: string } | null) => {
+    (
+      a: Anime,
+      episode: number,
+      total: number | null,
+      extra?: ProgressOptions | { url: string; name: string } | null,
+    ) => {
+      const opts: ProgressOptions =
+        extra && 'url' in extra
+          ? { watch: extra }
+          : (extra as ProgressOptions) || {};
+
       setState((s) => {
         const existing = s.progress[a.id];
+        const nextCompleted =
+          opts.completed !== undefined
+            ? opts.completed
+            : existing?.episode === episode
+            ? existing?.completed
+            : false;
+        const nextTime =
+          opts.time !== undefined
+            ? opts.time
+            : existing?.episode === episode
+            ? existing?.time
+            : 0;
+        const nextDuration =
+          opts.duration !== undefined
+            ? opts.duration
+            : existing?.episode === episode
+            ? existing?.duration
+            : 0;
+        const nextWatchUrl = opts.watch?.url ?? existing?.watchUrl ?? null;
+        const nextWatchName = opts.watch?.name ?? existing?.watchName ?? null;
+
         if (
           existing &&
           existing.episode === episode &&
           existing.total === total &&
-          existing.watchUrl === (watch?.url ?? existing.watchUrl) &&
-          existing.watchName === (watch?.name ?? existing.watchName)
+          existing.completed === nextCompleted &&
+          existing.time === nextTime &&
+          existing.duration === nextDuration &&
+          existing.watchUrl === nextWatchUrl &&
+          existing.watchName === nextWatchName
         ) {
           return s;
         }
+
         const progress = { ...s.progress };
-        if (episode <= 0) delete progress[a.id];
-        else {
+        if (episode <= 0) {
+          delete progress[a.id];
+        } else {
           progress[a.id] = {
             anime: slim(a),
             episode,
             total,
-            watchUrl: watch?.url ?? progress[a.id]?.watchUrl ?? null,
-            watchName: watch?.name ?? progress[a.id]?.watchName ?? null,
+            time: nextTime,
+            duration: nextDuration,
+            completed: nextCompleted,
+            watchUrl: nextWatchUrl,
+            watchName: nextWatchName,
             updatedAt: Date.now(),
           };
         }
+
         // History is what you've actually watched, so it's recorded here
         // (not when a detail page is opened).
         const history =
@@ -182,7 +238,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   const continueWatching = useMemo(
     () =>
       Object.values(state.progress)
-        .filter((p) => !p.total || p.episode < p.total)
+        .filter((p) => !p.total || (p.completed ? p.episode < p.total : p.episode <= p.total))
         .sort((a, b) => b.updatedAt - a.updatedAt),
     [state.progress]
   );
