@@ -30,10 +30,11 @@ import { ErrorState } from '@/components/States';
 import { posterOf, useArt } from '@/lib/artwork';
 import { fmtNum } from '@/lib/format';
 import { useLibrary } from '@/lib/library';
-import { useDetail, useEpisodes, useExtras } from '@/lib/queries';
+import { useDetail, useEpisodeGuide, useExtras, useSeasons } from '@/lib/queries';
+import { anilistIdOf, type GuideEpisode } from '@/lib/episodeGuide';
 import { displayTitle, useSettings } from '@/lib/settings';
 import { colors, fonts, radius, springs } from '@/lib/theme';
-import type { AnimeDetail, Episode } from '@/lib/types';
+import type { AnimeDetail } from '@/lib/types';
 
 const haptic = (kind: 'tap' | 'success' | 'warn' = 'tap') => {
   if (Platform.OS === 'web') return;
@@ -64,8 +65,18 @@ export default function DetailScreen() {
   const loading = detail.isPending;
   const error = detail.error ? detail.error.message || 'Something went wrong' : null;
 
-  const [season, setSeason] = useState(1);
-  const eps = useEpisodes(String(id), season, !!a?.airing);
+  // Every season of the show; the page's own entry is selected at first.
+  const anilistId = a ? anilistIdOf(a) : null;
+  const seasonsQ = useSeasons(anilistId);
+  const seasonList = seasonsQ.data || [];
+  const [picked, setPicked] = useState<number | null>(null); // AniList id of the chosen season
+
+  useEffect(() => {
+    setPicked(null);
+  }, [id, anilistId]);
+  const seasonId = picked ?? anilistId;
+  const current = seasonList.find((x) => x.anilistId === seasonId);
+  const guide = useEpisodeGuide(seasonId, !!a?.airing);
   const { data: extras } = useExtras(String(id));
   const { art: tmdb, settled: artSettled, known: artKnown } = useArt(a, true);
   const { titleLang } = useSettings();
@@ -123,9 +134,10 @@ export default function DetailScreen() {
   const logo = tmdb?.logo || null;
   const showLogoArea = !artSettled && !opened.current?.logoKnown;
   const meta = [a.year ? String(a.year) : '', a.type || '', ...(a.genres || []).slice(0, 3)].filter(Boolean);
-  const episodes = eps.data?.episodes || [];
-  const seasons = eps.data?.seasons || [];
-  const seasonName = seasons.find((s) => s.season_number === season)?.name || `Season ${season}`;
+  const episodes = guide.data || [];
+  const seasonLabel = current?.label || 'Season 1';
+  const watchId = current?.id || a.id; // episodes play from that season's own entry
+  const runtime = a.duration ? parseInt(a.duration, 10) || null : null;
   const recs = extras?.recommendations || [];
   const cols = width >= 700 ? 5 : 3;
   const recW = Math.floor((width - 32 - (cols - 1) * 12) / cols);
@@ -208,20 +220,37 @@ export default function DetailScreen() {
 
         {tab === 'episodes' ? (
           <Animated.View key="episodes" entering={FadeIn.duration(220)}>
-            <PressableScale haptic disabled={seasons.length < 2} onPress={() => setSeasonOpen(true)} style={styles.seasonRow} scaleTo={0.99}>
-              {seasons.length > 1 ? <Icon name="down" size={16} color="#fff" /> : null}
-              <Text style={styles.seasonText} numberOfLines={1}>
-                {seasonName}
-              </Text>
+            <PressableScale haptic disabled={seasonList.length < 2} onPress={() => setSeasonOpen(true)} style={styles.seasonRow} scaleTo={0.99}>
+              {seasonList.length > 1 ? <Icon name="down" size={16} color="#fff" /> : null}
+              <View style={{ flex: 1 }}>
+                <Text style={styles.seasonText} numberOfLines={1}>
+                  {seasonLabel}
+                </Text>
+                {current && seasonList.length > 1 ? (
+                  <Text style={styles.seasonSub} numberOfLines={1}>
+                    {current.title}
+                  </Text>
+                ) : null}
+              </View>
               {episodes.length ? <Text style={styles.seasonCount}>{episodes.length} episodes</Text> : null}
             </PressableScale>
 
             <View style={styles.epList}>
               {episodes.length ? (
                 episodes.map((ep, i) => (
-                  <EpisodeRow key={`${season}-${ep.episode_number}`} ep={ep} index={i} animeId={a.id} season={season} fallback={cardPoster} thumbW={Math.round((width - 32) * 0.46)} reduce={reduce} />
+                  <EpisodeRow
+                    key={`${seasonId}-${ep.number}`}
+                    ep={ep}
+                    index={i}
+                    watchId={watchId}
+                    seasonNumber={current?.seasonNumber || 1}
+                    runtime={runtime}
+                    fallback={cardPoster}
+                    thumbW={Math.round((width - 32) * 0.46)}
+                    reduce={reduce}
+                  />
                 ))
-              ) : eps.isPending || eps.isFetching ? (
+              ) : guide.isPending || guide.isFetching ? (
                 <EpisodeSkeleton thumbW={Math.round((width - 32) * 0.46)} />
               ) : (
                 <Text style={styles.empty}>Episodes aren't listed for this season yet.</Text>
@@ -251,7 +280,7 @@ export default function DetailScreen() {
       </View>
 
       {/* Sticky bottom: continue / start, and the watchlist */}
-      <BottomBar anime={a} season={season} bottom={insets.bottom} />
+      <BottomBar anime={a} currentSeason={current?.seasonNumber || 1} bottom={insets.bottom} />
 
       {/* More details */}
       <BottomSheet visible={detailsOpen} onClose={() => setDetailsOpen(false)} title={name} subtitle={meta.join(' · ')}>
@@ -286,22 +315,26 @@ export default function DetailScreen() {
       {/* Season picker */}
       <BottomSheet visible={seasonOpen} onClose={() => setSeasonOpen(false)} title="Seasons">
         <ScrollView contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 6 }}>
-          {seasons.map((s) => {
-            const on = s.season_number === season;
+          {seasonList.map((x) => {
+            const on = x.anilistId === seasonId;
             return (
               <PressableScale
-                key={s.season_number}
+                key={x.anilistId}
                 haptic
                 onPress={() => {
-                  setSeason(s.season_number);
+                  setPicked(x.anilistId);
                   setSeasonOpen(false);
                 }}
                 style={[styles.seasonPick, on && styles.seasonPickOn]}
                 scaleTo={0.98}
               >
                 <View style={{ flex: 1 }}>
-                  <Text style={[styles.seasonPickText, on && { color: colors.accent }]}>{s.name || `Season ${s.season_number}`}</Text>
-                  {s.episode_count ? <Text style={styles.seasonPickSub}>{s.episode_count} episodes</Text> : null}
+                  <Text style={[styles.seasonPickText, on && { color: colors.accent }]}>{x.label}</Text>
+                  <Text style={styles.seasonPickSub} numberOfLines={1}>
+                    {x.title}
+                    {x.episodes ? ` · ${x.episodes} episodes` : ''}
+                    {x.year ? ` · ${x.year}` : ''}
+                  </Text>
                 </View>
                 {on ? <Icon name="check" size={18} color={colors.accent} /> : null}
               </PressableScale>
@@ -376,7 +409,7 @@ function ActionIcons({ anime, name }: { anime: AnimeDetail; name: string }) {
 }
 
 // Sticky bar at the bottom of the screen.
-function BottomBar({ anime, season, bottom }: { anime: AnimeDetail; season: number; bottom: number }) {
+function BottomBar({ anime, currentSeason = 1, bottom }: { anime: AnimeDetail; currentSeason?: number; bottom: number }) {
   const { inList, toggleList, progress } = useLibrary();
   const saved = inList(anime.id);
   const watchedEp = progress[anime.id]?.episode || 0;
@@ -386,7 +419,7 @@ function BottomBar({ anime, season, bottom }: { anime: AnimeDetail; season: numb
   return (
     <View style={[styles.bottomBar, { paddingBottom: bottom + 10 }]} pointerEvents="box-none">
       <LinearGradient colors={['transparent', 'rgba(0,0,0,0.92)', '#000']} locations={[0, 0.45, 1]} style={StyleSheet.absoluteFill} pointerEvents="none" />
-      <PressableScale haptic style={styles.primaryBtn} scaleTo={0.97} onPress={() => router.push(`/watch/${anime.id}?season=${season}&ep=${nextEp}` as any)}>
+      <PressableScale haptic style={styles.primaryBtn} scaleTo={0.97} onPress={() => router.push(`/watch/${anime.id}?season=${currentSeason}&ep=${nextEp}` as any)}>
         <Icon name="play" size={20} color="#000" />
         <Text style={styles.primaryText} numberOfLines={1}>
           {watchedEp > 0 ? `Continue E${nextEp}` : 'Start Watching E1'}
@@ -460,45 +493,48 @@ function Tabs({ value, tabs, onChange }: { value: Tab; tabs: { key: Tab; label: 
 const EpisodeRow = memo(function EpisodeRow({
   ep,
   index,
-  animeId,
-  season,
+  watchId,
+  seasonNumber = 1,
+  runtime,
   fallback,
   thumbW,
   reduce,
 }: {
-  ep: Episode;
+  ep: GuideEpisode;
   index: number;
-  animeId: string;
-  season: number;
+  watchId: string;
+  seasonNumber?: number;
+  runtime: number | null;
   fallback?: string;
   thumbW: number;
   reduce: boolean;
 }) {
-  const thumb = ep.still_path || fallback;
-  const date = ep.air_date ? new Date(ep.air_date) : null;
+  const thumb = ep.thumb || fallback;
+  const date = ep.airingAt ? new Date(ep.airingAt * 1000) : null;
   const upcoming = !!date && date.getTime() > Date.now();
   return (
     <Animated.View entering={reduce || index > 7 ? undefined : FadeInDown.delay(index * 45).duration(320)}>
       <PressableScale
-        onPress={() => router.push(`/watch/${animeId}?season=${season}&ep=${ep.episode_number}` as any)}
+        onPress={() => router.push(`/watch/${watchId}?season=${seasonNumber}&ep=${ep.number}` as any)}
         style={styles.epRow}
         scaleTo={0.98}
-        accessibilityLabel={`Episode ${ep.episode_number}${ep.name ? `, ${ep.name}` : ''}`}
+        accessibilityLabel={`Episode ${ep.number}, ${ep.title}`}
       >
         <View style={[styles.epThumb, { width: thumbW, height: Math.round(thumbW * 0.5625) }]}>
           {thumb ? <Image source={{ uri: thumb }} style={StyleSheet.absoluteFill} contentFit="cover" transition={200} cachePolicy="memory-disk" /> : null}
           <View style={styles.epPlay}>
             <Icon name="play" size={16} color="#fff" />
           </View>
-          {ep.runtime ? (
+          {runtime ? (
             <View style={styles.epDuration}>
-              <Text style={styles.epDurationText}>{ep.runtime}m</Text>
+              <Text style={styles.epDurationText}>{runtime}m</Text>
             </View>
           ) : null}
         </View>
         <View style={{ flex: 1, paddingTop: 2 }}>
           <Text style={styles.epTitle} numberOfLines={3}>
-            {ep.episode_number}. {ep.name || `Episode ${ep.episode_number}`}
+            {/* "4. The Door to Hell"; just "Episode 4" when AniList has no name for it. */}
+            {ep.title === `Episode ${ep.number}` ? ep.title : `${ep.number}. ${ep.title}`}
           </Text>
           {date ? (
             <Text style={[styles.epMeta, upcoming && { color: colors.accent }]}>
@@ -616,7 +652,8 @@ const styles = StyleSheet.create({
   seasonRow: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 16, paddingVertical: 18, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.12)' },
   seasonText: { flex: 1, color: '#fff', fontFamily: fonts.black, fontSize: 18 },
   seasonCount: { color: colors.muted, fontFamily: fonts.bold, fontSize: 12.5 },
-  epList: { paddingHorizontal: 16, paddingTop: 16, gap: 14 },
+  seasonSub: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12.5, marginTop: 2 },
+  epList: { paddingHorizontal: 16, paddingTop: 20, gap: 24 },
   epRow: { flexDirection: 'row', gap: 14 },
   epThumb: { borderRadius: 4, overflow: 'hidden', backgroundColor: colors.surface2 },
   epPlay: { position: 'absolute', top: '50%', left: '50%', marginTop: -18, marginLeft: -18, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', paddingLeft: 2 },

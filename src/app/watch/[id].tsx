@@ -27,7 +27,6 @@ import NativeHlsPlayer, { type NativePlayerTrack, type NativeVideoLevel } from '
 import { isAudioLanguageMatch } from '@/components/player/ExpoVideoHlsPlayer';
 import { isStreamUrlExpired } from '@/services/animerulzClient';
 import { EpisodeBadges } from '@/components/Badges';
-import { BottomSheet } from '@/components/BottomSheet';
 import { Icon } from '@/components/Icon';
 import { PressableScale } from '@/components/PressableScale';
 import { api, toFullUrl } from '@/lib/api';
@@ -162,10 +161,9 @@ export default function WatchScreen() {
   const [autoplay, setAutoplay] = useState<boolean>(true);
   const [showAdvisory, setShowAdvisory] = useState<boolean>(true);
 
-  // Settings & All Episodes
+  // Settings
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [settingsSubView, setSettingsSubView] = useState<SettingsSubView>('main');
-  const [allEpisodesOpen, setAllEpisodesOpen] = useState<boolean>(false);
 
   // Likes / Interactions
   const [liked, setLiked] = useState<boolean>(false);
@@ -315,10 +313,6 @@ export default function WatchScreen() {
         setSettingsOpen(false);
         return true;
       }
-      if (allEpisodesOpen) {
-        setAllEpisodesOpen(false);
-        return true;
-      }
       if (isFullscreenView) {
         // Exit fullscreen to portrait instead of navigating away!
         exitFullscreen();
@@ -329,7 +323,7 @@ export default function WatchScreen() {
 
     const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
     return () => sub.remove();
-  }, [isFullscreenView, settingsOpen, allEpisodesOpen, exitFullscreen]);
+  }, [isFullscreenView, settingsOpen, exitFullscreen]);
 
   // Clean status bar handling for Android
   useEffect(() => {
@@ -2199,8 +2193,16 @@ export default function WatchScreen() {
           {/* Next Episode Section */}
           {nextEpisodeObj && (
             <View style={styles.nextEpSection}>
-              <Text style={styles.nextEpHeading}>Next Episode</Text>
-              <PressableScale onPress={handleNextEpisode} style={styles.nextEpCard}>
+              <View style={styles.nextEpHeader}>
+                <View style={styles.nextEpTagPill}>
+                  <Text style={styles.nextEpTagText}>UP NEXT</Text>
+                </View>
+                <Text style={styles.nextEpSeasonSub}>
+                  {epData?.seasons?.find((s) => s.season_number === currentSeason)?.name || `Season ${currentSeason}`}
+                </Text>
+              </View>
+
+              <PressableScale onPress={handleNextEpisode} style={styles.nextEpCard} scaleTo={0.98} haptic>
                 <View style={styles.nextEpThumbWrap}>
                   <Image
                     source={{
@@ -2211,150 +2213,45 @@ export default function WatchScreen() {
                     transition={200}
                     cachePolicy="memory-disk"
                   />
-                  <LinearGradient colors={['transparent', 'rgba(0,0,0,0.6)']} style={StyleSheet.absoluteFill} />
+                  <LinearGradient colors={['transparent', 'rgba(0,0,0,0.65)']} style={StyleSheet.absoluteFill} />
                   <View style={styles.nextEpPlayIcon}>
-                    <Icon name="play" size={14} color="#fff" />
+                    <Icon name="play" size={13} color="#fff" />
                   </View>
                   <View style={styles.nextEpDurationBadge}>
-                    <Text style={styles.nextEpDurationText}>{nextEpisodeObj.runtime || 23}m</Text>
+                    <Text style={styles.nextEpDurationText}>{nextEpisodeObj.runtime || 24}m</Text>
                   </View>
                 </View>
 
                 <View style={styles.nextEpInfo}>
+                  <Text style={styles.nextEpNumLabel}>EPISODE {nextEpisodeObj.episode_number}</Text>
                   <Text style={styles.nextEpTitle} numberOfLines={2}>
-                    {nextEpisodeObj.episode_number}. {nextEpisodeObj.name || `Episode ${nextEpisodeObj.episode_number}`}
+                    {nextEpisodeObj.name || `Episode ${nextEpisodeObj.episode_number}`}
                   </Text>
+                  <View style={styles.nextEpMetaRow}>
+                    <EpisodeBadges hasSub={nextEpisodeObj.hasSub !== false} hasDub={nextEpisodeObj.hasDub !== false} />
+                  </View>
                 </View>
 
-                <View style={styles.nextEpDownloadWrap}>
-                  <Icon name="download" size={18} color="#fff" />
+                <View style={styles.nextEpActionBtn}>
+                  <Icon name="skip" size={18} color="#fff" />
                 </View>
               </PressableScale>
             </View>
           )}
 
-          {/* All Episodes Link */}
-          <PressableScale onPress={() => setAllEpisodesOpen(true)} style={styles.allEpisodesLink}>
-            <Text style={styles.allEpisodesText}>All Episodes</Text>
+          {/* All Episodes Redirect Link */}
+          <PressableScale
+            onPress={() => router.push(('/anime/' + (anime?.id || id)) as any)}
+            style={styles.allEpisodesButton}
+            scaleTo={0.98}
+            haptic
+          >
+            <Icon name="list" size={18} color={colors.accent} />
+            <Text style={styles.allEpisodesButtonText}>View All Episodes</Text>
+            <Icon name="right" size={14} color="rgba(255,255,255,0.4)" />
           </PressableScale>
         </ScrollView>
       )}
-
-      {/* All Episodes Bottom Sheet */}
-      <BottomSheet visible={allEpisodesOpen} onClose={() => setAllEpisodesOpen(false)} title="All Episodes">
-        <ScrollView style={{ maxHeight: height * 0.65 }} showsVerticalScrollIndicator={false}>
-          {epData?.seasons && epData.seasons.length > 1 && (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.seasonsScroll}>
-              {epData.seasons.map((s) => (
-                <PressableScale
-                  key={s.season_number}
-                  onPress={() => {
-                    const nextEpisodeKey = `${s.season_number}:1`;
-                    currentEpisodeKeyRef.current = nextEpisodeKey;
-                    audioSwitchRequestRef.current += 1;
-                    setIsSwitchingAudio(false);
-                    setResumeAfterSourceChange(null);
-                    nativePlayerTimeRef.current = 0;
-                    currentTimeRef.current = 0;
-                    isPlayingRef.current = false;
-                    setHlsError(null);
-                    setResolvingHls(true);
-                    setIsBuffering(true);
-                    setCurrentSeason(s.season_number);
-                    setCurrentEp(1);
-                    setCurrentTime(0);
-                    setBufferedTime(0);
-                    setIsPlaying(false);
-                  }}
-                  style={[styles.seasonTab, currentSeason === s.season_number && styles.seasonTabActive]}
-                >
-                  <Text style={[styles.seasonTabText, currentSeason === s.season_number && styles.seasonTabTextActive]}>
-                    {s.name || `Season ${s.season_number}`}
-                  </Text>
-                </PressableScale>
-              ))}
-            </ScrollView>
-          )}
-
-          <View style={{ gap: 10, paddingVertical: 10 }}>
-            {episodes.map((ep) => {
-              const active = ep.episode_number === currentEp;
-              const thumb = ep.still_path || anime?.backdrop || anime?.banner || anime?.image || undefined;
-              return (
-                <PressableScale
-                  key={ep.episode_number}
-                  onPress={() => {
-                    if (active) {
-                      // Already on this episode: replay cleanly from start
-                      seekNativePlayer(0);
-                      setCurrentTime(0);
-                      isPlayingRef.current = true;
-                      setIsPlaying(true);
-                      setAllEpisodesOpen(false);
-                      return;
-                    }
-                    const nextEpisodeKey = `${currentSeason}:${ep.episode_number}`;
-                    currentEpisodeKeyRef.current = nextEpisodeKey;
-                    audioSwitchRequestRef.current += 1;
-                    setIsSwitchingAudio(false);
-                    setResumeAfterSourceChange(null);
-                    nativePlayerTimeRef.current = 0;
-                    currentTimeRef.current = 0;
-                    isPlayingRef.current = true;
-                    setHlsError(null);
-                    setResolvingHls(true);
-                    setIsBuffering(true);
-                    setCurrentEp(ep.episode_number);
-                    setAllEpisodesOpen(false);
-                    setCurrentTime(0);
-                    setBufferedTime(0);
-                    setIsPlaying(true);
-                    resetHideTimer();
-                  }}
-                  style={[styles.sheetEpCard, active && styles.sheetEpCardActive]}
-                >
-                  <View style={styles.sheetEpThumbWrap}>
-                    {thumb ? (
-                      <Image
-                        source={{ uri: thumb }}
-                        style={StyleSheet.absoluteFill}
-                        contentFit="cover"
-                        transition={200}
-                        cachePolicy="memory-disk"
-                      />
-                    ) : (
-                      <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.surface2 }]} />
-                    )}
-                    <LinearGradient colors={['transparent', 'rgba(0,0,0,0.7)']} style={StyleSheet.absoluteFill} />
-                    {active && (
-                      <View style={styles.sheetEpActiveIcon}>
-                        <Icon name="play" size={14} color={colors.accent} />
-                      </View>
-                    )}
-                    {ep.runtime ? (
-                      <View style={styles.sheetEpDuration}>
-                        <Text style={styles.sheetEpDurationText}>{ep.runtime}m</Text>
-                      </View>
-                    ) : null}
-                  </View>
-
-                  <View style={styles.sheetEpMeta}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <Text style={[styles.sheetEpNum, active && { color: colors.accent }]}>
-                        EPISODE {ep.episode_number}
-                      </Text>
-                      <EpisodeBadges hasSub={ep.hasSub} hasDub={ep.hasDub} />
-                    </View>
-                    <Text style={[styles.sheetEpTitle, active && { color: colors.accent }]} numberOfLines={1}>
-                      {ep.name || `Episode ${ep.episode_number}`}
-                    </Text>
-                  </View>
-                </PressableScale>
-              );
-            })}
-          </View>
-        </ScrollView>
-      </BottomSheet>
     </View>
   );
 }
@@ -2867,157 +2764,124 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   nextEpSection: {
-    marginBottom: 24,
+    marginBottom: 20,
   },
-  nextEpHeading: {
-    color: '#fff',
+  nextEpHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  nextEpTagPill: {
+    backgroundColor: 'rgba(255,100,10,0.14)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255,100,10,0.3)',
+  },
+  nextEpTagText: {
+    color: colors.accent,
     fontFamily: fonts.black,
-    fontSize: 15,
+    fontSize: 10.5,
+    letterSpacing: 0.8,
+  },
+  nextEpSeasonSub: {
+    color: colors.muted,
+    fontFamily: fonts.bold,
+    fontSize: 12,
   },
   nextEpCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#0f1014',
+    backgroundColor: '#111318',
     borderRadius: radius.md,
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
-    paddingRight: 14,
+    padding: 10,
+    gap: 12,
   },
   nextEpThumbWrap: {
-    width: 140,
-    height: 82,
+    width: 124,
+    height: 72,
+    borderRadius: 8,
+    overflow: 'hidden',
     backgroundColor: colors.surface2,
     position: 'relative',
     justifyContent: 'center',
     alignItems: 'center',
   },
   nextEpPlayIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   nextEpDurationBadge: {
     position: 'absolute',
-    bottom: 5,
-    right: 5,
-    backgroundColor: 'rgba(0,0,0,0.75)',
-    paddingHorizontal: 4,
-    paddingVertical: 1,
+    bottom: 4,
+    right: 4,
+    backgroundColor: 'rgba(0,0,0,0.78)',
+    paddingHorizontal: 5,
+    paddingVertical: 1.5,
     borderRadius: 3,
   },
   nextEpDurationText: {
     color: '#fff',
     fontFamily: fonts.regular,
-    fontSize: 10,
+    fontSize: 9.5,
   },
   nextEpInfo: {
     flex: 1,
-    paddingHorizontal: 12,
+    justifyContent: 'center',
+    gap: 2,
+  },
+  nextEpNumLabel: {
+    color: colors.accent,
+    fontFamily: fonts.black,
+    fontSize: 10.5,
+    letterSpacing: 0.5,
   },
   nextEpTitle: {
     color: '#fff',
     fontFamily: fonts.bold,
-    fontSize: 14,
+    fontSize: 13.5,
     lineHeight: 18,
   },
-  nextEpDownloadWrap: {
-    padding: 6,
-  },
-  allEpisodesLink: {
-    alignItems: 'center',
-    paddingVertical: 14,
-    marginBottom: 10,
-  },
-  allEpisodesText: {
-    color: colors.accent,
-    fontFamily: fonts.black,
-    fontSize: 15,
-  },
-
-  // Seasons & Episodes Bottom Sheet
-  seasonsScroll: {
-    gap: 8,
-    paddingVertical: 6,
-  },
-  seasonTab: {
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: radius.pill,
-    backgroundColor: colors.surface2,
-  },
-  seasonTabActive: {
-    backgroundColor: colors.accent,
-  },
-  seasonTabText: {
-    color: colors.muted,
-    fontFamily: fonts.bold,
-    fontSize: 13,
-  },
-  seasonTabTextActive: {
-    color: '#000',
-  },
-  sheetEpCard: {
+  nextEpMetaRow: {
     flexDirection: 'row',
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
-    overflow: 'hidden',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  nextEpActionBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  allEpisodesButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    backgroundColor: 'rgba(255,255,255,0.04)',
     borderWidth: 1,
-    borderColor: colors.surface2,
-    height: 78,
+    borderColor: 'rgba(255,255,255,0.08)',
+    borderRadius: radius.md,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    marginBottom: 16,
   },
-  sheetEpCardActive: {
-    borderColor: colors.accent,
-    backgroundColor: 'rgba(255,100,10,0.08)',
-  },
-  sheetEpThumbWrap: {
-    width: 120,
-    height: '100%',
-    backgroundColor: colors.surface2,
-    position: 'relative',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  sheetEpActiveIcon: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sheetEpDuration: {
-    position: 'absolute',
-    bottom: 4,
-    right: 4,
-    backgroundColor: 'rgba(0,0,0,0.75)',
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    borderRadius: 3,
-  },
-  sheetEpDurationText: {
-    color: '#fff',
-    fontFamily: fonts.regular,
-    fontSize: 9.5,
-  },
-  sheetEpMeta: {
-    flex: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    justifyContent: 'center',
-  },
-  sheetEpNum: {
-    color: colors.muted,
-    fontFamily: fonts.black,
-    fontSize: 10.5,
-  },
-  sheetEpTitle: {
+  allEpisodesButtonText: {
     color: '#fff',
     fontFamily: fonts.bold,
-    fontSize: 12.5,
-    marginTop: 2,
+    fontSize: 14,
   },
 });

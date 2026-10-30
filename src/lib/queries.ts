@@ -2,6 +2,7 @@
 // often is re-checked sooner, data that never changes is kept for days.
 import { useQueries, useQuery } from '@tanstack/react-query';
 import { api } from './api';
+import { fetchEpisodeGuide, fetchSeasons } from './episodeGuide';
 import type { AnimeDetail } from './types';
 import { fetchDetail, fetchExtras, fetchGenres, fetchHome, fetchSchedule } from '@/services/anilistClient';
 
@@ -73,5 +74,26 @@ export function useEpisodes(id: string, season: number, airing: boolean) {
     placeholderData: () => api.getCachedEpisodes(id, season) ?? undefined,
     staleTime: airing ? HOUR : DAY,
     enabled: !!id,
+  });
+}
+
+// Anime page episode guide (AniList): the show's seasons, and one season's episodes.
+export function useSeasons(anilistId: number | null) {
+  return useQuery({
+    // v3: smart season labels, filters unreleased seasons with 0 eps
+    queryKey: ['seasons', anilistId, 'v3'],
+    queryFn: () => fetchSeasons(anilistId!),
+    staleTime: 7 * DAY,
+    enabled: !!anilistId,
+  });
+}
+
+export function useEpisodeGuide(anilistId: number | null, airing: boolean) {
+  return useQuery({
+    // v2: avoids duplicate cross-season S1 episode titles
+    queryKey: ['guide', anilistId, 'v2'],
+    queryFn: () => fetchEpisodeGuide(anilistId!),
+    staleTime: airing ? HOUR : 7 * DAY,
+    enabled: !!anilistId,
   });
 }

@@ -521,7 +521,10 @@ export function buildAnilistSeasons(m: any): SeasonItem[] {
       (e: any) =>
         e.relationType === 'SEQUEL' &&
         e.node?.type === 'ANIME' &&
-        (e.node?.format === 'TV' || e.node?.format === 'TV_SHORT'),
+        (e.node?.format === 'TV' || e.node?.format === 'TV_SHORT') &&
+        e.node?.status !== 'NOT_YET_RELEASED' &&
+        e.node?.status !== 'CANCELLED' &&
+        (e.node?.episodes === null || e.node?.episodes > 0),
     )
     .map((e: any) => {
       const seqTitle =
