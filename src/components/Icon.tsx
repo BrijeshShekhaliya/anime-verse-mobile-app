@@ -293,18 +293,3 @@ export function Icon({ name, size = 22, color = '#fff', strokeWidth = 2 }: Props
 }
 
 // The AnimeVerse logo mark: crescent and sparkle on the orange-pink gradient.
-export function LogoMark({ size = 30 }: { size?: number }) {
-  return (
-    <Svg width={size} height={size} viewBox="0 0 32 32">
-      <Defs>
-        <LinearGradient id="av" x1="0" y1="0" x2="1" y2="1">
-          <Stop offset="0" stopColor="#ff8a3d" />
-          <Stop offset="1" stopColor="#ff3d6e" />
-        </LinearGradient>
-      </Defs>
-      <Rect width="32" height="32" rx="9" fill="url(#av)" />
-      <Path d="M17.6 7.2a9.2 9.2 0 1 0 7.6 14.4 10.4 10.4 0 0 1-7.6-14.4z" fill="#fff" />
-      <Path d="M22.6 5.5l1 2.6 2.6 1-2.6 1-1 2.6-1-2.6-2.6-1 2.6-1z" fill="#fff" />
-    </Svg>
-  );
-}

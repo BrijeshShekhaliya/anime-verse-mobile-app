@@ -1,4 +1,5 @@
 import { Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_800ExtraBold, Inter_900Black } from '@expo-google-fonts/inter';
+import { Orbitron_900Black } from '@expo-google-fonts/orbitron';
 import { useFonts } from 'expo-font';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
@@ -11,12 +12,13 @@ import { QueryProvider } from '@/lib/query';
 import { colors } from '@/lib/theme';
 import { getOrVerifyActiveDomain } from '@/services/animerulzClient';
 import { SettingsProvider } from '@/lib/settings';
+import { loadOnboarded } from '@/lib/onboarding';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
 SystemUI.setBackgroundColorAsync(colors.bg).catch(() => {});
 
 export default function RootLayout() {
-  const [fontsLoaded, fontError] = useFonts({ Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_800ExtraBold, Inter_900Black });
+  const [fontsLoaded, fontError] = useFonts({ Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_800ExtraBold, Inter_900Black, Orbitron_900Black });
 
   // The splash stays up until fonts are ready and the saved data has been read,
   // so a normal launch goes straight to a filled screen (never longer than 2s).
@@ -26,14 +28,19 @@ export default function RootLayout() {
     const t = setTimeout(() => setRestored(true), 2000);
     return () => clearTimeout(t);
   }, []);
-  const ready = (fontsLoaded || !!fontError) && restored;
+  // Whether to show the welcome tour is known before the splash goes away.
+  const [tourKnown, setTourKnown] = useState(false);
+  useEffect(() => {
+    loadOnboarded().finally(() => setTourKnown(true));
+  }, []);
+  const ready = (fontsLoaded || !!fontError) && restored && tourKnown;
   useEffect(() => {
     if (ready) SplashScreen.hideAsync().catch(() => {});
   }, [ready]);
 
   return (
     <QueryProvider onRestored={() => setRestored(true)}>
-      {!fontsLoaded && !fontError ? null : (
+      {(!fontsLoaded && !fontError) || !tourKnown ? null : (
         <SafeAreaProvider>
           <LibraryProvider>
             <SettingsProvider>
@@ -50,6 +57,7 @@ export default function RootLayout() {
               <Stack.Screen name="watch/[id]" options={{ animation: 'fade' }} />
               <Stack.Screen name="search" options={{ animation: 'fade_from_bottom' }} />
               <Stack.Screen name="settings" />
+              <Stack.Screen name="welcome" options={{ animation: 'fade', gestureEnabled: false }} />
             </Stack>
             </SettingsProvider>
           </LibraryProvider>

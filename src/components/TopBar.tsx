@@ -1,10 +1,11 @@
 import { router } from 'expo-router';
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import Animated, { interpolate, useAnimatedStyle, type SharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Icon, LogoMark } from './Icon';
+import { Brand } from './Brand';
+import { Icon } from './Icon';
 import { PressableScale } from './PressableScale';
-import { colors, fonts } from '@/lib/theme';
+import { colors } from '@/lib/theme';
 import { requestSearchFocus } from '@/lib/searchFocus';
 
 // Logo + search button floating over the hero. Transparent at the top, fades to
@@ -19,12 +20,7 @@ export function TopBar({ scrollY, solidAfter = 80 }: { scrollY: SharedValue<numb
         <View style={[StyleSheet.absoluteFill, styles.solid]} />
       </Animated.View>
       <View style={styles.bar}>
-        <View style={styles.brand}>
-          <LogoMark size={28} />
-          <Text style={styles.word}>
-            Anime<Text style={{ color: colors.accent }}>Verse</Text>
-          </Text>
-        </View>
+        <Brand size={40} />
         <View style={styles.actions}>
           <PressableScale haptic onPress={() => router.push('/settings')} style={styles.search} accessibilityLabel="Settings">
             <Icon name="settings" size={20} color="#fff" />
@@ -55,8 +51,6 @@ const styles = StyleSheet.create({
   // Solid black once you scroll (same as every other bar).
   solid: { backgroundColor: colors.bg, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.1)' },
   bar: { height: SEARCH_BUTTON.barHeight, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: SEARCH_BUTTON.right },
-  brand: { flexDirection: 'row', alignItems: 'center', gap: 9 },
   actions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  word: { color: '#fff', fontFamily: fonts.black, fontSize: 19, letterSpacing: -0.3 },
   search: { width: SEARCH_BUTTON.size, height: SEARCH_BUTTON.size, borderRadius: SEARCH_BUTTON.size / 2, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.35)' },
 });

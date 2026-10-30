@@ -26,6 +26,7 @@ export const fonts = {
   bold: 'Inter_600SemiBold',
   black: 'Inter_800ExtraBold',
   display: 'Inter_900Black', // big titles and Top 10 numbers, tightly spaced
+  brand: 'Orbitron_900Black', // ONLY for the "ANIME VERSE" name beside the logo (Brand.tsx)
 };
 
 export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 };

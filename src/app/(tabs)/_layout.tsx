@@ -1,5 +1,7 @@
 import * as Haptics from 'expo-haptics';
 import { Tabs, type BottomTabBarProps } from 'expo-router/js-tabs';
+import { Redirect } from 'expo-router';
+import { onboarded } from '@/lib/onboarding';
 import { useEffect } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
@@ -78,6 +80,8 @@ function TabBar({ state, emitter, navigateToTab }: BottomTabBarProps) {
 }
 
 export default function TabsLayout() {
+  // First launch: the welcome tour comes before the app.
+  if (onboarded() === false) return <Redirect href="/welcome" />;
   return (
     // freezeOnBlur: tabs you leave stop re-rendering, so switching stays smooth.
     <Tabs screenOptions={{ headerShown: false, sceneStyle: { backgroundColor: colors.bg }, freezeOnBlur: true }} tabBar={(props) => <TabBar {...props} />}>

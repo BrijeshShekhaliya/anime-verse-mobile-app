@@ -31,7 +31,7 @@ export const queryClient = new QueryClient({
 });
 
 // Only data that is worth having instantly on the next launch is saved.
-const SAVED = new Set(['home', 'detail', 'extras', 'genres', 'schedule', 'episodes']);
+const SAVED = new Set(['home', 'detail', 'extras', 'genres', 'schedule', 'episodes', 'seasons', 'guide']);
 
 const persister = createAsyncStoragePersister({
   storage: AsyncStorage,
