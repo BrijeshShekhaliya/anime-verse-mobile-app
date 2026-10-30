@@ -75,7 +75,7 @@ const AndroidMedia3Player = forwardRef<NativeVideoPlayerHandle, Props>(function 
   const [hasEmbeddedSubtitleTracks, setHasEmbeddedSubtitleTracks] = useState(false);
   const [cues, setCues] = useState<Cue[]>([]);
 
-  useImperativeHandle(forwardedRef, () => ({ seek: (time: number) => nativeRef.current?.seek(time), pause: () => {}, play: () => {} }), []);
+  useImperativeHandle(forwardedRef, () => ({ seek: (time: number) => nativeRef.current?.seek(time) }), []);
 
   React.useEffect(() => {
     if (!subtitlesEnabled || hasEmbeddedSubtitleTracks || subtitles.length === 0) {

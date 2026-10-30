@@ -189,8 +189,6 @@ export default function WatchScreen() {
   const progressBarWidthRef = useRef<number>(width);
 
   const mountedStreamEpisodeKeyRef = useRef<string | null>(null);
-  const inFlightEpisodeKeyRef = useRef<string | null>(null);
-  const lastServerRef = useRef<ServerType>(server);
   const audioSwitchRequestRef = useRef(0);
 
   // Live state refs to capture values synchronously during stream switches
@@ -323,9 +321,6 @@ export default function WatchScreen() {
         exitFullscreen();
         return true;
       }
-      try {
-        nativeVideoRef.current?.pause?.();
-      } catch {}
       return false; // In portrait, let default router back handle it
     };
 
@@ -338,16 +333,13 @@ export default function WatchScreen() {
     RNStatusBar.setHidden(isFullscreenView, 'none');
   }, [isFullscreenView]);
 
-  // Restore screen orientation and stop player on unmount
+  // Restore screen orientation on unmount
   useEffect(() => {
     return () => {
       RNStatusBar.setHidden(false, 'none');
       ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP)
         .catch(() => {})
         .then(() => ScreenOrientation.unlockAsync().catch(() => {}));
-      try {
-        nativeVideoRef.current?.pause?.();
-      } catch {}
     };
   }, []);
 
@@ -515,12 +507,6 @@ export default function WatchScreen() {
   // Resolve stream URL for current episode/season
   useEffect(() => {
     if (!playerPreferencesLoaded || server !== 'hianime' || (!anime?.title && !initialAnime?.title && !initialAnilistId)) return;
-
-    if (lastServerRef.current !== server) {
-      lastServerRef.current = server;
-      mountedStreamEpisodeKeyRef.current = null;
-    }
-
     // If the saved preference is Dub and anime-level metadata does not say
     // whether Dub exists, wait for episode metadata instead of resolving Sub
     // first and immediately issuing a second resolver request for Dub.
@@ -533,20 +519,8 @@ export default function WatchScreen() {
       !epData;
     if (dubAvailabilityUnknown) return;
 
-    const episodeKey = `${currentSeason}:${currentEp}`;
-    // If the stream for this exact season & episode is already actively mounted and has a valid URL,
-    // do not destroy playback or restart the stream just because background epData or metadata re-rendered!
-    if (mountedStreamEpisodeKeyRef.current === episodeKey && mountedStream?.streamUrl) {
-      return;
-    }
-    // If resolution for this episode is already actively in-flight, avoid duplicate concurrent network calls.
-    if (inFlightEpisodeKeyRef.current === episodeKey) {
-      return;
-    }
-
     let cancelled = false;
-    currentEpisodeKeyRef.current = episodeKey;
-    inFlightEpisodeKeyRef.current = episodeKey;
+    currentEpisodeKeyRef.current = `${currentSeason}:${currentEp}`;
 
     // Target mode: prefer user preference (Hindi or English Dub), otherwise default to sub
     const targetMode = prefersHindi || (currentLangRef.current === 'dub' && currentEpHasDub) ? 'dub' : 'sub';
@@ -609,10 +583,7 @@ export default function WatchScreen() {
         setHlsError('Stream currently unavailable. Tap to retry or switch server.');
       })
       .finally(() => {
-        if (inFlightEpisodeKeyRef.current === episodeKey) {
-          inFlightEpisodeKeyRef.current = null;
-        }
-        if (!cancelled && currentEpisodeKeyRef.current === episodeKey) {
+        if (!cancelled && currentEpisodeKeyRef.current === `${currentSeason}:${currentEp}`) {
           setResolvingHls(false);
         }
       });
@@ -1283,7 +1254,6 @@ export default function WatchScreen() {
         mode: currentLangRef.current,
       });
       streamCacheRef.current.clear();
-      mountedStreamEpisodeKeyRef.current = null;
       setIsBuffering(true);
       setResolvingHls(true);
       setHlsError(null);
@@ -1576,13 +1546,7 @@ export default function WatchScreen() {
               ) : (
                 // Portrait Top-Left: Back Arrow
                 <PressableScale
-                  onPress={() => {
-                    try {
-                      nativeVideoRef.current?.pause?.();
-                    } catch {}
-                    if (router.canGoBack()) router.back();
-                    else router.replace('/');
-                  }}
+                  onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
                   style={styles.iconCircleBtn}
                   accessibilityLabel="Back"
                 >
