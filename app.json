@@ -45,7 +45,8 @@
       "typedRoutes": true
     },
     "extra": {
-      "apiUrl": "https://13.236.161.33.sslip.io"
+      "apiUrl": "",
+      "tmdbApiKey": "06bc3cabd1f2780a22c8e2e25d6f0f15"
     }
   }
 }

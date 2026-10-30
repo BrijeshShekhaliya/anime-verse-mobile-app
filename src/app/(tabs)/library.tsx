@@ -13,6 +13,8 @@ import { useLibrary } from '@/lib/library';
 import { timeAgo } from '@/lib/format';
 import { colors, fonts, radius, springs } from '@/lib/theme';
 import type { Anime } from '@/lib/types';
+import { posterOf, useArt } from '@/lib/artwork';
+import { displayTitle, useSettings } from '@/lib/settings';
 
 const TABS = ['Continue', 'My List', 'History'] as const;
 type Tab = (typeof TABS)[number];
@@ -21,6 +23,7 @@ export default function LibraryScreen() {
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const lib = useLibrary();
+  const { titleLang } = useSettings();
   const [tab, setTab] = useState<Tab>(lib.continueWatching.length ? 'Continue' : 'My List');
 
   const segW = (width - 32) / TABS.length;
@@ -111,10 +114,10 @@ export default function LibraryScreen() {
           renderItem={({ item, index }) => (
             <Animated.View entering={FadeInDown.delay(Math.min(index, 10) * 30)} exiting={FadeOut} layout={LinearTransition.springify()}>
               <PressableScale onPress={() => router.push(`/anime/${item.anime.id}`)} style={styles.historyRow}>
-                {item.anime.image ? <Image source={{ uri: item.anime.image }} style={styles.thumb} contentFit="cover" transition={200} /> : <View style={styles.thumb} />}
+                <HistThumb anime={item.anime as Anime} />
                 <View style={{ flex: 1 }}>
                   <Text style={styles.histTitle} numberOfLines={2}>
-                    {item.anime.title}
+                    {displayTitle(item.anime, titleLang)}
                   </Text>
                   <Text style={styles.histMeta}>
                     {[item.anime.type, item.anime.year].filter(Boolean).join(' · ')}
@@ -132,6 +135,13 @@ export default function LibraryScreen() {
       )}
     </View>
   );
+}
+
+// History poster: TMDB art when known, else the saved AniList cover.
+function HistThumb({ anime }: { anime: Anime }) {
+  const { art, settled } = useArt(anime);
+  const uri = settled ? posterOf(anime, art, false) : undefined;
+  return uri ? <Image source={{ uri }} style={styles.thumb} contentFit="cover" transition={200} cachePolicy="memory-disk" /> : <View style={styles.thumb} />;
 }
 
 const styles = StyleSheet.create({

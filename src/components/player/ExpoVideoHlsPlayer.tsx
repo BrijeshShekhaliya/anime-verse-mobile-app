@@ -7,6 +7,7 @@ export type NativePlayerTrack = {
   name: string;
   lang: string;
   type: 'audio' | 'text';
+  selected?: boolean;
 };
 
 export type NativeSubtitle = {
@@ -28,6 +29,7 @@ type Props = {
   fitMode: 'contain' | 'cover' | 'fill';
   selectedQualityHeight: number;
   selectedAudioTrackId?: number | null;
+  preferredAudioLanguage?: string | null;
   selectedTextTrackId?: number | null;
   subtitles: NativeSubtitle[];
   subtitlesEnabled: boolean;
@@ -41,11 +43,37 @@ type Props = {
   onError: (message: string) => void;
 };
 
+// Utility for robust multilingual audio track matching across ISO-639-1 ('hi', 'en', 'ja'),
+// ISO-639-2 ('hin', 'eng', 'jpn'), and descriptive names ('Hindi', 'English', etc.)
+export function isAudioLanguageMatch(trackName: string, trackLang: string, targetLang: string): boolean {
+  const name = String(trackName || '').toLowerCase();
+  const lang = String(trackLang || '').toLowerCase();
+  const target = String(targetLang || '').toLowerCase();
+  if (!target) return false;
+
+  if (target.includes('hindi') || target === 'hin' || target === 'hi') {
+    return name.includes('hindi') || lang === 'hin' || lang === 'hi' || lang.startsWith('hi');
+  }
+  if (target.includes('english') || target === 'eng' || target === 'en') {
+    return name.includes('english') || name.includes('dub') || lang === 'eng' || lang === 'en' || lang.startsWith('en');
+  }
+  if (target.includes('japanese') || target === 'jpn' || target === 'ja') {
+    return name.includes('japanese') || name.includes('sub') || lang === 'jpn' || lang === 'ja' || lang.startsWith('ja');
+  }
+  if (target.includes('tamil') || target === 'tam' || target === 'ta') {
+    return name.includes('tamil') || lang === 'tam' || lang === 'ta' || lang.startsWith('ta');
+  }
+  if (target.includes('telugu') || target === 'tel' || target === 'te') {
+    return name.includes('telugu') || lang === 'tel' || lang === 'te' || lang.startsWith('te');
+  }
+  return name.includes(target) || lang === target;
+}
+
 const BUFFER_OPTIONS = {
   // Start after a short startup buffer, then keep a larger forward window so
   // brief mobile-network dips do not immediately stall playback. The byte
   // budget must be large enough for a minute of high-bitrate 1080p HLS.
-  minBufferForPlayback: 3.5,
+  minBufferForPlayback: 1.5,
   preferredForwardBufferDuration: 60,
   maxBufferBytes: 128 * 1024 * 1024,
   prioritizeTimeOverSizeThreshold: true,
@@ -84,6 +112,7 @@ function toAudioTracks(player: ReturnType<typeof useVideoPlayer>): NativePlayerT
     name: track.name || track.label || track.language || `Audio ${index + 1}`,
     lang: track.language || '',
     type: 'audio' as const,
+    selected: player.audioTrack === track || (!!player.audioTrack?.language && track.language === player.audioTrack?.language),
   }));
 }
 
@@ -121,6 +150,7 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
   fitMode,
   selectedQualityHeight,
   selectedAudioTrackId = null,
+  preferredAudioLanguage = null,
   selectedTextTrackId = null,
   subtitles,
   subtitlesEnabled,
@@ -153,7 +183,7 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
     uri,
     contentType: 'hls',
     ...(referer ? { headers: { Referer: referer, referer } } : {}),
-    useCaching: false,
+    useCaching: true,
   } : null;
 
   // Keep one VideoPlayer instance alive across source, orientation and control changes.
@@ -185,11 +215,31 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
     player.playbackRate = playbackRate;
   }, [player, playbackRate]);
 
+    const syncAudioTrack = useCallback(() => {
+    const available = player.availableAudioTracks;
+    if (!available || available.length === 0) return;
+
+    if (selectedAudioTrackId !== null && selectedAudioTrackId >= 0 && available[selectedAudioTrackId]) {
+      const target = available[selectedAudioTrackId];
+      if (player.audioTrack !== target) {
+        player.audioTrack = target;
+      }
+      return;
+    }
+
+    if (preferredAudioLanguage) {
+      const match = available.find((t) =>
+        isAudioLanguageMatch(t.name || t.label || '', t.language || '', preferredAudioLanguage),
+      );
+      if (match && player.audioTrack !== match) {
+        player.audioTrack = match;
+      }
+    }
+  }, [player, selectedAudioTrackId, preferredAudioLanguage]);
+
   useEffect(() => {
-    if (selectedAudioTrackId === null || selectedAudioTrackId < 0) return;
-    const track = player.availableAudioTracks[selectedAudioTrackId];
-    if (track) player.audioTrack = track;
-  }, [player, selectedAudioTrackId]);
+    syncAudioTrack();
+  }, [syncAudioTrack]);
 
   useEffect(() => {
     if (!subtitlesEnabled) {
@@ -270,6 +320,7 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
   useEffect(() => {
     const subscriptions = [
       player.addListener('sourceLoad', () => {
+        syncAudioTrack();
         // Source metadata and track lists can arrive before the first frame is
         // actually ready. Publish tracks now, but restore the playhead only when
         // ExoPlayer reports readyToPlay.
@@ -296,12 +347,15 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
           onError(error?.message || 'HLS playback failed');
         }
       }),
-      player.addListener('availableAudioTracksChange', publishTracks),
+      player.addListener('availableAudioTracksChange', () => {
+        syncAudioTrack();
+        publishTracks();
+      }),
       player.addListener('availableSubtitleTracksChange', publishTracks),
       player.addListener('playToEnd', onEnd),
     ];
     return () => subscriptions.forEach((subscription) => subscription.remove());
-  }, [player, uri, onLoad, onProgress, onBuffer, onError, onEnd, publishTracks]);
+  }, [player, uri, onLoad, onProgress, onBuffer, onError, onEnd, publishTracks, syncAudioTrack]);
 
   const activeSubtitle = externalSubtitleCues.find((cue) => playbackTime >= cue.start && playbackTime <= cue.end);
 

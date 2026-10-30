@@ -8,6 +8,9 @@ import { PressableScale } from './PressableScale';
 import { factsOf } from '@/lib/format';
 import { colors, fonts, radius } from '@/lib/theme';
 import type { Anime } from '@/lib/types';
+import { api } from '@/lib/api';
+import { posterOf, useArt, wantArt } from '@/lib/artwork';
+import { useTitle } from '@/lib/settings';
 
 const HI_DPI = PixelRatio.get() >= 2;
 
@@ -27,18 +30,20 @@ export const PosterCard = memo(function PosterCard({
   rank?: number;
   showFacts?: boolean;
 }) {
-  const uri = (HI_DPI && anime.image2x) || anime.image || undefined;
+  const { art, settled } = useArt(anime);
+  const title = useTitle(anime);
+  const uri = settled ? posterOf(anime, art, HI_DPI) : undefined;
   return (
     // Only the first screenful animates in; later cards (scrolling, next pages)
     // just appear, which keeps long lists smooth on slower phones.
     <Animated.View entering={index < 9 ? FadeInDown.delay(index * 40).duration(340) : undefined} style={{ width }}>
-      <PressableScale onPress={() => router.push(`/anime/${anime.id}`)} accessibilityRole="button" accessibilityLabel={anime.title}>
+      <PressableScale onPressIn={() => wantArt([anime], true)} onPress={() => { api.seedDetail(anime); router.push(`/anime/${anime.id}`); }} accessibilityRole="button" accessibilityLabel={title}>
         <View style={[styles.poster, { width, height: width * 1.5 }]}>
           {uri ? (
             <Image source={{ uri }} style={StyleSheet.absoluteFill} contentFit="cover" transition={220} cachePolicy="memory-disk" recyclingKey={anime.id} />
-          ) : (
+          ) : !settled ? null : (
             <Text style={styles.noImg} numberOfLines={4}>
-              {anime.title}
+              {title}
             </Text>
           )}
           {anime.airing ? (
@@ -53,7 +58,7 @@ export const PosterCard = memo(function PosterCard({
           {rank != null && <Text style={styles.rank}>{rank}</Text>}
         </View>
         <Text style={styles.title} numberOfLines={2}>
-          {anime.title}
+          {title}
         </Text>
         <View style={styles.sub}>
           <LangBadges anime={anime} />
@@ -78,8 +83,9 @@ const styles = StyleSheet.create({
     left: 6,
     bottom: -6,
     fontFamily: fonts.display,
-    fontSize: 64,
-    lineHeight: 64,
+    fontSize: 58,
+    lineHeight: 62,
+    letterSpacing: -3,
     color: '#fff',
     textShadowColor: 'rgba(0,0,0,0.85)',
     textShadowRadius: 12,

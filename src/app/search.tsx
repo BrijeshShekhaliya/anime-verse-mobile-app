@@ -51,6 +51,7 @@ export default function SearchScreen() {
 
   const open = (a: Anime) => {
     if (q.trim()) lib.addSearch(q);
+    api.seedDetail(a);
     Keyboard.dismiss();
     router.push(`/anime/${a.id}`);
   };

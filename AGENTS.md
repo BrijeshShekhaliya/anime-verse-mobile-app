@@ -39,3 +39,32 @@ Docs: https://docs.expo.dev/eas/index.md
 - If `ios/` and `android/` directories do not exist, they are generated (Continuous Native Generation). Never create or edit them by hand — configure native behavior in `app.json` and config plugins.
 - Expo Go only includes its bundled native modules. After adding a library with native code, the app needs a development build: `npx expo run:ios|android` locally, or `eas build --profile development`.
 - Prefer recommended Expo modules over third-party libraries, and check your available skills before adding dependencies. Docs: https://docs.expo.dev/versions/latest/index.md
+
+## CRITICAL ARCHITECTURAL CONTRACT: LOCKED STREAMING & VIDEO PLAYER PIPELINE (DO NOT MODIFY)
+
+The current streaming and video playback architecture is verified, stable, and locked. DO NOT modify, refactor, or delete the streaming resolvers or native video player buffering pipeline without explicit, justified user direction.
+
+### Core Streaming Invariants:
+1. **Zero-Backend Direct Client**: All streaming executes directly on-device in pure TypeScript/Hermes (`src/services/animerulzClient.ts`, `src/services/hianimeClient.ts`, `src/lib/api.ts`). No intermediary AWS proxy server.
+2. **Dual-Resolver Hierarchy**:
+   - **Primary**: AnimeRulz Multi-Audio Indian Server (Ravok Multi-1) yielding in-band multi-audio HLS (`master.m3u8`) with Japanese, English, Hindi, Tamil, and Telugu tracks.
+   - **Fallback**: HiAnime direct client (`resolveHiAnimeDirect`). Never remove either resolver.
+   - **Branding**: Clean branded titles only (`AnimeVerse (Multi-Audio)` and `AnimeVerse (Fast Stream)`). Never expose raw provider names in UI, badges, or user-facing logs.
+3. **ExoPlayer / Media3 Buffer LoadControl**:
+   - `minBufferMs: 120_000` (Preloads 2 minutes forward)
+   - `maxBufferMs: 300_000` (Preloads up to 5 minutes maximum)
+   - `bufferForPlaybackMs: 1_500` (1.5 seconds startup buffer for instant start without starvation)
+   - `bufferForPlaybackAfterRebufferMs: 2_000`
+   - `backBufferMs: 120_000` (Retains 2 minutes back buffer for instant backward scrubbing)
+   - `targetBufferBytes: 128 MB`
+   - NEVER call `p.seekTo(p.currentPosition)` inside `publishTracks` or audio track listeners, as it destroys the forward buffer pipeline and causes buffering loops.
+4. **Scrubber / Progress Bar**:
+   - Uses absolute `e.nativeEvent.pageX` geometry measured against the scrubber touch area offset.
+   - All scrubber child views (`scrubberTrack`, `scrubberBuffered`, `scrubberProgress`, `scrubberThumb`) MUST have `pointerEvents="none"` to prevent coordinate jumping.
+   - Floating time preview bubble (`scrubBubble`) renders the active scrub timecode.
+5. **Instant 0ms Control Visibility**:
+   - Single tap on player when controls are visible hides them instantly (0ms).
+   - Single tap on player center when hidden reveals them instantly (0ms).
+   - Double tap (±10s seek) is strictly isolated to outer left (< 28%) and right (> 72%) edges.
+6. **Synchronous ID Resolution**:
+   - `targetAnilistId` is extracted synchronously from numeric IDs and cached metadata to prevent delays or anime title mismatches.

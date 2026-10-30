@@ -11,6 +11,7 @@ export type NextEpisode = { episode: number; airingAt: number } | null;
 export type Anime = {
   id: string;
   malId?: number | null;
+  anilistId?: number | null;
   title: string;
   titleRomaji?: string | null;
   titleJapanese?: string | null;
@@ -34,6 +35,7 @@ export type Anime = {
   genres?: string[];
   studios?: string[];
   duration?: string | null;
+  aired?: string | null;
   trailer?: string | null;
   nextEpisode?: NextEpisode;
   languages?: Languages;
@@ -96,6 +98,9 @@ export type SeasonInfo = {
   season_number: number;
   name: string;
   episode_count: number;
+  id?: number | string;
+  title?: string;
+  anilistId?: number;
 };
 
 export type EpisodesData = {
@@ -140,5 +145,7 @@ export type StreamData = {
   subtitles?: SubtitleTrack[];
   // Dynamic in-manifest audio renditions discovered by the resolver.
   audioTracks?: StreamAudioTrack[];
+  // Dynamic in-manifest video quality levels (e.g. 1080p, 720p, 480p, 360p).
+  videoLevels?: Array<{ index: number; width: number; height: number; bitrate: number }>;
 };
 

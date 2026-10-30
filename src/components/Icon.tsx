@@ -5,7 +5,7 @@ import Svg, { Circle, Defs, LinearGradient, Path, Rect, Stop, Text as SvgText } 
 export type IconName =
   | 'play' | 'info' | 'star' | 'left' | 'right' | 'down' | 'search' | 'home' | 'browse' | 'calendar'
   | 'bookmark' | 'bookmarkOn' | 'clock' | 'x' | 'check' | 'mic' | 'cc' | 'ext' | 'shield' | 'plus'
-  | 'minus' | 'trash' | 'spark' | 'history' | 'list'
+  | 'minus' | 'trash' | 'spark' | 'history' | 'list' | 'share'
   | 'settings' | 'fullscreen' | 'exitFullscreen' | 'pause' | 'skip' | 'cast' | 'thumbUp' | 'thumbDown' | 'download' | 'more'
   | 'rewind10' | 'forward10' | 'fastForward' | 'aspectRatio';
 
@@ -151,6 +151,19 @@ export function Icon({ name, size = 22, color = '#fff', strokeWidth = 2 }: Props
         <>
           <Path {...s} d="M13 3.5h7.5V11M20.5 3.5L11 13" />
           <Path {...s} d="M17.5 14v2.5a4 4 0 01-4 4h-6a4 4 0 01-4-4v-6a4 4 0 014-4H10" />
+        </>
+      );
+      break;
+    case 'share':
+      body = (
+        <>
+          <Circle {...tint} cx="18" cy="5.5" r="2.6" />
+          <Circle {...tint} cx="6" cy="12" r="2.6" />
+          <Circle {...tint} cx="18" cy="18.5" r="2.6" />
+          <Circle {...s} cx="18" cy="5.5" r="2.6" />
+          <Circle {...s} cx="6" cy="12" r="2.6" />
+          <Circle {...s} cx="18" cy="18.5" r="2.6" />
+          <Path {...s} d="M8.3 10.8l7.4-4.1M8.3 13.2l7.4 4.1" />
         </>
       );
       break;

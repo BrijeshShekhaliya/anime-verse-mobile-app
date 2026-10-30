@@ -18,11 +18,14 @@ export const colors = {
   green: '#5fd068',
 };
 
+// One family everywhere: Inter, a clean screen sans in the style of Netflix's
+// UI type. Reads well in both CAPITALS and lowercase.
 export const fonts = {
-  regular: 'Lato_400Regular',
-  bold: 'Lato_700Bold',
-  black: 'Lato_900Black',
-  display: 'BebasNeue_400Regular',
+  regular: 'Inter_400Regular',
+  medium: 'Inter_500Medium',
+  bold: 'Inter_600SemiBold',
+  black: 'Inter_800ExtraBold',
+  display: 'Inter_900Black', // big titles and Top 10 numbers, tightly spaced
 };
 
 export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 };

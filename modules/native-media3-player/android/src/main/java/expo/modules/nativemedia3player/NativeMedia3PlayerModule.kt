@@ -15,6 +15,7 @@ class NativeMedia3PlayerModule : Module() {
       Prop("fitMode") { view: NativeMedia3PlayerView, value: String -> view.setFitMode(value) }
       Prop("selectedQualityHeight") { view: NativeMedia3PlayerView, value: Int -> view.setSelectedQualityHeight(value) }
       Prop("selectedAudioTrackId") { view: NativeMedia3PlayerView, value: Int? -> view.setSelectedAudioTrackId(value) }
+      Prop("preferredAudioLanguage") { view: NativeMedia3PlayerView, value: String? -> view.setPreferredAudioLanguage(value) }
       Prop("selectedTextTrackId") { view: NativeMedia3PlayerView, value: Int? -> view.setSelectedTextTrackId(value) }
       Prop("subtitlesEnabled") { view: NativeMedia3PlayerView, value: Boolean -> view.setSubtitlesEnabled(value) }
       OnViewDidUpdateProps { view: NativeMedia3PlayerView -> view.loadIfNeeded() }

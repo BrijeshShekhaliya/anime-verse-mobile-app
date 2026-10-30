@@ -9,10 +9,13 @@ import { Icon } from '@/components/Icon';
 import { PressableScale } from '@/components/PressableScale';
 import { Skeleton } from '@/components/Skeleton';
 import { EmptyState, ErrorState } from '@/components/States';
-import { api } from '@/lib/api';
+import { useQueryClient } from '@tanstack/react-query';
+import { posterOf, useArt } from '@/lib/artwork';
 import { countdown } from '@/lib/format';
+import { useScheduleWeek } from '@/lib/queries';
 import { colors, fonts, radius } from '@/lib/theme';
 import type { Anime } from '@/lib/types';
+import { useTitle } from '@/lib/settings';
 
 const DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const EASE = Easing.out(Easing.cubic);
@@ -37,39 +40,14 @@ export default function ScheduleScreen() {
   );
   const [day, setDay] = useState(todayKey);
 
-  // The whole week is loaded once and kept here, so switching days just swaps
-  // which list is shown: no loading flash, no second fetch.
-  const [lists, setLists] = useState<Record<string, Anime[]>>({});
-  const [failed, setFailed] = useState<string | null>(null);
-  const dayRef = useRef(day);
-  dayRef.current = day;
-  const loadDay = useCallback((key: string) => {
-    return api
-      .schedule(key)
-      .then((items) => {
-        setLists((l) => (l[key] === items ? l : { ...l, [key]: items }));
-        return items;
-      })
-      .catch((e: Error) => {
-        if (key === dayRef.current) setFailed(e.message);
-        throw e;
-      });
-  }, []);
+  // The whole week loads at once and is saved on the phone: switching days only
+  // swaps which list is shown, and reopening the app shows it instantly. Each
+  // day refreshes in the background once it's an hour old.
+  const dayKeys = useMemo(() => week.map((w) => w.key), [week]);
+  const { lists, errors } = useScheduleWeek(dayKeys);
 
-  useEffect(() => {
-    // Today first, then the rest of the week in the background.
-    loadDay(todayKey)
-      .catch(() => {})
-      .finally(() => week.filter((w) => w.key !== todayKey).forEach((w) => loadDay(w.key).catch(() => {})));
-  }, [loadDay, todayKey, week]);
-
-  useEffect(() => {
-    if (!lists[day]) loadDay(day).catch(() => {});
-  }, [day, lists, loadDay]);
-
-  // Coming back to this tab quietly refreshes the week. The API client hands
-  // back its cached copy while it's still fresh, so this costs no requests
-  // until the data is actually old, and nothing re-renders if it didn't change.
+  // Coming back to this tab refreshes only the days that are out of date.
+  const qc = useQueryClient();
   const firstFocus = useRef(true);
   useFocusEffect(
     useCallback(() => {
@@ -77,8 +55,8 @@ export default function ScheduleScreen() {
         firstFocus.current = false;
         return;
       }
-      week.forEach((w) => loadDay(w.key).catch(() => {}));
-    }, [loadDay, week])
+      qc.refetchQueries({ queryKey: ['schedule'], stale: true, type: 'active' }).catch(() => {});
+    }, [qc])
   );
 
   const [now, setNow] = useState(Date.now() / 1000);
@@ -105,6 +83,7 @@ export default function ScheduleScreen() {
   const shownDay = useDeferredValue(day);
 
   const items = lists[shownDay];
+  const failed = !items && errors[shownDay] ? errors[shownDay]!.message || 'Something went wrong' : null;
   const sorted = useMemo(
     () => (items ? [...items].sort((a, b) => (a.nextEpisode?.airingAt || 9e9) - (b.nextEpisode?.airingAt || 9e9)) : null),
     [items]
@@ -155,7 +134,7 @@ export default function ScheduleScreen() {
 
       {!sorted ? (
         failed ? (
-          <ErrorState message={failed} onRetry={() => { setFailed(null); loadDay(shownDay).catch(() => {}); }} />
+          <ErrorState message={failed} onRetry={() => { qc.refetchQueries({ queryKey: ['schedule', shownDay] }).catch(() => {}); }} />
         ) : (
           <View style={{ padding: 16, gap: 10 }}>
             {[0, 1, 2, 3, 4].map((i) => (
@@ -190,6 +169,9 @@ export default function ScheduleScreen() {
 const Slot = memo(function Slot({ anime, now, showNow }: { anime: Anime; now: number; showNow: boolean }) {
   const at = anime.nextEpisode?.airingAt;
   const past = !!at && at < now;
+  const { art, settled } = useArt(anime);
+  const thumb = settled ? posterOf(anime, art, false) : undefined;
+  const title = useTitle(anime);
   return (
     <>
       {showNow ? (
@@ -203,10 +185,10 @@ const Slot = memo(function Slot({ anime, now, showNow }: { anime: Anime; now: nu
         <Text style={[styles.time, past && { color: colors.muted }]}>
           {at ? new Date(at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
         </Text>
-        {anime.image ? <Image source={{ uri: anime.image }} style={styles.thumb} contentFit="cover" transition={150} cachePolicy="memory-disk" /> : <View style={styles.thumb} />}
+        {thumb ? <Image source={{ uri: thumb }} style={styles.thumb} contentFit="cover" transition={150} cachePolicy="memory-disk" /> : <View style={styles.thumb} />}
         <View style={{ flex: 1 }}>
           <Text style={styles.name} numberOfLines={2}>
-            {anime.title}
+            {title}
           </Text>
           <View style={styles.meta}>
             <Score value={anime.score} size={12} />

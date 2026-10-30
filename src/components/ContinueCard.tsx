@@ -1,52 +1,101 @@
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
+import { useEffect } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import Animated, { FadeInRight } from 'react-native-reanimated';
+import Animated, { Easing, FadeInRight, useAnimatedStyle, useReducedMotion, useSharedValue, withDelay, withTiming } from 'react-native-reanimated';
+import { Icon } from './Icon';
 import { PressableScale } from './PressableScale';
 import type { Progress } from '@/lib/library';
 import { colors, fonts, radius } from '@/lib/theme';
+import { backdropOf, useArt } from '@/lib/artwork';
+import type { Anime } from '@/lib/types';
+import { useTitle } from '@/lib/settings';
 
-// Landscape card for "Continue Watching": artwork, how far you are, and the
-// next episode. Opens the title page, where "Continue on …" links out.
-export function ContinueCard({ item, index = 0, width = 260 }: { item: Progress; index?: number; width?: number }) {
+export const CONTINUE_CARD_W = 286;
+
+// Landscape card for "Continue Watching": the show's banner, which episode is
+// next, and a progress bar that fills in as the row appears.
+export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W }: { item: Progress; index?: number; width?: number }) {
   const a = item.anime;
-  const art = a.backdrop || a.banner || a.image || undefined;
+  const { art: tmdb } = useArt(a as Anime, true);
+  const title = useTitle(a);
+  const art = backdropOf(a as Anime, tmdb);
+  const done = !!item.total && item.episode >= item.total;
+  const nextEp = done ? item.episode : item.episode + 1;
   const pct = item.total ? Math.min(1, item.episode / item.total) : 0;
-  const nextEp = item.total && item.episode >= item.total ? item.episode : item.episode + 1;
+  const left = item.total ? Math.max(0, item.total - item.episode) : null;
+
+  // Progress fills from empty (transform only: no layout work per frame).
+  const reduce = useReducedMotion();
+  const fill = useSharedValue(reduce ? pct : 0);
+  useEffect(() => {
+    fill.value = reduce ? pct : withDelay(250 + Math.min(index, 5) * 90, withTiming(pct, { duration: 750, easing: Easing.out(Easing.cubic) }));
+  }, [pct, index, reduce, fill]);
+  const fillStyle = useAnimatedStyle(() => ({ transform: [{ scaleX: Math.max(0.02, fill.value) }] }));
+
   return (
-    <Animated.View entering={FadeInRight.delay(Math.min(index, 6) * 60).duration(380)} style={{ width }}>
-      <PressableScale onPress={() => router.push(`/watch/${a.id}?ep=${nextEp}` as any)} accessibilityLabel={`Continue ${a.title}`}>
-        <View style={[styles.art, { height: width * 0.56 }]}>
-          {art && <Image source={{ uri: art }} style={StyleSheet.absoluteFill} contentFit="cover" transition={220} cachePolicy="memory-disk" />}
-          <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={StyleSheet.absoluteFill} />
-          <View style={styles.overlay}>
-            <Text style={styles.next}>
-              {item.total && item.episode >= item.total ? 'Finished' : `Next: Episode ${item.episode + 1}`}
+    <Animated.View entering={reduce ? undefined : FadeInRight.delay(Math.min(index, 5) * 70).duration(420)} style={{ width }}>
+      <PressableScale
+        onPress={() => router.push(`/watch/${a.id}?ep=${nextEp}` as any)}
+        scaleTo={0.97}
+        accessibilityLabel={`Continue ${title}, episode ${nextEp}`}
+      >
+        <View style={[styles.art, { height: Math.round(width * 0.56) }]}>
+          {art ? (
+            <Image source={{ uri: art }} style={StyleSheet.absoluteFill} contentFit="cover" transition={250} cachePolicy="memory-disk" recyclingKey={a.id} />
+          ) : null}
+          <LinearGradient colors={['rgba(0,0,0,0.35)', 'transparent', 'rgba(0,0,0,0.9)']} locations={[0, 0.35, 1]} style={StyleSheet.absoluteFill} />
+
+          <View style={styles.epChip}>
+            <Text style={styles.epChipText}>{done ? 'FINISHED' : `EP ${nextEp}`}</Text>
+          </View>
+
+          <View style={styles.playWrap} pointerEvents="none">
+            <View style={styles.play}>
+              <Icon name="play" size={18} color="#fff" />
+            </View>
+          </View>
+
+          <View style={styles.bottom}>
+            <Text style={styles.title} numberOfLines={1}>
+              {title}
+            </Text>
+            <Text style={styles.meta} numberOfLines={1}>
+              {done ? 'All episodes watched' : `Episode ${nextEp}`}
+              {left ? <Text style={styles.metaDim}>{`  ·  ${left} left`}</Text> : null}
             </Text>
           </View>
+
           <View style={styles.track}>
-            <View style={[styles.fill, { width: `${Math.max(pct * 100, 3)}%` }]} />
+            <Animated.View style={[styles.fill, fillStyle]} />
           </View>
         </View>
-        <Text style={styles.title} numberOfLines={1}>
-          {a.title}
-        </Text>
-        <Text style={styles.meta} numberOfLines={1}>
-          {item.total ? `${item.episode} of ${item.total} watched` : `${item.episode} watched`}
-          {item.watchName ? ` · ${item.watchName}` : ''}
-        </Text>
       </PressableScale>
     </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
-  art: { borderRadius: radius.md, overflow: 'hidden', backgroundColor: colors.surface2, justifyContent: 'flex-end' },
-  overlay: { paddingHorizontal: 12, paddingBottom: 12 },
-  next: { color: '#fff', fontFamily: fonts.black, fontSize: 14 },
-  track: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 4, backgroundColor: 'rgba(255,255,255,0.2)' },
-  fill: { height: '100%', backgroundColor: colors.accent },
-  title: { marginTop: 8, color: colors.text, fontFamily: fonts.bold, fontSize: 14 },
-  meta: { marginTop: 2, color: colors.muted, fontFamily: fonts.regular, fontSize: 12 },
+  art: { borderRadius: radius.lg, overflow: 'hidden', backgroundColor: colors.surface2, borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)' },
+  epChip: { position: 'absolute', top: 10, left: 10, paddingHorizontal: 8, height: 22, borderRadius: 6, backgroundColor: colors.accent, justifyContent: 'center' },
+  epChipText: { color: '#000', fontFamily: fonts.black, fontSize: 11, letterSpacing: 0.6 },
+  playWrap: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
+  play: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.75)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingLeft: 3, // optical centre for the play triangle
+  },
+  bottom: { position: 'absolute', left: 12, right: 12, bottom: 14 },
+  title: { color: '#fff', fontFamily: fonts.black, fontSize: 15.5 },
+  meta: { marginTop: 2, color: colors.accent, fontFamily: fonts.bold, fontSize: 12.5 },
+  metaDim: { color: 'rgba(255,255,255,0.7)', fontFamily: fonts.regular },
+  track: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 4, backgroundColor: 'rgba(255,255,255,0.18)' },
+  fill: { height: '100%', width: '100%', backgroundColor: colors.accent, transformOrigin: 'left' },
 });

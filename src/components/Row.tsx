@@ -25,11 +25,14 @@ export function SectionHeader({ title, sub, onMore }: { title: string; sub?: str
 }
 
 // A titled, horizontally scrolling row of poster cards.
+// Space between Home sections.
+export const SECTION_GAP = 40;
+
 export function Row({ title, sub, items, more, ranked }: { title: string; sub?: string; items?: Anime[]; more?: Href; ranked?: boolean }) {
   if (!items?.length) return null;
   const data = ranked ? items.slice(0, 10) : items;
   return (
-    <Animated.View entering={FadeIn.duration(400)} style={{ marginBottom: 28 }}>
+    <Animated.View entering={FadeIn.duration(400)} style={{ marginBottom: SECTION_GAP }}>
       <SectionHeader title={title} sub={sub} onMore={more ? () => router.push(more) : undefined} />
       <FlatList
         horizontal
@@ -50,7 +53,7 @@ export function Row({ title, sub, items, more, ranked }: { title: string; sub?: 
 }
 
 const styles = StyleSheet.create({
-  head: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 16, marginBottom: 12, gap: 12 },
+  head: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, marginBottom: 14, gap: 12 },
   title: { color: colors.text, fontFamily: fonts.black, fontSize: 19 },
   sub: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12.5, marginTop: 3 },
   more: { flexDirection: 'row', alignItems: 'center', gap: 2 },

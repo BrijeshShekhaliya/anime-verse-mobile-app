@@ -1,7 +1,18 @@
 import React, { forwardRef, memo, useCallback, useImperativeHandle, useRef, useState } from 'react';
 import { Platform, StyleSheet, Text, View } from 'react-native';
-import { NativeMedia3View, type NativeMedia3ViewRef, type Media3Track, type Media3Level } from 'native-media3-player';
-import ExpoVideoHlsPlayer, { type NativePlayerTrack, type NativeSubtitle, type NativeVideoLevel, type NativeVideoPlayerHandle } from './ExpoVideoHlsPlayer';
+import {
+  NativeMedia3View,
+  isNativeMedia3Available,
+  type NativeMedia3ViewRef,
+  type Media3Track,
+  type Media3Level,
+} from 'native-media3-player';
+import ExpoVideoHlsPlayer, {
+  type NativePlayerTrack,
+  type NativeSubtitle,
+  type NativeVideoLevel,
+  type NativeVideoPlayerHandle,
+} from './ExpoVideoHlsPlayer';
 
 type Props = {
   uri: string;
@@ -11,11 +22,12 @@ type Props = {
   fitMode: 'contain' | 'cover' | 'fill';
   selectedQualityHeight: number;
   selectedAudioTrackId?: number | null;
+  preferredAudioLanguage?: string | null;
   selectedTextTrackId?: number | null;
   subtitles: NativeSubtitle[];
   subtitlesEnabled: boolean;
   onLoad: (duration: number) => void;
-  onProgress: (time: number, duration: number, buffered: number) => void;
+  onProgress: (time: number, duration: number, buffered: number, videoWidth?: number, videoHeight?: number) => void;
   onBuffer: (buffering: boolean) => void;
   onAudioTracks: (tracks: NativePlayerTrack[]) => void;
   onTextTracks: (tracks: NativePlayerTrack[]) => void;
@@ -47,14 +59,14 @@ function parseCues(raw: string): Cue[] {
 }
 
 const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function NativeHlsPlayer(props, forwardedRef) {
-  if (Platform.OS !== 'android') {
+  if (Platform.OS !== 'android' || !isNativeMedia3Available()) {
     return <ExpoVideoHlsPlayer {...props} ref={forwardedRef} />;
   }
   return <AndroidMedia3Player {...props} ref={forwardedRef} />;
 });
 
 const AndroidMedia3Player = forwardRef<NativeVideoPlayerHandle, Props>(function AndroidMedia3Player({
-  uri, referer, paused, playbackRate, fitMode, selectedQualityHeight, selectedAudioTrackId = null,
+  uri, referer, paused, playbackRate, fitMode, selectedQualityHeight, selectedAudioTrackId = null, preferredAudioLanguage = null,
   selectedTextTrackId = null, subtitles, subtitlesEnabled, onLoad, onProgress, onBuffer,
   onAudioTracks, onTextTracks, onVideoTracks, onEnd, onError,
 }, forwardedRef) {
@@ -107,13 +119,14 @@ const AndroidMedia3Player = forwardRef<NativeVideoPlayerHandle, Props>(function 
         fitMode={fitMode}
         selectedQualityHeight={selectedQualityHeight}
         selectedAudioTrackId={selectedAudioTrackId}
+        preferredAudioLanguage={preferredAudioLanguage}
         selectedTextTrackId={selectedTextTrackId}
         subtitlesEnabled={subtitlesEnabled}
         onLoad={(event) => onLoad(event.nativeEvent.duration)}
         onProgress={(event) => {
-          const { time, duration, buffered } = event.nativeEvent;
+          const { time, duration, buffered, videoWidth, videoHeight } = event.nativeEvent;
           setPlaybackTime(time);
-          onProgress(time, duration, buffered);
+          onProgress(time, duration, buffered, videoWidth, videoHeight);
         }}
         onBuffer={(event) => onBuffer(event.nativeEvent.buffering)}
         onAudioTracks={audioTracks}
@@ -140,3 +153,4 @@ export default memo(NativeHlsPlayer);
 
 // Preserve the watch screen's existing shared player type imports.
 export type { NativePlayerTrack, NativeVideoLevel } from './ExpoVideoHlsPlayer';
+export { isNativeMedia3Available } from 'native-media3-player';

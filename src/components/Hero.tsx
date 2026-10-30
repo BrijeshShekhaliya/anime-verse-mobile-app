@@ -25,13 +25,19 @@ import { useLibrary } from '@/lib/library';
 import { factsOf } from '@/lib/format';
 import { colors, fonts, radius } from '@/lib/theme';
 import type { Anime } from '@/lib/types';
+import { api } from '@/lib/api';
+import { backdropOf, useArt } from '@/lib/artwork';
+import { useTitle } from '@/lib/settings';
 
 const AUTO_MS = 6500;
 
 function Slide({ anime, index, width, height, scrollX, active }: { anime: Anime; index: number; width: number; height: number; scrollX: SharedValue<number>; active: boolean }) {
   const { inList, toggleList } = useLibrary();
   const saved = inList(anime.id);
-  const art = anime.backdrop || anime.banner || anime.image || undefined;
+  const { art: tmdb, settled } = useArt(anime, true);
+  const title = useTitle(anime);
+  const art = settled ? backdropOf(anime, tmdb) : undefined;
+  const logo = tmdb?.logo || anime.logo;
 
   // Slow zoom-out on the slide that's showing (like the website's hero).
   // Skipped when the phone's "reduce motion" setting is on.
@@ -70,11 +76,11 @@ function Slide({ anime, index, width, height, scrollX, active }: { anime: Anime;
       </Animated.View>
       <LinearGradient colors={['rgba(0,0,0,0.55)', 'transparent', 'rgba(0,0,0,0.55)', '#000']} locations={[0, 0.25, 0.62, 1]} style={StyleSheet.absoluteFill} />
       <Animated.View style={[styles.content, textStyle]}>
-        {anime.logo ? (
-          <Image source={{ uri: anime.logo }} style={styles.logo} contentFit="contain" contentPosition="center" transition={250} />
+        {!settled ? null : logo ? (
+          <Image source={{ uri: logo }} style={styles.logo} contentFit="contain" contentPosition="center" transition={250} />
         ) : (
           <Text style={styles.title} numberOfLines={2}>
-            {anime.title}
+            {title}
           </Text>
         )}
         <View style={styles.meta}>
@@ -84,7 +90,7 @@ function Slide({ anime, index, width, height, scrollX, active }: { anime: Anime;
         </View>
         {anime.genres?.length ? <Text style={styles.genres}>{anime.genres.slice(0, 3).join(' • ')}</Text> : null}
         <View style={styles.actions}>
-          <PressableScale haptic style={styles.primary} onPress={() => router.push(`/anime/${anime.id}`)}>
+          <PressableScale haptic style={styles.primary} onPress={() => { api.seedDetail(anime); router.push(`/anime/${anime.id}`); }}>
             <Icon name="info" size={18} color="#000" />
             <Text style={styles.primaryText}>Details</Text>
           </PressableScale>
@@ -213,7 +219,7 @@ export function Hero({ items }: { items: Anime[] }) {
 const styles = StyleSheet.create({
   content: { position: 'absolute', left: 20, right: 20, bottom: 46, alignItems: 'center' },
   logo: { width: '78%', height: 92, marginBottom: 12 },
-  title: { fontFamily: fonts.display, fontSize: 46, lineHeight: 46, color: '#fff', textAlign: 'center', marginBottom: 10 },
+  title: { fontFamily: fonts.display, fontSize: 32, lineHeight: 36, letterSpacing: -1, color: '#fff', textAlign: 'center', marginBottom: 10 },
   meta: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center', gap: 8 },
   metaText: { color: colors.text2, fontFamily: fonts.bold, fontSize: 12.5 },
   genres: { color: colors.muted, fontFamily: fonts.bold, fontSize: 12.5, marginTop: 6 },

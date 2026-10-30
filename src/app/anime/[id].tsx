@@ -1,14 +1,14 @@
-import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
-import { useEffect, useRef, useState } from 'react';
-import { Linking, Platform, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { memo, useEffect, useRef, useState } from 'react';
+import { Linking, Platform, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
 import Animated, {
   Easing,
   Extrapolation,
+  FadeIn,
   FadeInDown,
   interpolate,
   useAnimatedScrollHandler,
@@ -21,17 +21,19 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { LangBadges } from '@/components/Badges';
+import { BottomSheet } from '@/components/BottomSheet';
 import { Icon, type IconName } from '@/components/Icon';
+import { PosterCard } from '@/components/PosterCard';
 import { PressableScale } from '@/components/PressableScale';
 import { Skeleton } from '@/components/Skeleton';
 import { ErrorState } from '@/components/States';
-import { api } from '@/lib/api';
-import { factsOf } from '@/lib/format';
+import { posterOf, useArt } from '@/lib/artwork';
+import { fmtNum } from '@/lib/format';
 import { useLibrary } from '@/lib/library';
+import { useDetail, useEpisodes, useExtras } from '@/lib/queries';
+import { displayTitle, useSettings } from '@/lib/settings';
 import { colors, fonts, radius, springs } from '@/lib/theme';
-import type { AnimeDetail } from '@/lib/types';
-import { useFetch } from '@/lib/useFetch';
+import type { AnimeDetail, Episode } from '@/lib/types';
 
 const haptic = (kind: 'tap' | 'success' | 'warn' = 'tap') => {
   if (Platform.OS === 'web') return;
@@ -44,252 +46,490 @@ const openLink = (url: string) => {
   else WebBrowser.openBrowserAsync(url).catch(() => Linking.openURL(url));
 };
 
+const goBack = () => (router.canGoBack() ? router.back() : router.replace('/'));
+const BOTTOM_BAR = 76;
+
+type Tab = 'episodes' | 'more';
+
 export default function DetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const heroH = Math.min(460, Math.round(width * 0.95));
-  const { data: a, error, loading, reload } = useFetch(() => api.detail(String(id)), [id]);
+  const heroH = Math.round(width * 1.25);
+  const reduce = useReducedMotion();
 
+  // Saved page (instant), or the tapped card while the full page loads.
+  const detail = useDetail(String(id));
+  const a = detail.data ?? null;
+  const loading = detail.isPending;
+  const error = detail.error ? detail.error.message || 'Something went wrong' : null;
+
+  const [season, setSeason] = useState(1);
+  const eps = useEpisodes(String(id), season, !!a?.airing);
+  const { data: extras } = useExtras(String(id));
+  const { art: tmdb, settled: artSettled, known: artKnown } = useArt(a, true);
+  const { titleLang } = useSettings();
+
+  // Fixed when the page opens: the poster the card already showed (instant,
+  // from cache) is the first layer of the key art.
+  const opened = useRef<{ id: string; poster?: string; logoKnown: boolean } | null>(null);
+  if (a && opened.current?.id !== a.id) opened.current = { id: a.id, poster: posterOf(a, tmdb), logoKnown: artKnown };
+
+  const [tab, setTab] = useState<Tab>('episodes');
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [seasonOpen, setSeasonOpen] = useState(false);
+
+  // ---- Motion ----
   const scrollY = useSharedValue(0);
   const onScroll = useAnimatedScrollHandler((e) => {
     scrollY.value = e.contentOffset.y;
   });
-  // Backdrop scrolls at half speed and stretches when you pull down.
+  // Key art settles in (slow zoom-out), moves at half speed while scrolling,
+  // stretches when pulled down.
+  const settle = useSharedValue(reduce ? 1 : 0);
+  useEffect(() => {
+    if (!reduce) settle.value = withTiming(1, { duration: 1200, easing: Easing.out(Easing.cubic) });
+  }, [reduce, settle]);
   const artStyle = useAnimatedStyle(() => {
     const y = scrollY.value;
     return {
       transform: [
         { translateY: y > 0 ? y * 0.5 : y / 2 },
-        { scale: y < 0 ? 1 + -y / heroH : 1 },
+        { scale: (y < 0 ? 1 + -y / heroH : 1) * interpolate(settle.value, [0, 1], [1.08, 1]) },
       ],
     };
   });
-  const barStyle = useAnimatedStyle(() => ({ opacity: interpolate(scrollY.value, [heroH - 160, heroH - 80], [0, 1], Extrapolation.CLAMP) }));
+  const barStyle = useAnimatedStyle(() => ({ opacity: interpolate(scrollY.value, [heroH - 200, heroH - 120], [0, 1], Extrapolation.CLAMP) }));
 
   if (loading && !a) return <DetailSkeleton heroH={heroH} />;
   if (error && !a) {
     return (
       <View style={[styles.screen, { paddingTop: insets.top + 60 }]}>
-        <BackButton top={insets.top} />
-        <ErrorState message={error} onRetry={reload} />
+        <View style={{ position: 'absolute', top: insets.top + 6, left: 12, zIndex: 5 }}>
+          <RoundButton icon="x" label="Close" onPress={goBack} />
+        </View>
+        <ErrorState message={error} onRetry={() => detail.refetch()} />
       </View>
     );
   }
   if (!a) return null;
 
-  const art = a.backdrop || a.banner || a.image || undefined;
-  const poster = a.tmdbPoster || a.image || undefined;
-  const kicker = a.type === 'Movie' ? 'Movie' : a.seasonCount ? 'Series' : a.type || 'Anime';
-  const facts = [
-    ...factsOf(a, true),
-    a.tmdbStatus || (a.status ? a.status.replace('Currently Airing', 'Airing').replace('Finished Airing', 'Ended') : ''),
-  ].filter(Boolean);
+  const name = displayTitle(a, titleLang);
+  const cardPoster = opened.current?.poster;
+  // Tall key art: the TMDB poster at a size fit for the full screen width.
+  const keyArt = artSettled && tmdb?.poster ? tmdb.poster.replace('/w342/', '/w780/') : undefined;
+  // Title logo: shown if known when the page opened, or as soon as the lookup
+  // lands (its space is reserved, so nothing shifts). Otherwise a display-font title.
+  const logo = tmdb?.logo || null;
+  const showLogoArea = !artSettled && !opened.current?.logoKnown;
+  const meta = [a.year ? String(a.year) : '', a.type || '', ...(a.genres || []).slice(0, 3)].filter(Boolean);
+  const episodes = eps.data?.episodes || [];
+  const seasons = eps.data?.seasons || [];
+  const seasonName = seasons.find((s) => s.season_number === season)?.name || `Season ${season}`;
+  const recs = extras?.recommendations || [];
+  const cols = width >= 700 ? 5 : 3;
+  const recW = Math.floor((width - 32 - (cols - 1) * 12) / cols);
+  const enter = (delay: number) => (reduce ? undefined : FadeInDown.delay(delay).duration(380));
 
   return (
     <View style={styles.screen}>
-      <Animated.ScrollView onScroll={onScroll} scrollEventThrottle={16} contentContainerStyle={{ paddingBottom: insets.bottom + 40 }}>
-        {/* Backdrop: clipped to its box so the parallax never slides over the title. */}
+      <Animated.ScrollView onScroll={onScroll} scrollEventThrottle={16} contentContainerStyle={{ paddingBottom: insets.bottom + BOTTOM_BAR + 24 }}>
+        {/* Key art with the title logo over its bottom */}
         <View style={{ height: heroH, overflow: 'hidden' }}>
           <Animated.View style={[StyleSheet.absoluteFill, artStyle]}>
-            {art && <Image source={{ uri: art }} style={StyleSheet.absoluteFill} contentFit="cover" transition={300} cachePolicy="memory-disk" />}
+            {cardPoster ? <Image source={{ uri: cardPoster }} style={StyleSheet.absoluteFill} contentFit="cover" contentPosition="top" cachePolicy="memory-disk" /> : null}
+            {keyArt ? <Image source={{ uri: keyArt }} style={StyleSheet.absoluteFill} contentFit="cover" contentPosition="top" transition={300} cachePolicy="memory-disk" /> : null}
           </Animated.View>
-          <LinearGradient colors={['rgba(0,0,0,0.55)', 'rgba(0,0,0,0.15)', 'rgba(0,0,0,0.6)', '#000']} locations={[0, 0.3, 0.7, 1]} style={StyleSheet.absoluteFill} />
+          <LinearGradient colors={['rgba(0,0,0,0.5)', 'transparent', 'rgba(0,0,0,0.55)', colors.bg]} locations={[0, 0.22, 0.68, 1]} style={StyleSheet.absoluteFill} />
+          <View style={styles.titleArea}>
+            {logo ? (
+              <Animated.View entering={reduce ? undefined : FadeIn.duration(350)} style={{ width: '100%', alignItems: 'center' }}>
+                <Image source={{ uri: logo }} style={styles.logo} contentFit="contain" cachePolicy="memory-disk" accessibilityLabel={name} />
+              </Animated.View>
+            ) : showLogoArea ? null : (
+              <Animated.Text entering={reduce ? undefined : FadeIn.duration(300)} style={styles.titleText} numberOfLines={3} adjustsFontSizeToFit>
+                {name}
+              </Animated.Text>
+            )}
+          </View>
         </View>
 
-        {/* Header block, overlapping the bottom of the backdrop */}
-        <View style={[styles.head, { marginTop: -170 }]}>
-          <Animated.View entering={FadeInDown.duration(500)} style={styles.posterWrap}>
-            {poster && <Image source={{ uri: poster }} style={styles.poster} contentFit="cover" transition={250} />}
-          </Animated.View>
-          <Animated.Text entering={FadeInDown.delay(60).duration(450)} style={styles.kicker}>
-            {kicker.toUpperCase()}
-            {a.airing ? '  ·  AIRING' : ''}
-          </Animated.Text>
-          <Animated.View entering={FadeInDown.delay(110).duration(450)} style={{ alignItems: 'center', width: '100%' }}>
-            {a.logo ? (
-              <Image source={{ uri: a.logo }} style={styles.logo} contentFit="contain" transition={250} accessibilityLabel={a.title} />
-            ) : (
-              <Text style={styles.title}>{a.title}</Text>
-            )}
-          </Animated.View>
-          {a.titleRomaji && a.titleRomaji !== a.title ? <Text style={styles.alt}>{a.titleRomaji}</Text> : null}
-          <Animated.View entering={FadeInDown.delay(170).duration(450)} style={styles.factRow}>
-            {a.score ? (
-              <View style={styles.scoreChip}>
-                <Icon name="star" size={14} color={colors.star} />
-                <Text style={styles.scoreText}>{a.score.toFixed(1)}</Text>
-              </View>
-            ) : null}
-            <Text style={styles.facts}>{facts.join('  ·  ')}</Text>
-          </Animated.View>
-          <View style={styles.badgeRow}>
-            <StatusBadge anime={a} />
-            <LangBadges anime={a} size="md" />
+        {/* Centred info, like the Crunchyroll app */}
+        <View style={styles.info}>
+          <Animated.View entering={enter(0)} style={styles.metaRow}>
             {a.contentRating ? (
-              <View style={styles.age}>
-                <Icon name="shield" size={13} color="#fff" />
-                <Text style={styles.ageText}>{a.contentRating}</Text>
+              <View style={styles.rating}>
+                <Text style={styles.ratingText}>{a.contentRating}</Text>
               </View>
             ) : null}
-          </View>
-          {a.genres?.length ? (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.genres}>
-              {a.genres.map((g) => (
-                <PressableScale key={g} onPress={() => router.push(`/browse?genre=${encodeURIComponent(g)}`)} style={styles.genre}>
-                  <Text style={styles.genreText}>{g}</Text>
-                </PressableScale>
-              ))}
-            </ScrollView>
+            <Text style={styles.meta} numberOfLines={2}>
+              {a.contentRating ? '  •  ' : ''}
+              {meta.join('  •  ')}
+            </Text>
+          </Animated.View>
+
+          {a.score ? (
+            <Animated.View entering={enter(50)} style={styles.starsRow}>
+              <Stars value={a.score / 2} />
+              <Text style={styles.avg}>
+                Average: <Text style={styles.avgNum}>{(a.score / 2).toFixed(1)}</Text>
+                {a.members ? <Text style={styles.avgCount}> ({fmtNum(a.members)})</Text> : null}
+              </Text>
+            </Animated.View>
           ) : null}
 
-          <Actions anime={a} />
+          <Animated.View entering={enter(100)}>
+            <ActionIcons anime={a} name={name} />
+          </Animated.View>
+
+          {a.nextEpisode ? <NextUp ep={a.nextEpisode.episode} at={a.nextEpisode.airingAt} /> : null}
+
+          {a.synopsis ? (
+            <Animated.View entering={enter(150)} style={{ alignItems: 'center' }}>
+              <Text style={styles.synopsis} numberOfLines={3}>
+                {a.synopsis}
+              </Text>
+              <PressableScale onPress={() => setDetailsOpen(true)} hitSlop={10}>
+                <Text style={styles.moreDetails}>More Details</Text>
+              </PressableScale>
+            </Animated.View>
+          ) : null}
         </View>
 
-        {a.nextEpisode ? <NextEpisode ep={a.nextEpisode.episode} at={a.nextEpisode.airingAt} /> : null}
+        {/* Episodes | More Like This */}
+        <Tabs
+          value={tab}
+          onChange={setTab}
+          tabs={[
+            { key: 'episodes', label: a.type === 'Movie' ? 'Movie' : 'Episodes' },
+            ...(recs.length ? [{ key: 'more' as Tab, label: 'More Like This' }] : []),
+          ]}
+        />
+
+        {tab === 'episodes' ? (
+          <Animated.View key="episodes" entering={FadeIn.duration(220)}>
+            <PressableScale haptic disabled={seasons.length < 2} onPress={() => setSeasonOpen(true)} style={styles.seasonRow} scaleTo={0.99}>
+              {seasons.length > 1 ? <Icon name="down" size={16} color="#fff" /> : null}
+              <Text style={styles.seasonText} numberOfLines={1}>
+                {seasonName}
+              </Text>
+              {episodes.length ? <Text style={styles.seasonCount}>{episodes.length} episodes</Text> : null}
+            </PressableScale>
+
+            <View style={styles.epList}>
+              {episodes.length ? (
+                episodes.map((ep, i) => (
+                  <EpisodeRow key={`${season}-${ep.episode_number}`} ep={ep} index={i} animeId={a.id} season={season} fallback={cardPoster} thumbW={Math.round((width - 32) * 0.46)} reduce={reduce} />
+                ))
+              ) : eps.isPending || eps.isFetching ? (
+                <EpisodeSkeleton thumbW={Math.round((width - 32) * 0.46)} />
+              ) : (
+                <Text style={styles.empty}>Episodes aren't listed for this season yet.</Text>
+              )}
+            </View>
+          </Animated.View>
+        ) : (
+          <Animated.View key="more" entering={FadeIn.duration(220)} style={styles.grid}>
+            {recs.map((r, i) => (
+              <PosterCard key={r.id} anime={r} index={i} width={recW} />
+            ))}
+          </Animated.View>
+        )}
       </Animated.ScrollView>
 
-      {/* Floating bar: always shows back / save; turns solid with the title once you scroll */}
+      {/* Top bar: close; the title slides in next to it once you scroll */}
       <View style={[styles.topBar, { paddingTop: insets.top }]} pointerEvents="box-none">
         <Animated.View style={[StyleSheet.absoluteFill, barStyle]}>
-          {Platform.OS === 'ios' ? <BlurView intensity={40} tint="dark" style={StyleSheet.absoluteFill} /> : null}
-          <View style={[StyleSheet.absoluteFill, { backgroundColor: Platform.OS === 'ios' ? 'rgba(14,15,19,0.82)' : 'rgba(14,15,19,0.97)' }]} />
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.bg, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.1)' }]} />
         </Animated.View>
         <View style={styles.topRow}>
-          <RoundButton icon="left" label="Back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} />
+          <RoundButton icon="x" label="Close" onPress={goBack} />
           <Animated.Text style={[styles.barTitle, barStyle]} numberOfLines={1}>
-            {a.title}
+            {name}
           </Animated.Text>
-          <SaveButton anime={a} />
         </View>
       </View>
+
+      {/* Sticky bottom: continue / start, and the watchlist */}
+      <BottomBar anime={a} season={season} bottom={insets.bottom} />
+
+      {/* More details */}
+      <BottomSheet visible={detailsOpen} onClose={() => setDetailsOpen(false)} title={name} subtitle={meta.join(' · ')}>
+        <ScrollView contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 10, gap: 18 }}>
+          {a.synopsis ? <Text style={styles.sheetSynopsis}>{a.synopsis}</Text> : null}
+          <View style={{ gap: 12 }}>
+            <InfoLine label="Status" value={a.airing ? 'Airing' : a.status || ''} />
+            <InfoLine label="Studio" value={a.studios?.join(', ')} />
+            <InfoLine label="Aired" value={a.aired || (a.year ? String(a.year) : '')} />
+            <InfoLine label="Episodes" value={a.episodes ? `${a.episodes}${a.duration ? ` · ${a.duration}` : ''}` : ''} />
+            <InfoLine label="Original title" value={a.titleJapanese || a.titleRomaji || ''} />
+          </View>
+          {a.genres?.length ? (
+            <View style={styles.sheetGenres}>
+              {a.genres.map((g) => (
+                <PressableScale
+                  key={g}
+                  onPress={() => {
+                    setDetailsOpen(false);
+                    router.push(`/browse?genre=${encodeURIComponent(g)}`);
+                  }}
+                  style={styles.genreChip}
+                >
+                  <Text style={styles.genreChipText}>{g}</Text>
+                </PressableScale>
+              ))}
+            </View>
+          ) : null}
+        </ScrollView>
+      </BottomSheet>
+
+      {/* Season picker */}
+      <BottomSheet visible={seasonOpen} onClose={() => setSeasonOpen(false)} title="Seasons">
+        <ScrollView contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 6 }}>
+          {seasons.map((s) => {
+            const on = s.season_number === season;
+            return (
+              <PressableScale
+                key={s.season_number}
+                haptic
+                onPress={() => {
+                  setSeason(s.season_number);
+                  setSeasonOpen(false);
+                }}
+                style={[styles.seasonPick, on && styles.seasonPickOn]}
+                scaleTo={0.98}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.seasonPickText, on && { color: colors.accent }]}>{s.name || `Season ${s.season_number}`}</Text>
+                  {s.episode_count ? <Text style={styles.seasonPickSub}>{s.episode_count} episodes</Text> : null}
+                </View>
+                {on ? <Icon name="check" size={18} color={colors.accent} /> : null}
+              </PressableScale>
+            );
+          })}
+        </ScrollView>
+      </BottomSheet>
     </View>
   );
 }
 
-// Airing / Finished / Upcoming, with a pulsing dot while a show is airing.
-function StatusBadge({ anime }: { anime: AnimeDetail }) {
-  // Series pages use the series-wide status (same source as the facts line),
-  // so a finished Season 1 of a show that's still airing reads "Airing".
-  const t = (anime.tmdbStatus || '').toLowerCase();
-  const s = (anime.status || '').toLowerCase();
-  const kind = t
-    ? t === 'airing'
-      ? 'airing'
-      : t === 'planned' || t === 'in production'
-        ? 'upcoming'
-        : 'finished'
-    : anime.airing || (s.includes('airing') && !s.includes('finished'))
-      ? 'airing'
-      : s.includes('not yet') || s.includes('upcoming')
-        ? 'upcoming'
-        : s
-          ? 'finished'
-          : null;
-  const pulse = useSharedValue(1);
-  useEffect(() => {
-    if (kind !== 'airing') return;
-    pulse.value = withRepeat(withSequence(withTiming(0.35, { duration: 700 }), withTiming(1, { duration: 700 })), -1);
-  }, [kind, pulse]);
-  const dot = useAnimatedStyle(() => ({ opacity: pulse.value }));
-  if (!kind) return null;
-  const look = {
-    airing: { text: 'Airing', color: colors.green, bg: 'rgba(95,208,104,0.14)' },
-    upcoming: { text: 'Upcoming', color: colors.sub, bg: 'rgba(167,167,255,0.14)' },
-    finished: { text: 'Finished', color: colors.text2, bg: 'rgba(255,255,255,0.08)' },
-  }[kind];
+// Five stars, filled to the score (out of 5), including a partly filled one.
+function Stars({ value }: { value: number }) {
   return (
-    <View style={[styles.status, { backgroundColor: look.bg }]}>
-      <Animated.View style={[styles.statusDotBadge, { backgroundColor: look.color }, dot]} />
-      <Text style={[styles.statusBadgeText, { color: look.color }]}>{look.text}</Text>
+    <View style={{ flexDirection: 'row', gap: 3 }}>
+      {[0, 1, 2, 3, 4].map((i) => {
+        const fill = Math.max(0, Math.min(1, value - i));
+        return (
+          <View key={i} style={{ width: 18, height: 18 }}>
+            <Icon name="star" size={18} color="rgba(255,255,255,0.25)" />
+            <View style={{ position: 'absolute', top: 0, left: 0, bottom: 0, width: 18 * fill, overflow: 'hidden' }}>
+              <Icon name="star" size={18} color="#fff" />
+            </View>
+          </View>
+        );
+      })}
     </View>
   );
 }
 
-function RoundButton({ icon, label, onPress, color = '#fff' }: { icon: IconName; label: string; onPress: () => void; color?: string }) {
-  return (
-    <PressableScale onPress={onPress} style={styles.round} accessibilityLabel={label} hitSlop={8}>
-      <Icon name={icon} size={22} color={color} />
-    </PressableScale>
-  );
-}
-
-function BackButton({ top }: { top: number }) {
-  return (
-    <View style={{ position: 'absolute', top: top + 6, left: 12, zIndex: 5 }}>
-      <RoundButton icon="left" label="Back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} />
-    </View>
-  );
-}
-
-// Bookmark that pops when tapped.
-function SaveButton({ anime }: { anime: AnimeDetail }) {
+// My List · Share · Trailer: orange icons with labels, centred.
+function ActionIcons({ anime, name }: { anime: AnimeDetail; name: string }) {
   const { inList, toggleList } = useLibrary();
   const saved = inList(anime.id);
-  const scale = useSharedValue(1);
-  const style = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+  const pop = useSharedValue(1);
+  const popStyle = useAnimatedStyle(() => ({ transform: [{ scale: pop.value }] }));
   return (
-    <Animated.View style={style}>
-      <RoundButton
-        icon={saved ? 'bookmarkOn' : 'bookmark'}
-        label={saved ? 'Remove from My List' : 'Add to My List'}
-        color={saved ? colors.accent : '#fff'}
+    <View style={styles.iconActions}>
+      <PressableScale
+        style={styles.iconAction}
         onPress={() => {
           const added = toggleList(anime);
           haptic(added ? 'success' : 'warn');
-          scale.value = withSequence(withSpring(1.3, springs.bouncy), withSpring(1, springs.press));
+          pop.value = withSequence(withSpring(1.3, springs.bouncy), withSpring(1, springs.press));
         }}
-      />
-    </Animated.View>
+        accessibilityLabel={saved ? 'Remove from My List' : 'Add to My List'}
+      >
+        <Animated.View style={popStyle}>
+          <Icon name={saved ? 'check' : 'plus'} size={26} color={colors.accent} />
+        </Animated.View>
+        <Text style={styles.iconActionText}>{saved ? 'In My List' : 'My List'}</Text>
+      </PressableScale>
+      <PressableScale
+        style={styles.iconAction}
+        onPress={() => {
+          haptic();
+          Share.share({ message: `${name} on AnimeVerse${anime.anilistUrl ? `\n${anime.anilistUrl}` : ''}` }).catch(() => {});
+        }}
+        accessibilityLabel="Share"
+      >
+        <Icon name="share" size={26} color={colors.accent} />
+        <Text style={styles.iconActionText}>Share</Text>
+      </PressableScale>
+      {anime.trailer ? (
+        <PressableScale style={styles.iconAction} onPress={() => openLink(`https://www.youtube.com/watch?v=${anime.trailer}`)} accessibilityLabel="Watch trailer">
+          <Icon name="play" size={26} color={colors.accent} />
+          <Text style={styles.iconActionText}>Trailer</Text>
+        </PressableScale>
+      ) : null}
+    </View>
   );
 }
 
-function Actions({ anime }: { anime: AnimeDetail }) {
+// Sticky bar at the bottom of the screen.
+function BottomBar({ anime, season, bottom }: { anime: AnimeDetail; season: number; bottom: number }) {
   const { inList, toggleList, progress } = useLibrary();
   const saved = inList(anime.id);
   const watchedEp = progress[anime.id]?.episode || 0;
   const nextEp = watchedEp > 0 ? watchedEp + 1 : 1;
-  const watchLabel = watchedEp > 0 ? `Resume Ep ${nextEp}` : 'Watch Episode 1';
-
+  const pop = useSharedValue(1);
+  const popStyle = useAnimatedStyle(() => ({ transform: [{ scale: pop.value }] }));
   return (
-    <Animated.View entering={FadeInDown.delay(230).duration(450)} style={styles.actions}>
-      <PressableScale
-        haptic
-        style={styles.primaryBtn}
-        onPress={() => router.push(`/watch/${anime.id}?season=1&ep=${nextEp}` as any)}
-      >
-        <Icon name="play" size={18} color="#000" />
+    <View style={[styles.bottomBar, { paddingBottom: bottom + 10 }]} pointerEvents="box-none">
+      <LinearGradient colors={['transparent', 'rgba(0,0,0,0.92)', '#000']} locations={[0, 0.45, 1]} style={StyleSheet.absoluteFill} pointerEvents="none" />
+      <PressableScale haptic style={styles.primaryBtn} scaleTo={0.97} onPress={() => router.push(`/watch/${anime.id}?season=${season}&ep=${nextEp}` as any)}>
+        <Icon name="play" size={20} color="#000" />
         <Text style={styles.primaryText} numberOfLines={1}>
-          {watchLabel}
+          {watchedEp > 0 ? `Continue E${nextEp}` : 'Start Watching E1'}
         </Text>
       </PressableScale>
-
-      <View style={styles.secondaryRow}>
-        {anime.trailer ? (
-          <PressableScale haptic style={styles.secondaryBtn} onPress={() => openLink(`https://www.youtube.com/watch?v=${anime.trailer}`)}>
-            <Icon name="spark" size={16} color="#fff" />
-            <Text style={styles.secondaryText}>Trailer</Text>
-          </PressableScale>
-        ) : null}
+      <Animated.View style={popStyle}>
         <PressableScale
-          style={[styles.secondaryBtn, saved && styles.secondaryOn]}
+          style={[styles.roundSave, saved && styles.roundSaveOn]}
           onPress={() => {
             const added = toggleList(anime);
             haptic(added ? 'success' : 'warn');
+            pop.value = withSequence(withSpring(1.18, springs.bouncy), withSpring(1, springs.press));
           }}
+          accessibilityLabel={saved ? 'Remove from My List' : 'Add to My List'}
         >
-          <Icon name={saved ? 'check' : 'plus'} size={16} color={saved ? colors.accent : '#fff'} />
-          <Text style={[styles.secondaryText, saved && { color: colors.accent }]}>{saved ? 'In My List' : 'My List'}</Text>
+          <Icon name={saved ? 'bookmarkOn' : 'bookmark'} size={22} color={colors.accent} />
         </PressableScale>
-      </View>
-    </Animated.View>
+      </Animated.View>
+    </View>
   );
 }
 
-// Next-episode card: live badge, rolling Days/Hrs/Min/Sec that tick every
-// second, the exact air time, and how far through the week we are.
-const WEEK = 7 * 86400;
-function NextEpisode({ ep, at }: { ep: number; at: number }) {
+function InfoLine({ label, value }: { label: string; value?: string | null }) {
+  if (!value) return null;
+  return (
+    <View style={styles.infoLine}>
+      <Text style={styles.infoLabel}>{label}</Text>
+      <Text style={styles.infoValue}>{value}</Text>
+    </View>
+  );
+}
+
+// Tabs with an underline that slides between them.
+function Tabs({ value, tabs, onChange }: { value: Tab; tabs: { key: Tab; label: string }[]; onChange: (t: Tab) => void }) {
+  const [layouts, setLayouts] = useState<Record<string, { x: number; w: number }>>({});
+  const x = useSharedValue(0);
+  const w = useSharedValue(0);
+  useEffect(() => {
+    const l = layouts[value];
+    if (!l) return;
+    const first = w.value === 0;
+    const ease = { duration: 240, easing: Easing.bezier(0.2, 0.9, 0.25, 1) };
+    x.value = first ? l.x : withTiming(l.x, ease);
+    w.value = first ? l.w : withTiming(l.w, ease);
+  }, [value, layouts, x, w]);
+  const line = useAnimatedStyle(() => ({ width: w.value, transform: [{ translateX: x.value }] }));
+  return (
+    <View style={styles.tabs}>
+      {tabs.map((t) => (
+        <PressableScale
+          key={t.key}
+          haptic
+          onPress={() => onChange(t.key)}
+          scaleTo={0.97}
+          onLayout={(e: LayoutChangeEvent) => {
+            const { x: lx, width: lw } = e.nativeEvent.layout;
+            setLayouts((p) => (p[t.key]?.x === lx && p[t.key]?.w === lw ? p : { ...p, [t.key]: { x: lx, w: lw } }));
+          }}
+          style={styles.tab}
+          accessibilityRole="tab"
+          accessibilityState={{ selected: value === t.key }}
+        >
+          <Text style={[styles.tabText, value === t.key && styles.tabTextOn]}>{t.label}</Text>
+        </PressableScale>
+      ))}
+      <Animated.View style={[styles.tabLine, line]} />
+    </View>
+  );
+}
+
+const EpisodeRow = memo(function EpisodeRow({
+  ep,
+  index,
+  animeId,
+  season,
+  fallback,
+  thumbW,
+  reduce,
+}: {
+  ep: Episode;
+  index: number;
+  animeId: string;
+  season: number;
+  fallback?: string;
+  thumbW: number;
+  reduce: boolean;
+}) {
+  const thumb = ep.still_path || fallback;
+  const date = ep.air_date ? new Date(ep.air_date) : null;
+  const upcoming = !!date && date.getTime() > Date.now();
+  return (
+    <Animated.View entering={reduce || index > 7 ? undefined : FadeInDown.delay(index * 45).duration(320)}>
+      <PressableScale
+        onPress={() => router.push(`/watch/${animeId}?season=${season}&ep=${ep.episode_number}` as any)}
+        style={styles.epRow}
+        scaleTo={0.98}
+        accessibilityLabel={`Episode ${ep.episode_number}${ep.name ? `, ${ep.name}` : ''}`}
+      >
+        <View style={[styles.epThumb, { width: thumbW, height: Math.round(thumbW * 0.5625) }]}>
+          {thumb ? <Image source={{ uri: thumb }} style={StyleSheet.absoluteFill} contentFit="cover" transition={200} cachePolicy="memory-disk" /> : null}
+          <View style={styles.epPlay}>
+            <Icon name="play" size={16} color="#fff" />
+          </View>
+          {ep.runtime ? (
+            <View style={styles.epDuration}>
+              <Text style={styles.epDurationText}>{ep.runtime}m</Text>
+            </View>
+          ) : null}
+        </View>
+        <View style={{ flex: 1, paddingTop: 2 }}>
+          <Text style={styles.epTitle} numberOfLines={3}>
+            {ep.episode_number}. {ep.name || `Episode ${ep.episode_number}`}
+          </Text>
+          {date ? (
+            <Text style={[styles.epMeta, upcoming && { color: colors.accent }]}>
+              {upcoming ? 'Coming ' : ''}
+              {date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+            </Text>
+          ) : null}
+        </View>
+      </PressableScale>
+    </Animated.View>
+  );
+});
+
+function EpisodeSkeleton({ thumbW }: { thumbW: number }) {
+  return (
+    <View style={{ gap: 14 }}>
+      {[0, 1, 2, 3].map((i) => (
+        <View key={i} style={{ flexDirection: 'row', gap: 12 }}>
+          <Skeleton width={thumbW} height={Math.round(thumbW * 0.5625)} rounded={radius.sm} />
+          <View style={{ flex: 1, gap: 8, paddingTop: 4 }}>
+            <Skeleton width="85%" height={14} />
+            <Skeleton width="45%" height={11} />
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// "Next episode" line with a live countdown and a pulsing dot.
+function NextUp({ ep, at }: { ep: number; at: number }) {
   const reduce = useReducedMotion();
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   useEffect(() => {
@@ -297,103 +537,35 @@ function NextEpisode({ ep, at }: { ep: number; at: number }) {
     return () => clearInterval(t);
   }, []);
   const left = Math.max(0, at - now);
-  const out = left === 0;
-  const units = [
-    { label: 'Days', value: Math.floor(left / 86400) },
-    { label: 'Hrs', value: Math.floor((left % 86400) / 3600) },
-    { label: 'Min', value: Math.floor((left % 3600) / 60) },
-    { label: 'Sec', value: left % 60 },
-  ];
-  const when = new Date(at * 1000);
-  const whenText =
-    when.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' }) +
-    '  ·  ' +
-    when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const d = Math.floor(left / 86400);
+  const hms = [Math.floor((left % 86400) / 3600), Math.floor((left % 3600) / 60), left % 60].map((n) => String(n).padStart(2, '0')).join(':');
 
-  // Pulsing live dot and a light sweep across the progress bar.
   const pulse = useSharedValue(1);
-  const sweep = useSharedValue(0);
   useEffect(() => {
-    if (reduce) return;
-    pulse.value = withRepeat(withSequence(withTiming(2.2, { duration: 1100 }), withTiming(1, { duration: 0 })), -1);
-    sweep.value = withRepeat(withTiming(1, { duration: 2200, easing: Easing.inOut(Easing.quad) }), -1);
-  }, [reduce, pulse, sweep]);
+    if (!reduce) pulse.value = withRepeat(withSequence(withTiming(2.2, { duration: 1100 }), withTiming(1, { duration: 0 })), -1);
+  }, [reduce, pulse]);
   const ring = useAnimatedStyle(() => ({ transform: [{ scale: pulse.value }], opacity: interpolate(pulse.value, [1, 2.2], [0.6, 0]) }));
 
-  // How far we are from the last episode (weekly) to this one.
-  const pct = out ? 1 : Math.min(1, Math.max(0.03, 1 - left / WEEK));
-  const [barW, setBarW] = useState(0);
-  const fill = useSharedValue(0);
-  useEffect(() => {
-    fill.value = withTiming(pct, { duration: 900, easing: Easing.out(Easing.cubic) });
-  }, [pct, fill]);
-  const fillStyle = useAnimatedStyle(() => ({ transform: [{ translateX: (fill.value - 1) * barW }] }));
-  const shine = useAnimatedStyle(() => ({ transform: [{ translateX: interpolate(sweep.value, [0, 1], [-80, barW]) }] }));
-
   return (
-    <Animated.View entering={FadeInDown.delay(280).duration(450)} style={styles.next}>
-      <LinearGradient colors={['rgba(255,100,10,0.22)', 'rgba(255,100,10,0.04)']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} />
-      <View style={styles.nextHead}>
-        <View style={styles.liveDotWrap}>
-          <Animated.View style={[styles.liveRing, ring]} />
-          <View style={styles.liveDot} />
-        </View>
-        <Text style={styles.nextKicker}>{out ? 'OUT NOW' : 'NEXT EPISODE'}</Text>
-        <View style={styles.epPill}>
-          <Text style={styles.epPillText}>EP {ep}</Text>
-        </View>
+    <Animated.View entering={reduce ? undefined : FadeInDown.delay(130).duration(380)} style={styles.nextUp}>
+      <View style={styles.dotWrap}>
+        <Animated.View style={[styles.dotRing, ring]} />
+        <View style={styles.dot} />
       </View>
-      {out ? (
-        <Text style={styles.outNow}>Episode {ep} is out</Text>
-      ) : (
-        <View style={styles.units}>
-          {units.map((u, i) => (
-            <View key={u.label} style={styles.unitWrap}>
-              <View style={styles.unit}>
-                <RollingNumber value={u.value} reduce={reduce} />
-                <Text style={styles.unitLabel}>{u.label}</Text>
-              </View>
-              {i < units.length - 1 ? <Text style={styles.colon}>:</Text> : null}
-            </View>
-          ))}
-        </View>
-      )}
-      <View style={styles.whenRow}>
-        <Icon name="calendar" size={14} color={colors.text2} />
-        <Text style={styles.whenText}>{whenText}</Text>
-      </View>
-      <View style={styles.weekBar} onLayout={(e) => setBarW(e.nativeEvent.layout.width)}>
-        <Animated.View style={[styles.weekFill, fillStyle]}>
-          {!reduce ? (
-            <Animated.View style={[styles.shine, shine]}>
-              <LinearGradient colors={['transparent', 'rgba(255,255,255,0.55)', 'transparent']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={StyleSheet.absoluteFill} />
-            </Animated.View>
-          ) : null}
-        </Animated.View>
-      </View>
+      <Text style={styles.nextUpText}>
+        <Text style={{ color: colors.accent, fontFamily: fonts.black }}>EP {ep}</Text>
+        {left === 0 ? '  ·  Out now' : `  ·  in ${d ? `${d}d ` : ''}`}
+        {left === 0 ? null : <Text style={styles.nextUpClock}>{hms}</Text>}
+      </Text>
     </Animated.View>
   );
 }
 
-// Each new value slides up into place, like a flip clock. One text node that
-// is always on screen; only a transform/opacity plays.
-function RollingNumber({ value, reduce }: { value: number; reduce: boolean }) {
-  const text = String(value).padStart(2, '0');
-  const t = useSharedValue(1);
-  const first = useRef(true);
-  useEffect(() => {
-    if (first.current || reduce) {
-      first.current = false;
-      return;
-    }
-    t.value = 0;
-    t.value = withTiming(1, { duration: 280, easing: Easing.out(Easing.cubic) });
-  }, [text, reduce, t]);
-  const style = useAnimatedStyle(() => ({ opacity: 0.25 + t.value * 0.75, transform: [{ translateY: (1 - t.value) * 16 }] }));
+function RoundButton({ icon, label, onPress }: { icon: IconName; label: string; onPress: () => void }) {
   return (
-    <View style={styles.digitBox}>
-      <Animated.Text style={[styles.digit, style]}>{text}</Animated.Text>
-    </View>
+    <PressableScale onPress={onPress} style={styles.round} accessibilityLabel={label} hitSlop={8}>
+      <Icon name={icon} size={22} color="#fff" />
+    </PressableScale>
   );
 }
 
@@ -401,68 +573,77 @@ function DetailSkeleton({ heroH }: { heroH: number }) {
   return (
     <View style={styles.screen}>
       <Skeleton width="100%" height={heroH} rounded={0} />
-      <View style={{ alignItems: 'center', marginTop: -120, gap: 12 }}>
-        <Skeleton width={120} height={180} rounded={radius.md} />
-        <Skeleton width={220} height={30} />
-        <Skeleton width={180} height={14} />
-        <Skeleton width={300} height={48} rounded={radius.md} style={{ marginTop: 10 }} />
+      <View style={{ padding: 16, gap: 12, alignItems: 'center' }}>
+        <Skeleton width="60%" height={14} />
+        <Skeleton width="50%" height={18} />
+        <Skeleton width="90%" height={13} />
+        <Skeleton width="80%" height={13} />
       </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.bg },
-  head: { alignItems: 'center', paddingHorizontal: 20 },
-  posterWrap: { borderRadius: radius.md, overflow: 'hidden', shadowColor: '#000', shadowOpacity: 0.8, shadowRadius: 20, shadowOffset: { width: 0, height: 12 }, elevation: 12 },
-  poster: { width: 124, height: 186, backgroundColor: colors.surface2 },
-  kicker: { marginTop: 16, color: colors.accent, fontFamily: fonts.black, fontSize: 11, letterSpacing: 4 },
-  logo: { width: '80%', height: 86, marginTop: 8 },
-  title: { marginTop: 6, color: '#fff', fontFamily: fonts.display, fontSize: 42, lineHeight: 44, textAlign: 'center' },
-  alt: { marginTop: 4, color: colors.muted, fontFamily: fonts.regular, fontSize: 13, textAlign: 'center' },
-  factRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginTop: 12 },
-  scoreChip: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  scoreText: { color: '#fff', fontFamily: fonts.black, fontSize: 14 },
-  facts: { color: colors.text2, fontFamily: fonts.bold, fontSize: 13, textAlign: 'center' },
-  badgeRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 12 },
-  age: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, height: 24, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255,255,255,0.25)' },
-  ageText: { color: '#fff', fontFamily: fonts.black, fontSize: 11.5 },
-  status: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 24, paddingHorizontal: 10, borderRadius: 12 },
-  statusDotBadge: { width: 7, height: 7, borderRadius: 4 },
-  statusBadgeText: { fontFamily: fonts.black, fontSize: 11.5 },
-  genres: { gap: 8, paddingVertical: 14, paddingHorizontal: 4 },
-  genre: { backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: radius.sm, paddingHorizontal: 12, height: 30, justifyContent: 'center' },
-  genreText: { color: '#fff', fontFamily: fonts.bold, fontSize: 12.5 },
-  actions: { width: '100%', gap: 10, marginBottom: 22 },
-  primaryBtn: { height: 50, borderRadius: radius.md, backgroundColor: colors.accent, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingHorizontal: 16 },
-  primaryText: { color: '#000', fontFamily: fonts.black, fontSize: 14.5, letterSpacing: 0.5, textTransform: 'uppercase' },
-  secondaryRow: { flexDirection: 'row', gap: 10 },
-  secondaryBtn: { flex: 1, height: 46, borderRadius: radius.md, backgroundColor: colors.surface2, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 },
-  secondaryOn: { backgroundColor: 'rgba(255,100,10,0.14)' },
-  secondaryText: { color: '#fff', fontFamily: fonts.black, fontSize: 13, letterSpacing: 0.4, textTransform: 'uppercase' },
-  next: { marginHorizontal: 16, marginBottom: 22, padding: 16, borderRadius: radius.lg, overflow: 'hidden', backgroundColor: colors.surface, borderWidth: 1, borderColor: 'rgba(255,100,10,0.35)' },
-  nextHead: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  liveDotWrap: { width: 12, height: 12, alignItems: 'center', justifyContent: 'center' },
-  liveRing: { position: 'absolute', width: 12, height: 12, borderRadius: 6, backgroundColor: colors.accent },
-  liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.accent },
-  nextKicker: { flex: 1, color: colors.accent, fontFamily: fonts.black, fontSize: 11.5, letterSpacing: 2 },
-  epPill: { paddingHorizontal: 10, height: 24, borderRadius: 12, backgroundColor: colors.accent, justifyContent: 'center' },
-  epPillText: { color: '#000', fontFamily: fonts.black, fontSize: 12 },
-  outNow: { color: '#fff', fontFamily: fonts.black, fontSize: 22, marginTop: 14 },
-  units: { flexDirection: 'row', alignItems: 'flex-start', marginTop: 14 },
-  unitWrap: { flex: 1, flexDirection: 'row', alignItems: 'flex-start' },
-  unit: { flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: radius.md, backgroundColor: 'rgba(0,0,0,0.35)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)' },
-  digitBox: { height: 34, alignSelf: 'stretch', overflow: 'hidden' },
-  digit: { position: 'absolute', left: 0, right: 0, textAlign: 'center', color: '#fff', fontFamily: fonts.black, fontSize: 28, lineHeight: 34, fontVariant: ['tabular-nums'] },
-  unitLabel: { color: colors.muted, fontFamily: fonts.black, fontSize: 10, letterSpacing: 1.2, textTransform: 'uppercase', marginTop: 2 },
-  colon: { color: 'rgba(255,255,255,0.3)', fontFamily: fonts.black, fontSize: 22, lineHeight: 50, paddingHorizontal: 4 },
-  whenRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 14 },
-  whenText: { color: colors.text2, fontFamily: fonts.bold, fontSize: 13 },
-  weekBar: { height: 5, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.08)', overflow: 'hidden', marginTop: 12 },
-  weekFill: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 3, backgroundColor: colors.accent, overflow: 'hidden' },
-  shine: { position: 'absolute', top: 0, bottom: 0, width: 80 },
+  screen: { flex: 1, backgroundColor: '#000' },
+  titleArea: { position: 'absolute', left: 24, right: 24, bottom: 18, minHeight: 96, alignItems: 'center', justifyContent: 'flex-end' },
+  logo: { width: '86%', height: 96 },
+  titleText: { color: '#fff', fontFamily: fonts.display, fontSize: 34, lineHeight: 38, textAlign: 'center', letterSpacing: -1, textShadowColor: 'rgba(0,0,0,0.6)', textShadowRadius: 12, textShadowOffset: { width: 0, height: 2 } },
+  info: { paddingHorizontal: 20, gap: 16, alignItems: 'center' },
+  metaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap' },
+  rating: { paddingHorizontal: 5, height: 18, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.18)', justifyContent: 'center' },
+  ratingText: { color: '#fff', fontFamily: fonts.bold, fontSize: 10 },
+  meta: { color: colors.text2, fontFamily: fonts.regular, fontSize: 14, textAlign: 'center' },
+  starsRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  avg: { color: colors.text2, fontFamily: fonts.regular, fontSize: 15 },
+  avgNum: { color: '#fff', fontFamily: fonts.black },
+  avgCount: { color: colors.text2 },
+  iconActions: { flexDirection: 'row', justifyContent: 'center', gap: 36, paddingVertical: 4 },
+  iconAction: { alignItems: 'center', gap: 6, minWidth: 64 },
+  iconActionText: { color: colors.accent, fontFamily: fonts.bold, fontSize: 13 },
+  nextUp: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 9, paddingHorizontal: 14, borderRadius: radius.pill, backgroundColor: 'rgba(255,100,10,0.1)', borderWidth: 1, borderColor: 'rgba(255,100,10,0.28)' },
+  dotWrap: { width: 10, height: 10, alignItems: 'center', justifyContent: 'center' },
+  dotRing: { position: 'absolute', width: 10, height: 10, borderRadius: 5, backgroundColor: colors.accent },
+  dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.accent },
+  nextUpText: { color: '#fff', fontFamily: fonts.bold, fontSize: 13.5 },
+  nextUpClock: { fontFamily: fonts.black, fontVariant: ['tabular-nums'] },
+  synopsis: { color: '#e6e6e6', fontFamily: fonts.regular, fontSize: 15.5, lineHeight: 24, textAlign: 'center' },
+  moreDetails: { color: colors.accent, fontFamily: fonts.black, fontSize: 15, marginTop: 14 },
+  tabs: { flexDirection: 'row', gap: 28, paddingHorizontal: 16, marginTop: 30, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  tab: { paddingVertical: 14 },
+  tabText: { color: colors.muted, fontFamily: fonts.black, fontSize: 15 },
+  tabTextOn: { color: '#fff' },
+  tabLine: { position: 'absolute', left: 0, bottom: -1, height: 3, backgroundColor: colors.accent },
+  seasonRow: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 16, paddingVertical: 18, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  seasonText: { flex: 1, color: '#fff', fontFamily: fonts.black, fontSize: 18 },
+  seasonCount: { color: colors.muted, fontFamily: fonts.bold, fontSize: 12.5 },
+  epList: { paddingHorizontal: 16, paddingTop: 16, gap: 14 },
+  epRow: { flexDirection: 'row', gap: 14 },
+  epThumb: { borderRadius: 4, overflow: 'hidden', backgroundColor: colors.surface2 },
+  epPlay: { position: 'absolute', top: '50%', left: '50%', marginTop: -18, marginLeft: -18, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', paddingLeft: 2 },
+  epDuration: { position: 'absolute', right: 5, bottom: 5, paddingHorizontal: 6, height: 19, borderRadius: 3, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center' },
+  epDurationText: { color: '#fff', fontFamily: fonts.regular, fontSize: 12 },
+  epTitle: { color: '#fff', fontFamily: fonts.regular, fontSize: 15.5, lineHeight: 21 },
+  epMeta: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12.5, marginTop: 6 },
+  empty: { color: colors.muted, fontFamily: fonts.regular, fontSize: 14, paddingVertical: 12 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', columnGap: 12, rowGap: 18, paddingHorizontal: 16, paddingTop: 18 },
   topBar: { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10 },
-  topRow: { height: 54, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, gap: 12 },
-  barTitle: { flex: 1, color: '#fff', fontFamily: fonts.black, fontSize: 16, textAlign: 'center' },
-  round: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
+  topRow: { height: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, gap: 10 },
+  barTitle: { flex: 1, color: '#fff', fontFamily: fonts.black, fontSize: 20 },
+  round: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
+  bottomBar: { position: 'absolute', left: 0, right: 0, bottom: 0, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 16, paddingTop: 22 },
+  primaryBtn: { flex: 1, height: 52, borderRadius: 26, backgroundColor: colors.accent, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 18 },
+  primaryText: { color: '#000', fontFamily: fonts.black, fontSize: 17 },
+  roundSave: { width: 52, height: 52, borderRadius: 26, borderWidth: 2, borderColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+  roundSaveOn: { backgroundColor: 'rgba(255,100,10,0.14)' },
+  sheetSynopsis: { color: colors.text2, fontFamily: fonts.regular, fontSize: 14.5, lineHeight: 22 },
+  infoLine: { flexDirection: 'row', gap: 12 },
+  infoLabel: { width: 110, color: colors.muted, fontFamily: fonts.bold, fontSize: 13.5 },
+  infoValue: { flex: 1, color: '#fff', fontFamily: fonts.regular, fontSize: 13.5 },
+  sheetGenres: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  genreChip: { paddingHorizontal: 12, height: 32, borderRadius: radius.pill, backgroundColor: colors.surface2, justifyContent: 'center' },
+  genreChipText: { color: '#fff', fontFamily: fonts.bold, fontSize: 12.5 },
+  seasonPick: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 14, borderRadius: radius.md },
+  seasonPickOn: { backgroundColor: 'rgba(255,100,10,0.08)' },
+  seasonPickText: { color: '#fff', fontFamily: fonts.bold, fontSize: 15 },
+  seasonPickSub: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12.5, marginTop: 2 },
 });

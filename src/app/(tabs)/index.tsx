@@ -1,19 +1,18 @@
 import { router } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { FlatList, RefreshControl, View } from 'react-native';
 import Animated, { useAnimatedScrollHandler, useSharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ContinueCard } from '@/components/ContinueCard';
+import { CONTINUE_CARD_W, ContinueCard } from '@/components/ContinueCard';
 import { Hero } from '@/components/Hero';
-import { Row, SectionHeader } from '@/components/Row';
+import { Row, SECTION_GAP, SectionHeader } from '@/components/Row';
 import { RowSkeleton, Skeleton } from '@/components/Skeleton';
 import { ErrorState } from '@/components/States';
 import { TopBar } from '@/components/TopBar';
-import { api } from '@/lib/api';
 import { useLibrary } from '@/lib/library';
 import { cap } from '@/lib/format';
 import { colors } from '@/lib/theme';
-import { useFetch } from '@/lib/useFetch';
+import { useHome } from '@/lib/queries';
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
@@ -21,7 +20,8 @@ export default function HomeScreen() {
   const onScroll = useAnimatedScrollHandler((e) => {
     scrollY.value = e.contentOffset.y;
   });
-  const { data, error, loading, reload } = useFetch(() => api.home(), []);
+  const { data, error, isPending, refetch } = useHome();
+  const loading = isPending;
   const { continueWatching } = useLibrary();
   const [refreshing, setRefreshing] = useState(false);
 
@@ -33,6 +33,13 @@ export default function HomeScreen() {
   }, [data]);
 
   const season = data?.seasonNow?.[0];
+
+  // The top slider keeps the titles it opened with for this session, so a
+  // background refresh never swaps slides while someone is looking at them.
+  // New picks show on the next launch (or after pull-to-refresh).
+  const spotlightRef = useRef(data?.spotlight);
+  if (!spotlightRef.current?.length && data?.spotlight?.length) spotlightRef.current = data.spotlight;
+  const spotlight = spotlightRef.current || [];
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
       <TopBar scrollY={scrollY} solidAfter={260} />
@@ -47,9 +54,13 @@ export default function HomeScreen() {
             progressViewOffset={insets.top + 50}
             refreshing={refreshing}
             onRefresh={() => {
+              // Pull-to-refresh always asks AniList; the spinner stays until it answers.
               setRefreshing(true);
-              reload();
-              setTimeout(() => setRefreshing(false), 900);
+              refetch()
+                .then((r) => {
+                  if (r.data?.spotlight?.length) spotlightRef.current = r.data.spotlight;
+                })
+                .finally(() => setRefreshing(false));
             }}
           />
         }
@@ -63,15 +74,18 @@ export default function HomeScreen() {
           </View>
         ) : error && !data ? (
           <View style={{ paddingTop: insets.top + 80 }}>
-            <ErrorState message={error} onRetry={reload} />
+            <ErrorState message={error.message || 'Something went wrong'} onRetry={() => refetch()} />
           </View>
         ) : data ? (
           <>
-            <Hero items={data.spotlight} />
+            <Hero items={spotlight} />
             <View style={{ marginTop: 8 }}>
               {continueWatching.length > 0 && (
-                <View style={{ marginBottom: 28 }}>
-                  <SectionHeader title="Continue Watching" sub="Pick up where you left off" onMore={() => router.push('/library')} />
+                <View style={{ marginBottom: SECTION_GAP }}>
+                  <SectionHeader
+                    title="Continue Watching"
+                    onMore={() => router.push('/library')}
+                  />
                   <FlatList
                     horizontal
                     data={continueWatching}
@@ -79,20 +93,23 @@ export default function HomeScreen() {
                     renderItem={({ item, index }) => <ContinueCard item={item} index={index} />}
                     contentContainerStyle={{ paddingHorizontal: 16, gap: 12 }}
                     showsHorizontalScrollIndicator={false}
+                    // Glides card to card instead of stopping half-way.
+                    snapToInterval={CONTINUE_CARD_W + 12}
+                    snapToAlignment="start"
+                    decelerationRate="fast"
                   />
                 </View>
               )}
-              <Row title="Top 10 Airing Right Now" sub="Updated every 30 minutes" items={data.trending} ranked more="/browse?status=airing&order=popularity" />
+              <Row title="Top 10 Airing Right Now" items={data.trending} ranked more="/browse?status=airing&order=popularity" />
               <Row
                 title={season?.season ? `${cap(season.season)} ${season.year ?? ''} Season` : 'This Season'}
-                sub="Everything airing this season"
                 items={data.seasonNow}
                 more="/browse?status=airing"
               />
-              <Row title="Dubbed in English" sub="Watch with English audio" items={dubbed} more="/browse?dub=1" />
+              <Row title="Dubbed in English" items={dubbed} more="/browse?dub=1" />
               <Row title="Highest Rated of All Time" items={data.topRated} more="/browse?order=score" />
               <Row title="Most Popular" items={data.popular} more="/browse?order=popularity" />
-              <Row title="Coming Next Season" sub="Most anticipated" items={data.upcoming} more="/browse?status=upcoming" />
+              <Row title="Coming Next Season" items={data.upcoming} more="/browse?status=upcoming" />
               <Row title="Top Anime Movies" items={data.movies} more="/browse?type=movie&order=score" />
             </View>
           </>

@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-// Loads data for a screen. Ignores results from a request the screen has moved
-// past (e.g. the user opened another title), and exposes reload() for retry
-// and pull-to-refresh.
-export function useFetch<T>(load: () => Promise<T>, deps: unknown[]) {
-  const [data, setData] = useState<T | null>(null);
+// Loads data for a screen. Supports optional initialData (e.g. from sync in-memory cache)
+// so navigation is instantaneous with zero skeleton flash.
+// Exposes reload() for retry and pull-to-refresh.
+export function useFetch<T>(load: () => Promise<T>, deps: unknown[], initialData?: T | null) {
+  const [data, setData] = useState<T | null>(initialData ?? null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!initialData);
   const token = useRef(0);
 
   const run = useCallback(() => {
     const mine = ++token.current;
-    setLoading(true);
+    if (!data) setLoading(true);
     setError(null);
     load()
       .then((d) => {

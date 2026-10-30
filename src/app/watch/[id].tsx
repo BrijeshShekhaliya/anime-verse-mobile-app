@@ -24,12 +24,15 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView, type WebViewProps } from 'react-native-webview';
 import NativeHlsPlayer, { type NativePlayerTrack, type NativeVideoLevel } from '@/components/player/NativeHlsPlayer';
+import { isAudioLanguageMatch } from '@/components/player/ExpoVideoHlsPlayer';
+import { isStreamUrlExpired } from '@/services/animerulzClient';
 import { EpisodeBadges } from '@/components/Badges';
 import { BottomSheet } from '@/components/BottomSheet';
 import { Icon } from '@/components/Icon';
 import { PressableScale } from '@/components/PressableScale';
 import { api, toFullUrl } from '@/lib/api';
 import { useLibrary } from '@/lib/library';
+import { useSettings, displayTitle } from '@/lib/settings';
 import { colors, fonts, radius } from '@/lib/theme';
 import type { Episode, EpisodesData, StreamData } from '@/lib/types';
 import { useFetch } from '@/lib/useFetch';
@@ -43,6 +46,12 @@ type FitMode = 'contain' | 'cover' | 'fill';
 type SettingsSubView = 'main' | 'audio' | 'subtitles' | 'quality' | 'speed';
 
 interface AudioTrackInfo {
+  id: number;
+  name: string;
+  lang: string;
+}
+
+interface TextTrackInfo {
   id: number;
   name: string;
   lang: string;
@@ -98,6 +107,25 @@ export default function WatchScreen() {
   // still rotating. Fullscreen presentation follows measured landscape layout.
   const isFullscreenView = isPhysicalLandscape;
 
+  const { titleLang, audioLang, quality: userQuality } = useSettings();
+
+  const defaultQualityHeight = useMemo(() => {
+    switch (userQuality) {
+      case 'highest':
+        return 1080;
+      case 'saver':
+        return 480;
+      case 'medium':
+      default:
+        return 720;
+    }
+  }, [userQuality]);
+
+  // Session continuity: remember mid-video manual overrides across episodes of this watch session
+  const sessionAudioOverrideRef = useRef<string | null>(null);
+  const sessionQualityOverrideRef = useRef<number | null>(null);
+  const preferredAudioLang = (sessionAudioOverrideRef.current || audioLang || 'hindi').toLowerCase();
+
   const [currentSeason, setCurrentSeason] = useState<number>(Math.max(1, parseInt(paramSeason || '1', 10) || 1));
   const [currentEp, setCurrentEp] = useState<number>(Math.max(1, parseInt(paramEp || '1', 10) || 1));
   const [server, setServer] = useState<ServerType>('hianime');
@@ -114,7 +142,8 @@ export default function WatchScreen() {
   const [isSwitchingAudio, setIsSwitchingAudio] = useState<boolean>(false);
 
   const [availableLevels, setAvailableLevels] = useState<VideoLevelInfo[]>([]);
-  const [selectedQualityHeight, setSelectedQualityHeight] = useState<number>(-1); // -1: Auto, 1080: 1080p, etc.
+  const [availableTextTracks, setAvailableTextTracks] = useState<TextTrackInfo[]>([]);
+  const [selectedQualityHeight, setSelectedQualityHeight] = useState<number>(defaultQualityHeight); // Default from user settings
 
   const [hlsStream, setHlsStream] = useState<StreamData | null>(null);
   const [mountedStream, setMountedStream] = useState<StreamData | null>(null);
@@ -123,6 +152,7 @@ export default function WatchScreen() {
 
   // Playback states
   const [currentTime, setCurrentTime] = useState<number>(0);
+  const [scrubbingTime, setScrubbingTime] = useState<number | null>(null);
   const [bufferedTime, setBufferedTime] = useState<number>(0);
   const [duration, setDuration] = useState<number>(1429); // fallback ~23:49
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
@@ -170,34 +200,46 @@ export default function WatchScreen() {
   const subtitlesEnabledRef = useRef<boolean>(true);
   const selectedQualityRef = useRef<number>(-1);
   const currentLangRef = useRef<'sub' | 'dub'>('sub');
+  const preferredAudioNameRef = useRef<string | null>(null);
+  const lastLoggedResolutionRef = useRef<string>('');
   const streamCacheRef = useRef<Map<string, { data: StreamData; expiresAt: number }>>(new Map());
   const inflightResolutionsRef = useRef<Map<string, Promise<StreamData>>>(new Map());
+  const playerRetryCountRef = useRef<Record<string, number>>({});
+  const prefetchedNextEpRef = useRef<string | null>(null);
 
-  // Load playback preferences together before resolving a stream. Previously
-  // the stream resolver could start before the saved server/audio mode arrived,
-  // producing avoidable cold-start requests and sometimes choosing the wrong mode.
+  // Initialize playback preferences directly from user Settings with session continuity
   useEffect(() => {
     let active = true;
+
+    // 1. Audio: Session override takes precedence over global setting
+    const activeAudio = (sessionAudioOverrideRef.current || audioLang || 'hindi').toLowerCase();
+    preferredAudioNameRef.current = activeAudio;
+    const initialMode: 'sub' | 'dub' = activeAudio === 'japanese' ? 'sub' : 'dub';
+    setCurrentLang(initialMode);
+    currentLangRef.current = initialMode;
+
+    // 2. Quality: Session override takes precedence over global setting
+    const initialHeight = sessionQualityOverrideRef.current ?? defaultQualityHeight;
+    setSelectedQualityHeight(initialHeight);
+    selectedQualityRef.current = initialHeight;
+
+    // 3. Server and Autoplay from device storage
     Promise.all([
-      AsyncStorage.getItem('animeverse_lang').catch(() => null),
       AsyncStorage.getItem(SERVER_STORAGE_KEY).catch(() => null),
       AsyncStorage.getItem(AUTOPLAY_STORAGE_KEY).catch(() => null),
-    ]).then(([savedLang, savedServer, savedAutoplay]) => {
+    ]).then(([savedServer, savedAutoplay]) => {
       if (!active) return;
-      if (savedLang === 'dub' || savedLang === 'sub') {
-        setCurrentLang(savedLang);
-        currentLangRef.current = savedLang;
-      }
       if (savedServer === 'hianime' || savedServer === 'vidrift') {
         setServer(savedServer as ServerType);
       }
       if (savedAutoplay !== null) setAutoplay(savedAutoplay === '1');
       setPlayerPreferencesLoaded(true);
     });
+
     return () => {
       active = false;
     };
-  }, []);
+  }, [audioLang, defaultQualityHeight]);
 
   // Unlock orientation sensor on unmount
   useEffect(() => {
@@ -337,13 +379,31 @@ export default function WatchScreen() {
     else changeFitMode('contain');
   }, [fitMode, changeFitMode]);
 
-  // Fetch anime detail
-  const { data: anime } = useFetch(() => api.detail(String(id)), [id]);
+  // Fetch anime detail with instant synchronous cache
+  const initialAnime = useMemo(() => api.getCachedDetail(String(id)), [id]);
+  const { data: anime } = useFetch(() => api.detail(String(id)), [id], initialAnime);
 
-  // Fetch episodes for current season
+  // Synchronous AniList ID resolution (0ms startup without waiting for network GraphQL)
+  const initialAnilistId = useMemo(() => {
+    if (typeof id === 'number' && id > 0) return id;
+    if (typeof id === 'string') {
+      if (id.startsWith('al')) {
+        const p = parseInt(id.slice(2), 10);
+        if (!isNaN(p) && p > 0) return p;
+      } else if (/^\d+$/.test(id)) {
+        const p = parseInt(id, 10);
+        if (!isNaN(p) && p > 0) return p;
+      }
+    }
+    return initialAnime?.anilistId || undefined;
+  }, [id, initialAnime?.anilistId]);
+
+  // Fetch episodes for current season with instant synchronous cache
+  const initialEps = useMemo(() => api.getCachedEpisodes(String(id), currentSeason), [id, currentSeason]);
   const { data: epData, loading: episodesLoading } = useFetch(
     () => api.episodes(String(id), currentSeason),
     [id, currentSeason],
+    initialEps,
   );
 
   const episodes = useMemo(() => epData?.episodes || [], [epData]);
@@ -384,12 +444,18 @@ export default function WatchScreen() {
       season: number,
       episode: number,
       mode: 'sub' | 'dub',
+      seasonAnilistId?: number,
       force = false,
     ) => {
-      const key = `${title}:${season}:${episode}:${mode}`;
+      const targetAnilistId =
+        seasonAnilistId ||
+        anime?.anilistId ||
+        initialAnilistId ||
+        undefined;
+      const key = `${id}:${targetAnilistId || ''}:${title}:${season}:${episode}:${mode}`;
       if (!force) {
         const hit = streamCacheRef.current.get(key);
-        if (hit && Date.now() < hit.expiresAt) {
+        if (hit && Date.now() < hit.expiresAt && !isStreamUrlExpired(hit.data.streamUrl)) {
           return hit.data;
         }
         if (hit) {
@@ -403,7 +469,7 @@ export default function WatchScreen() {
       const promise = (async () => {
         try {
           const res = await api.resolveStream(
-            { title, romaji, season, episode, mode },
+            { id, anilistId: targetAnilistId, title, romaji, season, episode, mode },
             { forceRefresh: force },
           );
           if (res && res.streamUrl) {
@@ -418,27 +484,29 @@ export default function WatchScreen() {
       inflightResolutionsRef.current.set(key, promise);
       return promise;
     },
-    [],
+    [id, anime?.anilistId],
   );
 
   // Resolve stream URL for current episode/season
   useEffect(() => {
-    if (!playerPreferencesLoaded || server !== 'hianime' || !anime?.title) return;
+    if (!playerPreferencesLoaded || server !== 'hianime' || (!anime?.title && !initialAnime?.title && !initialAnilistId)) return;
     // If the saved preference is Dub and anime-level metadata does not say
     // whether Dub exists, wait for episode metadata instead of resolving Sub
     // first and immediately issuing a second resolver request for Dub.
+    const prefersHindi = preferredAudioNameRef.current?.includes('hindi');
     const dubAvailabilityUnknown =
+      !prefersHindi &&
       currentLangRef.current === 'dub' &&
-      anime.languages?.dub !== 'full' &&
-      anime.languages?.dub !== 'partial' &&
+      anime?.languages?.dub !== 'full' &&
+      anime?.languages?.dub !== 'partial' &&
       !epData;
     if (dubAvailabilityUnknown) return;
 
     let cancelled = false;
     currentEpisodeKeyRef.current = `${currentSeason}:${currentEp}`;
 
-    // Target mode: prefer user preference if dub is available, otherwise default to sub
-    const targetMode = currentLangRef.current === 'dub' && currentEpHasDub ? 'dub' : 'sub';
+    // Target mode: prefer user preference (Hindi or English Dub), otherwise default to sub
+    const targetMode = prefersHindi || (currentLangRef.current === 'dub' && currentEpHasDub) ? 'dub' : 'sub';
     if (targetMode !== currentLangRef.current) {
       setCurrentLang(targetMode);
       currentLangRef.current = targetMode;
@@ -447,12 +515,28 @@ export default function WatchScreen() {
     setResolvingHls(true);
     setHlsError(null);
 
+    const currentSeasonObj = epData?.seasons?.find((s) => s.season_number === currentSeason);
+    const seasonAnilistId =
+      currentSeasonObj?.anilistId ||
+      (currentSeasonObj?.id && !isNaN(Number(currentSeasonObj.id)) ? Number(currentSeasonObj.id) : undefined) ||
+      anime?.anilistId ||
+      initialAnilistId ||
+      undefined;
+    const targetTitle =
+      (currentSeasonObj?.title && !/^Season\s+\d+$/i.test(currentSeasonObj.title.trim())
+        ? currentSeasonObj.title
+        : null) ||
+      anime?.title ||
+      initialAnime?.title ||
+      '';
+
     resolveStreamWithCache(
-      anime.title,
-      anime.titleRomaji || undefined,
+      targetTitle,
+      anime?.titleRomaji || initialAnime?.titleRomaji || undefined,
       currentSeason,
       currentEp,
       targetMode,
+      seasonAnilistId,
     )
       .then((res) => {
         if (cancelled || currentEpisodeKeyRef.current !== `${currentSeason}:${currentEp}`) return;
@@ -467,12 +551,12 @@ export default function WatchScreen() {
           setMountedStream(res);
           setHlsError(null);
         } else {
-          setHlsError('Stream unavailable on HiAnime');
+          setHlsError('Stream currently unavailable. Tap to retry or switch server.');
         }
       })
       .catch((err) => {
         if (cancelled || currentEpisodeKeyRef.current !== `${currentSeason}:${currentEp}`) return;
-        setHlsError(err?.message || 'Failed to resolve HiAnime stream');
+        setHlsError('Stream currently unavailable. Tap to retry or switch server.');
       })
       .finally(() => {
         if (!cancelled && currentEpisodeKeyRef.current === `${currentSeason}:${currentEp}`) {
@@ -539,7 +623,6 @@ export default function WatchScreen() {
   const seekNativePlayer = useCallback((time: number) => {
     const target = Math.max(0, time);
     nativeSeekTargetRef.current = target;
-    setIsBuffering(true);
     nativeVideoRef.current?.seek?.(target);
     nativePlayerTimeRef.current = target;
     currentTimeRef.current = target;
@@ -603,7 +686,13 @@ export default function WatchScreen() {
         setNativeAudioTrackId(selection.trackId);
         if (server === 'vidrift') sendPlayerCommand(`if(window._hls)window._hls.audioTrack=${selection.trackId};`);
         const track = availableAudioTracks.find((t) => t.id === selection.trackId);
-        if (track) showBadge(`Audio: ${track.name || track.lang}`);
+        if (track) {
+          showBadge(`Audio: ${track.name || track.lang}`);
+          const trackName = (track.name || track.lang || '').toLowerCase();
+          preferredAudioNameRef.current = trackName;
+          sessionAudioOverrideRef.current = trackName;
+          AsyncStorage.setItem('@animeverse:preferred_audio_name', trackName).catch(() => {});
+        }
         return;
       }
 
@@ -659,6 +748,8 @@ export default function WatchScreen() {
 
         setCurrentLang(targetMode);
         currentLangRef.current = targetMode;
+        sessionAudioOverrideRef.current = targetMode === 'dub' ? 'english' : 'japanese';
+        preferredAudioNameRef.current = targetMode === 'dub' ? 'english' : 'japanese';
         setHlsStream(resolved);
         try {
           AsyncStorage.setItem('animeverse_lang', targetMode).catch(() => {});
@@ -687,6 +778,8 @@ export default function WatchScreen() {
   const handleSelectQuality = useCallback((targetHeight: number) => {
     setSelectedQualityHeight(targetHeight);
     selectedQualityRef.current = targetHeight;
+    sessionQualityOverrideRef.current = targetHeight;
+    console.log(`[Player Quality] User switched quality to: ${targetHeight === -1 ? 'Auto' : `${targetHeight}p`}`);
     if (server === 'vidrift') sendPlayerCommand(`if(window._hls)window._hls.currentLevel=${targetHeight};`);
     // Native HLS uses resolution-based track selection; the native engine chooses
     // the closest available resolution when exact variants differ.
@@ -714,47 +807,68 @@ export default function WatchScreen() {
       setResumeAfterSourceChange(null);
       nativePlayerTimeRef.current = 0;
       currentTimeRef.current = 0;
-      isPlayingRef.current = false;
+      isPlayingRef.current = true;
       setHlsError(null);
       setResolvingHls(true);
       setIsBuffering(true);
       setCurrentEp(nextEp);
       setCurrentTime(0);
       setBufferedTime(0);
-      setIsPlaying(false);
+      setIsPlaying(true);
       resetHideTimer();
     }
   }, [currentEp, currentSeason, episodes, resetHideTimer]);
 
-  // Double-tap & Tap handler (YouTube / MX Player style)
+  // Scrubber layout measurement reference for 100% accurate pageX drag calculation
+  const scrubberAreaRef = useRef<any>(null);
+  const scrubberLayoutRef = useRef<{ pageX: number; width: number }>({ pageX: 0, width: 1 });
+
+  // Instant Double-tap & Tap handler (YouTube / MX Player style with 0ms latency)
   const handlePlayerAreaPress = useCallback(
     (e: GestureResponderEvent) => {
       const now = Date.now();
       const touchX = e.nativeEvent.locationX;
       const barW = progressBarWidthRef.current || width;
 
+      // When controls are already visible, ANY single tap anywhere hides controls IMMEDIATELY (0ms!)
+      if (controlsVisible) {
+        setControlsVisible(false);
+        if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
+        lastTapRef.current = { time: 0, x: 0 };
+        return;
+      }
+
+      // When controls are hidden:
+      // Center zone (28% to 72% width) reveals controls INSTANTLY (0ms!) without any double-tap delay
+      const isLeftWing = touchX < barW * 0.28;
+      const isRightWing = touchX > barW * 0.72;
+
+      if (!isLeftWing && !isRightWing) {
+        resetHideTimer();
+        lastTapRef.current = { time: 0, x: 0 };
+        return;
+      }
+
+      // On left/right wings: check for double tap
       if (now - lastTapRef.current.time < 300) {
-        // Double Tap Action
-        if (touchX < barW * 0.35) {
+        if (isLeftWing) {
           handleRewind10();
           showBadge('-10s');
-        } else if (touchX > barW * 0.65) {
+        } else if (isRightWing) {
           handleForward10();
           showBadge('+10s');
-        } else {
-          handleTogglePlay();
         }
         lastTapRef.current = { time: 0, x: 0 };
       } else {
         lastTapRef.current = { time: now, x: touchX };
         setTimeout(() => {
           if (lastTapRef.current.time === now) {
-            toggleControls();
+            resetHideTimer();
           }
-        }, 280);
+        }, 220);
       }
     },
-    [width, handleRewind10, handleForward10, handleTogglePlay, toggleControls, showBadge],
+    [controlsVisible, width, handleRewind10, handleForward10, resetHideTimer, showBadge],
   );
 
   // Two-Finger Pinch-to-Zoom Gesture (Dynamic Fit / Fill like MX Player & YouTube)
@@ -787,16 +901,49 @@ export default function WatchScreen() {
     initialPinchDistRef.current = null;
   }, []);
 
-  // Scrub bar touch & drag handler
-  const handleScrubberPress = useCallback(
-    (e: GestureResponderEvent) => {
-      const touchX = e.nativeEvent.locationX;
-      const barW = progressBarWidthRef.current || width;
-      const ratio = Math.max(0, Math.min(1, touchX / barW));
-      handleSeek(ratio * duration);
+  // Rock-solid 60 FPS Scrubber with pageX absolute geometry and time preview bubble
+  const updateScrubberFromPageX = useCallback(
+    (pageX: number, commit = false) => {
+      const { pageX: startX, width: barW } = scrubberLayoutRef.current;
+      const effectiveW = Math.max(1, barW);
+      const relativeX = pageX - startX;
+      const ratio = Math.max(0, Math.min(1, relativeX / effectiveW));
+      const targetTime = ratio * duration;
+      if (commit) {
+        setScrubbingTime(null);
+        handleSeek(targetTime);
+      } else {
+        setScrubbingTime(targetTime);
+        resetHideTimer();
+      }
     },
-    [width, duration, handleSeek],
+    [duration, handleSeek, resetHideTimer],
   );
+
+  const handleScrubberGrant = useCallback(
+    (e: GestureResponderEvent) => {
+      updateScrubberFromPageX(e.nativeEvent.pageX, false);
+    },
+    [updateScrubberFromPageX],
+  );
+
+  const handleScrubberMove = useCallback(
+    (e: GestureResponderEvent) => {
+      updateScrubberFromPageX(e.nativeEvent.pageX, false);
+    },
+    [updateScrubberFromPageX],
+  );
+
+  const handleScrubberRelease = useCallback(
+    (e: GestureResponderEvent) => {
+      updateScrubberFromPageX(e.nativeEvent.pageX, true);
+    },
+    [updateScrubberFromPageX],
+  );
+
+  const handleScrubberTerminate = useCallback(() => {
+    setScrubbingTime(null);
+  }, []);
 
   // Build VidRift embed URL (fallback server)
   const vidriftEmbedUrl = useMemo(() => {
@@ -835,15 +982,65 @@ export default function WatchScreen() {
     if (server !== 'hianime' || !mountedStream?.streamUrl || !nativeStreamKey) return;
     if (nativeSourceKeyRef.current === nativeStreamKey) return;
     nativeSourceKeyRef.current = nativeStreamKey;
-    setAvailableAudioTracks([]);
-    setAvailableLevels([]);
-    setNativeAudioTrackId(null);
+
+    // Immediately seed with all audio tracks discovered by the resolver (Hindi, English, etc.)
+    let initialAudioId = 0;
+    if (mountedStream.audioTracks && mountedStream.audioTracks.length > 0) {
+      const seeded = mountedStream.audioTracks.map((track, idx) => ({
+        id: idx,
+        name: track.name || track.language || `Audio ${idx + 1}`,
+        lang: track.language || '',
+      }));
+      setAvailableAudioTracks(seeded);
+      setHasInBandAlternateAudio(seeded.length > 1);
+
+      const pref = preferredAudioNameRef.current;
+      if (pref && seeded.length > 1) {
+        const match = seeded.find((t) => isAudioLanguageMatch(t.name, t.lang, pref));
+        if (match) {
+          initialAudioId = match.id;
+        }
+      }
+    } else {
+      setAvailableAudioTracks([]);
+      setHasInBandAlternateAudio(false);
+    }
+
+    // Immediately activate the preferred audio track (e.g. Hindi) on frame 1 without resetting to Japanese!
+    setCurrentAudioTrackId(initialAudioId);
+    setNativeAudioTrackId(initialAudioId);
+
+    // Immediately seed video qualities from resolver manifest if available
+    if (mountedStream.videoLevels && mountedStream.videoLevels.length > 0) {
+      setAvailableLevels(mountedStream.videoLevels);
+    } else {
+      setAvailableLevels([]);
+    }
+
+    // Immediately seed subtitles from stream if available
+    if (mountedStream.subtitles && mountedStream.subtitles.length > 0) {
+      setAvailableTextTracks(
+        mountedStream.subtitles.map((sub, idx) => ({
+          id: idx,
+          name: sub.label || sub.lang || `Subtitle ${idx + 1}`,
+          lang: sub.lang || '',
+        })),
+      );
+    } else {
+      setAvailableTextTracks([]);
+    }
+
     setNativeTextTrackId(null);
-    setHasInBandAlternateAudio(false);
-    setCurrentAudioTrackId(0);
     setIsBuffering(true);
     setHlsError(null);
-  }, [server, mountedStream?.streamUrl, nativeStreamKey]);
+  }, [
+    server,
+    mountedStream?.streamUrl,
+    mountedStream?.audioTracks,
+    mountedStream?.videoLevels,
+    mountedStream?.subtitles,
+    nativeStreamKey,
+  ]);
 
   const onNativePlayerLoad = useCallback((loadedDuration: number) => {
     if (loadedDuration > 0) setDuration(loadedDuration);
@@ -863,36 +1060,101 @@ export default function WatchScreen() {
     setResolvingHls(false);
   }, [resumeAfterSourceChange]);
 
-  const onNativePlayerProgress = useCallback((time: number, loadedDuration: number, playable: number) => {
-    nativePlayerTimeRef.current = time;
-    currentTimeRef.current = time;
-    setCurrentTime(time);
-    const seekTarget = nativeSeekTargetRef.current;
-    if (seekTarget !== null && Math.abs(time - seekTarget) <= 1.5) {
-      nativeSeekTargetRef.current = null;
-      setIsBuffering(false);
-    }
-    if (loadedDuration > 0) setDuration(loadedDuration);
-    setBufferedTime(playable);
-  }, []);
+  const onNativePlayerProgress = useCallback(
+    (time: number, loadedDuration: number, playable: number, videoWidth?: number, videoHeight?: number) => {
+      nativePlayerTimeRef.current = time;
+      currentTimeRef.current = time;
+      setCurrentTime(time);
+      const seekTarget = nativeSeekTargetRef.current;
+      if (seekTarget !== null && Math.abs(time - seekTarget) <= 1.5) {
+        nativeSeekTargetRef.current = null;
+        setIsBuffering(false);
+      }
+      if (loadedDuration > 0) setDuration(loadedDuration);
+      setBufferedTime(playable);
+
+      if (videoHeight && videoHeight > 0) {
+        const resKey = `${videoWidth || 0}x${videoHeight}`;
+        if (resKey !== lastLoggedResolutionRef.current) {
+          lastLoggedResolutionRef.current = resKey;
+          console.log(`[Native Media3 Stream] Active rendering resolution: ${resKey} (${videoHeight}p)`);
+        }
+      }
+
+      // Crunchyroll-Style Background Preload: pre-resolve next episode stream when current episode is >= 70% or > 3 mins
+      if (loadedDuration > 0 && time > 0) {
+        const ratio = time / loadedDuration;
+        const nextEp = currentEp + 1;
+        const total = epData?.episodes?.length || anime?.episodes || anime?.episodeCount || 0;
+        const nextKey = `${currentSeason}:${nextEp}`;
+        if ((ratio >= 0.7 || time >= 180) && nextEp <= total && prefetchedNextEpRef.current !== nextKey) {
+          prefetchedNextEpRef.current = nextKey;
+          const currentSeasonObj = epData?.seasons?.find((s) => s.season_number === currentSeason);
+          const seasonAnilistId =
+            currentSeasonObj?.anilistId ||
+            (currentSeasonObj?.id && !isNaN(Number(currentSeasonObj.id)) ? Number(currentSeasonObj.id) : undefined) ||
+            anime?.anilistId ||
+            undefined;
+          const targetTitle =
+            (currentSeasonObj?.title && !/^Season\s+\d+$/i.test(currentSeasonObj.title.trim())
+              ? currentSeasonObj.title
+              : null) ||
+            anime?.title ||
+            '';
+          resolveStreamWithCache(
+            targetTitle,
+            anime?.titleRomaji || undefined,
+            currentSeason,
+            nextEp,
+            currentLangRef.current,
+            seasonAnilistId,
+            false,
+          ).catch(() => {});
+        }
+      }
+    },
+    [currentEp, currentSeason, epData, anime, resolveStreamWithCache],
+  );
 
   const onNativePlayerAudioTracks = useCallback((tracks: NativePlayerTrack[]) => {
     const audio = tracks.filter((track) => track.type === 'audio');
     setAvailableAudioTracks(audio.map(({ id, name, lang }) => ({ id, name, lang })));
     setHasInBandAlternateAudio(audio.length > 1);
-    if (audio.length > 0 && nativeAudioTrackId === null) {
-      const wanted = audio.find((track) => track.name.toLowerCase().includes(currentLangRef.current === 'dub' ? 'english' : 'japanese'));
-      const initial = wanted || audio[0];
-      setNativeAudioTrackId(initial.id);
-      setCurrentAudioTrackId(initial.id);
+    if (audio.length > 0) {
+      const activeTrack = audio.find((t) => t.selected);
+      const pref = preferredAudioNameRef.current;
+      const match = pref ? audio.find((t) => isAudioLanguageMatch(t.name, t.lang, pref)) : null;
+
+      // Smart Fallback (Catch 1):
+      // If preferred audio (e.g. Hindi) is NOT available in this anime,
+      // gracefully fall back to active track or Japanese Sub
+      const wanted =
+        match ||
+        activeTrack ||
+        audio.find((track) =>
+          isAudioLanguageMatch(track.name, track.lang, currentLangRef.current === 'dub' ? 'english' : 'japanese'),
+        ) ||
+        audio[0];
+
+      const initial = wanted;
+      if (initial) {
+        setNativeAudioTrackId(initial.id);
+        setCurrentAudioTrackId(initial.id);
+        if (pref && !match && (pref.includes('hindi') || pref === 'hin' || pref === 'hi')) {
+          showBadge(`Audio: ${initial.name} (Hindi not available for this anime)`);
+        }
+      }
     }
-  }, [nativeAudioTrackId]);
+  }, [showBadge]);
 
   const onNativePlayerTextTracks = useCallback((tracks: NativePlayerTrack[]) => {
     const text = tracks.filter((track) => track.type === 'text');
-    if (text.length > 0 && nativeTextTrackId === null) {
-      const english = text.find((track) => track.name.toLowerCase().includes('english'));
-      setNativeTextTrackId((english || text[0]).id);
+    if (text.length > 0) {
+      setAvailableTextTracks(text.map(({ id, name, lang }) => ({ id, name, lang })));
+      if (nativeTextTrackId === null) {
+        const english = text.find((track) => track.name.toLowerCase().includes('english'));
+        setNativeTextTrackId((english || text[0]).id);
+      }
     }
   }, [nativeTextTrackId]);
 
@@ -903,20 +1165,96 @@ export default function WatchScreen() {
       width: track.width,
       bitrate: track.bitrate,
     }));
+    console.log(
+      `[Native Media3 Tracks] Video quality levels available (${levels.length}):`,
+      levels.map((l) => `${l.height}p`).join(', '),
+    );
     setAvailableLevels(levels);
     const targetHeight = selectedQualityRef.current;
-    if (server === 'hianime' && targetHeight > 0) {
+    if (targetHeight > 0 && levels.length > 0) {
       const match = levels.find((level) => level.height === targetHeight);
-      setSelectedQualityHeight(match ? targetHeight : -1);
-      selectedQualityRef.current = match ? targetHeight : -1;
+      if (match) {
+        setSelectedQualityHeight(targetHeight);
+        selectedQualityRef.current = targetHeight;
+      } else {
+        // Fallback: If preferred resolution (e.g. 1080p) is not available,
+        // pick the highest resolution available within target (e.g. 720p or 480p)
+        const bestAvailable = levels.find((l) => l.height <= targetHeight) || levels[0];
+        if (bestAvailable) {
+          setSelectedQualityHeight(bestAvailable.height);
+          selectedQualityRef.current = bestAvailable.height;
+          showBadge(`Quality: ${bestAvailable.height}p (Max available)`);
+        }
+      }
     }
-  }, [server]);
+  }, [showBadge]);
 
   const onNativePlayerError = useCallback((message: string) => {
+    const epKey = `${currentSeason}:${currentEp}`;
+    const retries = playerRetryCountRef.current[epKey] || 0;
+
+    // Auto-recovery: If stream failed (e.g. token expired on replay or cached link revoked),
+    // clear stale caches and fetch fresh signed stream URL automatically
+    if (retries < 2) {
+      playerRetryCountRef.current[epKey] = retries + 1;
+      console.log(`[Player Recovery] Native error encountered on episode ${epKey}. Retrying with fresh stream (attempt ${retries + 1})...`);
+      api.clearStreamCache({
+        id,
+        anilistId: anime?.anilistId || undefined,
+        title: anime?.title || '',
+        season: currentSeason,
+        episode: currentEp,
+        mode: currentLangRef.current,
+      });
+      streamCacheRef.current.clear();
+      setIsBuffering(true);
+      setResolvingHls(true);
+      setHlsError(null);
+
+      const currentSeasonObj = epData?.seasons?.find((s) => s.season_number === currentSeason);
+      const seasonAnilistId =
+        currentSeasonObj?.anilistId ||
+        (currentSeasonObj?.id && !isNaN(Number(currentSeasonObj.id)) ? Number(currentSeasonObj.id) : undefined) ||
+        anime?.anilistId ||
+        undefined;
+      const targetTitle =
+        (currentSeasonObj?.title && !/^Season\s+\d+$/i.test(currentSeasonObj.title.trim())
+          ? currentSeasonObj.title
+          : null) ||
+        anime?.title ||
+        '';
+
+      resolveStreamWithCache(
+        targetTitle,
+        anime?.titleRomaji || undefined,
+        currentSeason,
+        currentEp,
+        currentLangRef.current,
+        seasonAnilistId,
+        true, // force = true!
+      )
+        .then((res) => {
+          if (res && res.streamUrl) {
+            setHlsStream(res);
+            setMountedStream(res);
+            setHlsError(null);
+          } else {
+            setHlsError('Stream currently unavailable. Tap to retry or switch server.');
+          }
+        })
+        .catch(() => {
+          setHlsError('Stream currently unavailable. Tap to retry or switch server.');
+        })
+        .finally(() => {
+          setResolvingHls(false);
+        });
+      return;
+    }
+
     setIsBuffering(false);
     setHlsError(message || 'Unable to play this stream');
     setResolvingHls(false);
-  }, []);
+  }, [currentSeason, currentEp, id, anime, epData, resolveStreamWithCache]);
 
   const handleVidRiftMessage = useCallback((e: { nativeEvent: { data: string } }) => {
     try {
@@ -971,7 +1309,8 @@ export default function WatchScreen() {
     }
   }, [disliked, liked]);
 
-  const progressRatio = duration > 0 ? Math.min(1, Math.max(0, currentTime / duration)) : 0;
+  const displayTime = scrubbingTime !== null ? scrubbingTime : currentTime;
+  const progressRatio = duration > 0 ? Math.min(1, Math.max(0, displayTime / duration)) : 0;
   const bufferedRatio = duration > 0 ? Math.min(1, Math.max(0, bufferedTime / duration)) : 0;
 
   // Active audio track name
@@ -982,6 +1321,15 @@ export default function WatchScreen() {
     }
     return currentLang === 'dub' ? 'English (Dub)' : 'Japanese (Sub)';
   }, [hasInBandAlternateAudio, availableAudioTracks, currentAudioTrackId, currentLang]);
+
+  // Active subtitle track name (dynamic)
+  const currentSubtitleName = useMemo(() => {
+    if (!subtitlesEnabled) return 'Off';
+    const track = availableTextTracks.find((t) => t.id === nativeTextTrackId);
+    if (track) return track.name || track.lang;
+    if (availableTextTracks.length > 0) return availableTextTracks[0].name || availableTextTracks[0].lang;
+    return 'On';
+  }, [subtitlesEnabled, availableTextTracks, nativeTextTrackId]);
 
   return (
     <View
@@ -1009,13 +1357,14 @@ export default function WatchScreen() {
           mountedStream?.streamUrl ? (
             <NativeHlsPlayer
               ref={nativeVideoRef}
-              uri={toFullUrl(mountedStream.streamUrl)}
+              uri={mountedStream.rawMasterUrl || toFullUrl(mountedStream.streamUrl)}
               referer={mountedStream.referer}
               paused={!isPlaying || resolvingHls}
               playbackRate={playbackSpeed}
               fitMode={fitMode}
               selectedQualityHeight={selectedQualityHeight}
               selectedAudioTrackId={nativeAudioTrackId}
+              preferredAudioLanguage={preferredAudioLang}
               selectedTextTrackId={nativeTextTrackId}
               subtitlesEnabled={subtitlesEnabled}
               subtitles={nativeSubtitles}
@@ -1057,7 +1406,7 @@ export default function WatchScreen() {
         {server === 'hianime' && resolvingHls && (
           <View style={[StyleSheet.absoluteFill, styles.playerPlaceholder]} pointerEvents="none">
             <ActivityIndicator size="large" color={colors.accent} />
-            <Text style={styles.placeholderText}>Connecting to HiAnime Stream...</Text>
+            <Text style={styles.placeholderText}>Loading Stream...</Text>
           </View>
         )}
 
@@ -1133,7 +1482,7 @@ export default function WatchScreen() {
                   </PressableScale>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.landscapeSeriesTitle} numberOfLines={1}>
-                      {anime?.title || 'AnimeVerse'}
+                      {displayTitle(anime, titleLang) || anime?.title || 'AnimeVerse'}
                     </Text>
                     <Text style={styles.landscapeEpTitle} numberOfLines={1}>
                       E{currentEp} – {currentEpisodeObj?.name || `Episode ${currentEp}`}
@@ -1240,28 +1589,57 @@ export default function WatchScreen() {
               pointerEvents="box-none"
             >
               <View style={styles.timecodeRow}>
-                <Text style={styles.timecodeText}>{formatDuration(currentTime)}</Text>
+                <Text style={styles.timecodeText}>{formatDuration(displayTime)}</Text>
                 <Text style={styles.timecodeText}>{formatDuration(duration)}</Text>
               </View>
 
               {/* Scrubber Touch & Drag Area with Preload / Buffer Bar */}
               <View
+                ref={scrubberAreaRef}
                 style={styles.scrubberTouchArea}
+                onLayout={(e: LayoutChangeEvent) => {
+                  const w = e.nativeEvent.layout.width;
+                  if (w > 0) scrubberLayoutRef.current.width = w;
+                  scrubberAreaRef.current?.measure((_x: number, _y: number, measuredWidth: number, _h: number, pageX: number) => {
+                    if (measuredWidth > 0) {
+                      scrubberLayoutRef.current = { pageX, width: measuredWidth };
+                    }
+                  });
+                }}
                 onStartShouldSetResponder={() => true}
                 onMoveShouldSetResponder={() => true}
-                onResponderGrant={handleScrubberPress}
-                onResponderMove={handleScrubberPress}
+                onResponderGrant={handleScrubberGrant}
+                onResponderMove={handleScrubberMove}
+                onResponderRelease={handleScrubberRelease}
+                onResponderTerminate={handleScrubberTerminate}
               >
-                <View style={styles.scrubberTrack}>
+                {/* Floating Preview Time Bubble when Scrubbing */}
+                {scrubbingTime !== null && (
+                  <View
+                    pointerEvents="none"
+                    style={[
+                      styles.scrubBubble,
+                      {
+                        left: `${Math.max(0, Math.min(1, scrubbingTime / Math.max(1, duration))) * 100}%`,
+                      },
+                    ]}
+                  >
+                    <Text style={styles.scrubBubbleText}>{formatDuration(scrubbingTime)}</Text>
+                  </View>
+                )}
+
+                <View style={styles.scrubberTrack} pointerEvents="none">
                   {/* Preloaded / Buffered Bar */}
-                  <View style={[styles.scrubberBuffered, { width: `${bufferedRatio * 100}%` }]} />
+                  <View style={[styles.scrubberBuffered, { width: `${bufferedRatio * 100}%` }]} pointerEvents="none" />
                   {/* Played Progress Bar */}
-                  <View style={[styles.scrubberProgress, { width: `${progressRatio * 100}%` }]} />
+                  <View style={[styles.scrubberProgress, { width: `${progressRatio * 100}%` }]} pointerEvents="none" />
                 </View>
                 {/* Thumb Indicator */}
                 <View
+                  pointerEvents="none"
                   style={[
                     styles.scrubberThumb,
+                    scrubbingTime !== null && styles.scrubberThumbActive,
                     {
                       left: `${progressRatio * 100}%`,
                     },
@@ -1324,7 +1702,7 @@ export default function WatchScreen() {
                   <PressableScale onPress={() => setSettingsSubView('subtitles')} style={styles.settingsRow}>
                     <Text style={styles.settingsLabel}>Subtitles/CC</Text>
                     <View style={styles.settingsValueWrap}>
-                      <Text style={styles.settingsValueText}>{subtitlesEnabled ? 'English' : 'None'}</Text>
+                      <Text style={styles.settingsValueText}>{currentSubtitleName}</Text>
                       <Icon name="right" size={16} color={colors.muted} />
                     </View>
                   </PressableScale>
@@ -1368,7 +1746,7 @@ export default function WatchScreen() {
                     <Text style={styles.settingsLabel}>Server Source</Text>
                     <View style={styles.settingsValueWrap}>
                       <Text style={[styles.settingsValueText, { color: colors.accent }]}>
-                        {server === 'vidrift' ? 'VidRift' : 'HiAnime (Native)'}
+                        {server === 'vidrift' ? 'VidRift (Web)' : 'Native Player (Direct)'}
                       </Text>
                       <Icon name="right" size={16} color={colors.muted} />
                     </View>
@@ -1388,7 +1766,7 @@ export default function WatchScreen() {
                     onPress={() => {
                       Alert.alert('Report a Problem', 'Playback issue reported. Switch server to restore stream?', [
                         {
-                          text: 'Switch to ' + (server === 'vidrift' ? 'HiAnime' : 'VidRift'),
+                          text: 'Switch to ' + (server === 'vidrift' ? 'Native Player' : 'VidRift'),
                           onPress: () => {
                             const next = server === 'vidrift' ? 'hianime' : 'vidrift';
                             setServer(next);
@@ -1507,30 +1885,51 @@ export default function WatchScreen() {
                 <ScrollView showsVerticalScrollIndicator={false}>
                   <PressableScale
                     onPress={() => {
-                      handleToggleSubtitles(true);
-                      setSettingsSubView('main');
-                    }}
-                    style={styles.settingsRow}
-                  >
-                    <Text style={[styles.settingsLabel, subtitlesEnabled && { color: colors.accent }]}>English</Text>
-                    {subtitlesEnabled && <Icon name="check" size={20} color={colors.accent} />}
-                  </PressableScale>
-
-                  <PressableScale
-                    onPress={() => {
                       handleToggleSubtitles(false);
                       setSettingsSubView('main');
                     }}
                     style={styles.settingsRow}
                   >
-                    <Text style={[styles.settingsLabel, !subtitlesEnabled && { color: colors.accent }]}>None</Text>
+                    <Text style={[styles.settingsLabel, !subtitlesEnabled && { color: colors.accent }]}>Off</Text>
                     {!subtitlesEnabled && <Icon name="check" size={20} color={colors.accent} />}
                   </PressableScale>
+
+                  {availableTextTracks.length > 0 ? (
+                    availableTextTracks.map((track) => {
+                      const isSel =
+                        subtitlesEnabled &&
+                        (nativeTextTrackId === track.id || (nativeTextTrackId === null && track.id === 0));
+                      return (
+                        <PressableScale
+                          key={track.id}
+                          onPress={() => {
+                            setSubtitlesEnabled(true);
+                            setNativeTextTrackId(track.id);
+                            subtitlesEnabledRef.current = true;
+                            showBadge(`Subtitles: ${track.name || track.lang}`);
+                            setSettingsSubView('main');
+                          }}
+                          style={styles.settingsRow}
+                        >
+                          <Text style={[styles.settingsLabel, isSel && { color: colors.accent }]}>
+                            {track.name || track.lang}
+                          </Text>
+                          {isSel && <Icon name="check" size={20} color={colors.accent} />}
+                        </PressableScale>
+                      );
+                    })
+                  ) : (
+                    <View style={{ padding: 16 }}>
+                      <Text style={{ color: colors.muted, fontFamily: fonts.regular, fontSize: 13 }}>
+                        No soft subtitles in this stream (video is hardsubbed or multi-audio dubbed)
+                      </Text>
+                    </View>
+                  )}
                 </ScrollView>
               </>
             )}
 
-            {/* Quality Sub-View (Dynamically switches stream quality in Hls.js!) */}
+            {/* Quality Sub-View (Dynamically switches stream quality!) */}
             {settingsSubView === 'quality' && (
               <>
                 <View style={styles.settingsHeader}>
@@ -1556,28 +1955,34 @@ export default function WatchScreen() {
                   </PressableScale>
 
                   {/* Available stream resolutions */}
-                  {(availableLevels.length > 0
-                    ? availableLevels
-                        .map((l) => l.height)
-                        .filter((v, i, a) => a.indexOf(v) === i)
-                        .sort((a, b) => b - a)
-                    : [1080, 720, 480, 360]
-                  ).map((h) => {
-                    const isSel = selectedQualityHeight === h;
-                    return (
-                      <PressableScale
-                        key={h}
-                        onPress={() => {
-                          handleSelectQuality(h);
-                          setSettingsSubView('main');
-                        }}
-                        style={styles.settingsRow}
-                      >
-                        <Text style={[styles.settingsLabel, isSel && { color: colors.accent }]}>{h}p</Text>
-                        {isSel && <Icon name="check" size={20} color={colors.accent} />}
-                      </PressableScale>
-                    );
-                  })}
+                  {availableLevels.length > 0 ? (
+                    availableLevels
+                      .map((l) => l.height)
+                      .filter((v, i, a) => a.indexOf(v) === i)
+                      .sort((a, b) => b - a)
+                      .map((h) => {
+                        const isSel = selectedQualityHeight === h;
+                        return (
+                          <PressableScale
+                            key={h}
+                            onPress={() => {
+                              handleSelectQuality(h);
+                              setSettingsSubView('main');
+                            }}
+                            style={styles.settingsRow}
+                          >
+                            <Text style={[styles.settingsLabel, isSel && { color: colors.accent }]}>{h}p</Text>
+                            {isSel && <Icon name="check" size={20} color={colors.accent} />}
+                          </PressableScale>
+                        );
+                      })
+                  ) : (
+                    <View style={{ padding: 16 }}>
+                      <Text style={{ color: colors.muted, fontFamily: fonts.regular, fontSize: 13 }}>
+                        Detecting stream resolutions...
+                      </Text>
+                    </View>
+                  )}
                 </ScrollView>
               </>
             )}
@@ -1626,7 +2031,7 @@ export default function WatchScreen() {
           showsVerticalScrollIndicator={false}
         >
           {/* Series Name in orange */}
-          <Text style={styles.seriesName}>{anime?.title || 'Anime'}</Text>
+          <Text style={styles.seriesName}>{displayTitle(anime, titleLang) || anime?.title || 'Anime'}</Text>
 
           {/* Episode Title (Big bold white text) */}
           <Text style={styles.episodeTitle}>
@@ -1639,14 +2044,105 @@ export default function WatchScreen() {
               <Text style={styles.ageBadgeText}>{anime?.contentRating || 'U/A 16+'}</Text>
             </View>
             <Text style={styles.metaDot}>•</Text>
-            <Text style={styles.audioModesText}>
-              {hasInBandAlternateAudio
-                ? `${availableAudioTracks.length} Audios`
-                : currentEpHasDub
-                ? 'Dub | Sub'
-                : 'Sub'}
-            </Text>
+            <PressableScale
+              onPress={() => {
+                setSettingsSubView('audio');
+                setSettingsOpen(true);
+              }}
+              style={styles.audioModesBadge}
+            >
+              <Text style={[styles.audioModesText, hasInBandAlternateAudio && { color: colors.accent }]}>
+                {resolvingHls || !mountedStream
+                  ? 'Loading Audio ▾'
+                  : hasInBandAlternateAudio
+                  ? `${availableAudioTracks.length} Audios ▾`
+                  : currentEpHasDub
+                  ? 'Dub | Sub ▾'
+                  : 'Sub ▾'}
+              </Text>
+            </PressableScale>
           </View>
+
+          {/* Quick Audio Language Selector */}
+          {resolvingHls || !mountedStream ? (
+            <View style={styles.quickAudioSection}>
+              <View style={styles.quickAudioHeader}>
+                <Icon name="mic" size={13} color={colors.accent} />
+                <Text style={styles.quickAudioLabel}>AUDIO LANGUAGE</Text>
+              </View>
+              <View style={styles.quickAudioList}>
+                <View style={[styles.quickAudioChip, { opacity: 0.6 }]}>
+                  <Text style={styles.quickAudioChipText}>
+                    {preferredAudioNameRef.current?.includes('hindi')
+                      ? '🇮🇳 Hindi (Connecting...)'
+                      : 'Detecting audio...'}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          ) : hasInBandAlternateAudio && availableAudioTracks.length > 0 ? (
+            <View style={styles.quickAudioSection}>
+              <View style={styles.quickAudioHeader}>
+                <Icon name="mic" size={13} color={colors.accent} />
+                <Text style={styles.quickAudioLabel}>AUDIO LANGUAGE</Text>
+              </View>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.quickAudioList}
+              >
+                {availableAudioTracks.map((track) => {
+                  const isSel = currentAudioTrackId === track.id;
+                  const rawName = track.name || track.lang || `Track ${track.id + 1}`;
+                  const flag =
+                    rawName.toLowerCase().includes('hindi') ? '🇮🇳 ' :
+                    rawName.toLowerCase().includes('japan') ? '🇯🇵 ' :
+                    rawName.toLowerCase().includes('english') ? '🇬🇧 ' :
+                    rawName.toLowerCase().includes('telugu') ? '🇮🇳 ' :
+                    rawName.toLowerCase().includes('tamil') ? '🇮🇳 ' : '';
+
+                  return (
+                    <PressableScale
+                      key={track.id}
+                      onPress={() => handleSelectAudio({ type: 'in-band', trackId: track.id })}
+                      style={[styles.quickAudioChip, isSel && styles.quickAudioChipActive]}
+                    >
+                      <Text style={[styles.quickAudioChipText, isSel && styles.quickAudioChipTextActive]}>
+                        {flag}{rawName}
+                      </Text>
+                    </PressableScale>
+                  );
+                })}
+              </ScrollView>
+            </View>
+          ) : currentEpHasDub ? (
+            <View style={styles.quickAudioSection}>
+              <View style={styles.quickAudioHeader}>
+                <Icon name="mic" size={13} color={colors.accent} />
+                <Text style={styles.quickAudioLabel}>AUDIO LANGUAGE</Text>
+              </View>
+              <View style={styles.quickAudioList}>
+                <PressableScale
+                  onPress={() => currentLang !== 'sub' && handleSelectAudio({ type: 'separate', mode: 'sub' })}
+                  style={[styles.quickAudioChip, currentLang === 'sub' && styles.quickAudioChipActive]}
+                  disabled={isSwitchingAudio}
+                >
+                  <Text style={[styles.quickAudioChipText, currentLang === 'sub' && styles.quickAudioChipTextActive]}>
+                    🇯🇵 Japanese (Sub)
+                  </Text>
+                </PressableScale>
+                <PressableScale
+                  onPress={() => currentLang !== 'dub' && handleSelectAudio({ type: 'separate', mode: 'dub' })}
+                  style={[styles.quickAudioChip, currentLang === 'dub' && styles.quickAudioChipActive]}
+                  disabled={isSwitchingAudio}
+                >
+                  <Text style={[styles.quickAudioChipText, currentLang === 'dub' && styles.quickAudioChipTextActive]}>
+                    🇬🇧 English (Dub)
+                  </Text>
+                </PressableScale>
+              </View>
+            </View>
+          ) : null}
 
           {/* Interaction Bar (👍 2.9K, 👎 18, ↓ Download, ⋮ More) */}
           <View style={styles.interactionRow}>
@@ -1666,7 +2162,7 @@ export default function WatchScreen() {
 
             <View style={styles.interactionRight}>
               <PressableScale
-                onPress={() => Alert.alert('Saved', `${anime?.title || 'Episode'} added to your offline library!`)}
+                onPress={() => Alert.alert('Saved', `${displayTitle(anime, titleLang) || anime?.title || 'Episode'} added to your offline library!`)}
                 style={styles.actionIconOnlyBtn}
               >
                 <Icon name="download" size={20} color="#fff" />
@@ -1737,6 +2233,103 @@ export default function WatchScreen() {
             </View>
           )}
 
+          {/* Direct Horizontal Episode Carousel */}
+          {episodes.length > 0 && (
+            <View style={styles.episodesSectionWrap}>
+              <View style={styles.episodesHeaderRow}>
+                <Text style={styles.episodesHeading}>Episodes</Text>
+                <PressableScale onPress={() => setAllEpisodesOpen(true)} style={styles.viewAllBtn}>
+                  <Text style={styles.viewAllText}>All ({episodes.length})</Text>
+                  <Icon name="right" size={14} color={colors.accent} />
+                </PressableScale>
+              </View>
+
+              {epData?.seasons && epData.seasons.length > 1 && (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.seasonsScrollInline}>
+                  {epData.seasons.map((s) => (
+                    <PressableScale
+                      key={s.season_number}
+                      onPress={() => {
+                        if (currentSeason !== s.season_number) {
+                          setCurrentSeason(s.season_number);
+                          setCurrentEp(1);
+                        }
+                      }}
+                      style={[styles.seasonTabInline, currentSeason === s.season_number && styles.seasonTabActiveInline]}
+                    >
+                      <Text style={[styles.seasonTabTextInline, currentSeason === s.season_number && styles.seasonTabTextActiveInline]}>
+                        {s.name || `Season ${s.season_number}`}
+                      </Text>
+                    </PressableScale>
+                  ))}
+                </ScrollView>
+              )}
+
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.episodesCarouselContent}>
+                {episodes.map((ep) => {
+                  const isCurrent = ep.episode_number === currentEp;
+                  const thumb = ep.still_path || anime?.backdrop || anime?.banner || anime?.image || undefined;
+                  return (
+                    <PressableScale
+                      key={ep.episode_number}
+                      onPress={() => {
+                        if (!isCurrent) {
+                          const nextEpisodeKey = `${currentSeason}:${ep.episode_number}`;
+                          currentEpisodeKeyRef.current = nextEpisodeKey;
+                          audioSwitchRequestRef.current += 1;
+                          setIsSwitchingAudio(false);
+                          setResumeAfterSourceChange(null);
+                          nativePlayerTimeRef.current = 0;
+                          currentTimeRef.current = 0;
+                          isPlayingRef.current = true;
+                          setHlsError(null);
+                          setResolvingHls(true);
+                          setIsBuffering(true);
+                          setCurrentEp(ep.episode_number);
+                          setCurrentTime(0);
+                          setBufferedTime(0);
+                          setIsPlaying(true);
+                        } else {
+                          // Already on this episode: replay from start
+                          seekNativePlayer(0);
+                          setCurrentTime(0);
+                          isPlayingRef.current = true;
+                          setIsPlaying(true);
+                        }
+                      }}
+                      style={[styles.carouselEpCard, isCurrent && styles.carouselEpCardActive]}
+                    >
+                      <View style={styles.carouselEpThumbWrap}>
+                        <Image source={{ uri: thumb }} style={StyleSheet.absoluteFill} contentFit="cover" transition={150} />
+                        <LinearGradient colors={['transparent', 'rgba(0,0,0,0.65)']} style={StyleSheet.absoluteFill} />
+                        {isCurrent ? (
+                          <View style={styles.nowPlayingBadge}>
+                            <Text style={styles.nowPlayingText}>PLAYING</Text>
+                          </View>
+                        ) : (
+                          <View style={styles.carouselPlayIcon}>
+                            <Icon name="play" size={12} color="#fff" />
+                          </View>
+                        )}
+                        <View style={styles.carouselDurationBadge}>
+                          <Text style={styles.carouselDurationText}>{ep.runtime || 24}m</Text>
+                        </View>
+                      </View>
+                      <View style={styles.carouselEpInfo}>
+                        <Text style={[styles.carouselEpNumber, isCurrent && { color: colors.accent }]}>
+                          EP {ep.episode_number}
+                        </Text>
+                        <Text style={styles.carouselEpTitle} numberOfLines={1}>
+                          {ep.name || `Episode ${ep.episode_number}`}
+                        </Text>
+                      </View>
+                    </PressableScale>
+                  );
+                })}
+              </ScrollView>
+            </View>
+          )}
+
           {/* All Episodes Link */}
           <PressableScale onPress={() => setAllEpisodesOpen(true)} style={styles.allEpisodesLink}>
             <Text style={styles.allEpisodesText}>All Episodes</Text>
@@ -1788,6 +2381,15 @@ export default function WatchScreen() {
                 <PressableScale
                   key={ep.episode_number}
                   onPress={() => {
+                    if (active) {
+                      // Already on this episode: replay cleanly from start
+                      seekNativePlayer(0);
+                      setCurrentTime(0);
+                      isPlayingRef.current = true;
+                      setIsPlaying(true);
+                      setAllEpisodesOpen(false);
+                      return;
+                    }
                     const nextEpisodeKey = `${currentSeason}:${ep.episode_number}`;
                     currentEpisodeKeyRef.current = nextEpisodeKey;
                     audioSwitchRequestRef.current += 1;
@@ -1795,7 +2397,7 @@ export default function WatchScreen() {
                     setResumeAfterSourceChange(null);
                     nativePlayerTimeRef.current = 0;
                     currentTimeRef.current = 0;
-                    isPlayingRef.current = false;
+                    isPlayingRef.current = true;
                     setHlsError(null);
                     setResolvingHls(true);
                     setIsBuffering(true);
@@ -1803,7 +2405,7 @@ export default function WatchScreen() {
                     setAllEpisodesOpen(false);
                     setCurrentTime(0);
                     setBufferedTime(0);
-                    setIsPlaying(false);
+                    setIsPlaying(true);
                     resetHideTimer();
                   }}
                   style={[styles.sheetEpCard, active && styles.sheetEpCardActive]}
@@ -2124,6 +2726,26 @@ const styles = StyleSheet.create({
     shadowRadius: 2,
     elevation: 3,
   },
+  scrubberThumbActive: {
+    transform: [{ scale: 1.3 }],
+    backgroundColor: '#fff',
+  },
+  scrubBubble: {
+    position: 'absolute',
+    top: -30,
+    transform: [{ translateX: -24 }],
+    backgroundColor: 'rgba(0, 0, 0, 0.88)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  scrubBubbleText: {
+    color: '#fff',
+    fontFamily: fonts.bold,
+    fontSize: 11,
+  },
 
   // Playback Settings Screen Overlay (Crunchyroll Style in Portrait & Landscape)
   settingsScreenOverlay: {
@@ -2222,10 +2844,64 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontSize: 12,
   },
+  audioModesBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
   audioModesText: {
     color: colors.muted,
     fontFamily: fonts.bold,
     fontSize: 13,
+  },
+  quickAudioSection: {
+    marginBottom: 14,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderRadius: radius.md,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  quickAudioHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 8,
+  },
+  quickAudioLabel: {
+    fontFamily: fonts.bold,
+    fontSize: 11,
+    color: colors.muted,
+    letterSpacing: 0.8,
+  },
+  quickAudioList: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  quickAudioChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: radius.sm,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  quickAudioChipActive: {
+    backgroundColor: 'rgba(255, 122, 0, 0.18)',
+    borderColor: colors.accent,
+  },
+  quickAudioChipText: {
+    fontFamily: fonts.bold,
+    fontSize: 12.5,
+    color: 'rgba(255,255,255,0.75)',
+  },
+  quickAudioChipTextActive: {
+    color: colors.accent,
+    fontFamily: fonts.bold,
   },
   interactionRow: {
     flexDirection: 'row',
@@ -2439,6 +3115,127 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontFamily: fonts.bold,
     fontSize: 12.5,
+    marginTop: 2,
+  },
+  // Episodes Carousel Styles
+  episodesSectionWrap: {
+    marginTop: 20,
+    marginBottom: 4,
+  },
+  episodesHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  episodesHeading: {
+    color: '#fff',
+    fontFamily: fonts.black,
+    fontSize: 18,
+  },
+  viewAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  viewAllText: {
+    color: colors.accent,
+    fontFamily: fonts.bold,
+    fontSize: 13,
+  },
+  seasonsScrollInline: {
+    gap: 8,
+    marginBottom: 10,
+  },
+  seasonTabInline: {
+    paddingHorizontal: 12,
+    height: 28,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface2,
+    justifyContent: 'center',
+  },
+  seasonTabActiveInline: {
+    backgroundColor: colors.accent,
+  },
+  seasonTabTextInline: {
+    color: colors.text2,
+    fontFamily: fonts.bold,
+    fontSize: 12,
+  },
+  seasonTabTextActiveInline: {
+    color: '#000',
+  },
+  episodesCarouselContent: {
+    gap: 12,
+    paddingVertical: 4,
+  },
+  carouselEpCard: {
+    width: 150,
+    borderRadius: radius.md,
+    overflow: 'hidden',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  carouselEpCardActive: {
+    borderColor: colors.accent,
+    backgroundColor: 'rgba(255,100,10,0.08)',
+  },
+  carouselEpThumbWrap: {
+    width: 150,
+    height: 88,
+    backgroundColor: colors.surface2,
+    position: 'relative',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  carouselPlayIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  nowPlayingBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: colors.accent,
+  },
+  nowPlayingText: {
+    color: '#000',
+    fontFamily: fonts.black,
+    fontSize: 10,
+    letterSpacing: 0.5,
+  },
+  carouselDurationBadge: {
+    position: 'absolute',
+    bottom: 5,
+    right: 5,
+    paddingHorizontal: 4,
+    height: 16,
+    borderRadius: 3,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    justifyContent: 'center',
+  },
+  carouselDurationText: {
+    color: '#fff',
+    fontFamily: fonts.bold,
+    fontSize: 9.5,
+  },
+  carouselEpInfo: {
+    padding: 8,
+  },
+  carouselEpNumber: {
+    color: colors.muted,
+    fontFamily: fonts.black,
+    fontSize: 11,
+  },
+  carouselEpTitle: {
+    color: '#fff',
+    fontFamily: fonts.bold,
+    fontSize: 12,
     marginTop: 2,
   },
 });

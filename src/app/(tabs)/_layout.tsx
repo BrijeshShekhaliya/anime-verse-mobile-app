@@ -1,4 +1,3 @@
-import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 import { Tabs, type BottomTabBarProps } from 'expo-router/js-tabs';
 import { useEffect } from 'react';
@@ -11,7 +10,6 @@ import { colors, fonts } from '@/lib/theme';
 const EASE = Easing.out(Easing.cubic);
 // Live blur is cheap on iOS but costly on Android (it re-blurs every frame while
 // content scrolls behind it), so Android gets a near-solid bar instead.
-const USE_BLUR = Platform.OS === 'ios';
 
 const TABS: { name: string; title: string; icon: IconName }[] = [
   { name: 'index', title: 'Home', icon: 'home' },
@@ -53,8 +51,8 @@ function TabBar({ state, emitter, navigateToTab }: BottomTabBarProps) {
 
   return (
     <View style={[styles.bar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-      {USE_BLUR ? <BlurView intensity={50} tint="dark" style={StyleSheet.absoluteFill} /> : null}
-      <View style={[StyleSheet.absoluteFill, { backgroundColor: USE_BLUR ? 'rgba(14,15,19,0.86)' : 'rgba(14,15,19,0.97)' }]} />
+      {/* Solid black, like every bar in the app. */}
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.bg }]} />
       <Animated.View style={[styles.indicator, indicator]} />
       <View style={styles.row}>
         {TABS.map((tab, i) => {
@@ -84,14 +82,19 @@ export default function TabsLayout() {
     // freezeOnBlur: tabs you leave stop re-rendering, so switching stays smooth.
     <Tabs screenOptions={{ headerShown: false, sceneStyle: { backgroundColor: colors.bg }, freezeOnBlur: true }} tabBar={(props) => <TabBar {...props} />}>
       {TABS.map((t) => (
-        <Tabs.Screen key={t.name} name={t.name} options={{ title: t.title }} />
+        <Tabs.Screen
+          key={t.name}
+          name={t.name}
+          // Browse cross-fades in (quick), so opening search from Home feels like one motion.
+          options={t.name === 'browse' ? { title: t.title, animation: 'fade', transitionSpec: { animation: 'timing', config: { duration: 180 } } } : { title: t.title }}
+        />
       ))}
     </Tabs>
   );
 }
 
 const styles = StyleSheet.create({
-  bar: { position: 'absolute', left: 0, right: 0, bottom: 0, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(255,255,255,0.08)', overflow: 'hidden' },
+  bar: { position: 'absolute', left: 0, right: 0, bottom: 0, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(255,255,255,0.1)', overflow: 'hidden' },
   row: { flexDirection: 'row', paddingTop: 8 },
   item: { flex: 1, alignItems: 'center', gap: 3 },
   label: { fontFamily: fonts.bold, fontSize: 11 },

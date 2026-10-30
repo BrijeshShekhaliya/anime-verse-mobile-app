@@ -8,7 +8,7 @@ import type { Anime } from './types';
 // A light copy of a title: enough to draw a card without a network request.
 export type SavedTitle = Pick<
   Anime,
-  'id' | 'title' | 'image' | 'image2x' | 'banner' | 'backdrop' | 'type' | 'year' | 'score' | 'episodes' | 'episodeCount' | 'seasonCount' | 'languages' | 'airing'
+  'id' | 'title' | 'titleRomaji' | 'image' | 'image2x' | 'banner' | 'backdrop' | 'type' | 'year' | 'score' | 'episodes' | 'episodeCount' | 'seasonCount' | 'languages' | 'airing'
 >;
 
 export type HistoryEntry = { anime: SavedTitle; at: number };
@@ -36,6 +36,7 @@ const HISTORY_MAX = 60;
 export const slim = (a: Anime): SavedTitle => ({
   id: a.id,
   title: a.title,
+  titleRomaji: a.titleRomaji,
   image: a.image,
   image2x: a.image2x,
   banner: a.banner,
