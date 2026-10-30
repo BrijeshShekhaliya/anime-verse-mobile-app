@@ -35,7 +35,7 @@ export const queryClient = new QueryClient({
 // always Home, Schedule and genres; of the per-title data (anime pages,
 // episode lists...) and Browse grids, only the most recently used.
 const ALWAYS = new Set(['home', 'genres', 'schedule']);
-const RECENT = new Set(['detail', 'extras', 'episodes', 'seasons', 'guide', 'browse']);
+const RECENT = new Set(['detail', 'extras', 'episodes', 'seasons', 'guide', 'browse', 'scheduleDate']);
 const RECENT_MAX = 40;
 
 // The most recently updated queries of one kind, worked out once per save.

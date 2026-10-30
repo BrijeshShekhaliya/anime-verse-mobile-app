@@ -3,6 +3,7 @@
 import { useQueries, useQuery } from '@tanstack/react-query';
 import { api } from './api';
 import { fetchEpisodeGuide, fetchSeasons } from './episodeGuide';
+import { fetchScheduleForDate } from './scheduleByDate';
 import type { AnimeDetail } from './types';
 import { fetchDetail, fetchExtras, fetchGenres, fetchHome, fetchSchedule } from '@/services/anilistClient';
 
@@ -96,4 +97,20 @@ export function useEpisodeGuide(anilistId: number | null, airing: boolean) {
     staleTime: airing ? HOUR : 7 * DAY,
     enabled: !!anilistId,
   });
+}
+
+// Release schedule for one calendar day. Past days barely change; today and
+// later are re-checked hourly. Shows on it open instantly when tapped.
+export const scheduleDateOptions = (key: string, isPast: boolean) => ({
+  queryKey: ['scheduleDate', key],
+  queryFn: async () => {
+    const items = await fetchScheduleForDate(key);
+    items.forEach((a) => api.seedDetail(a));
+    return items;
+  },
+  staleTime: isPast ? 7 * DAY : HOUR,
+});
+
+export function useScheduleDate(key: string, isPast: boolean) {
+  return useQuery(scheduleDateOptions(key, isPast));
 }
