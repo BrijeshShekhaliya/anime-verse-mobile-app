@@ -1,16 +1,17 @@
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router, useLocalSearchParams, useNavigation } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams, useNavigation } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
-import { memo, useEffect, useRef, useState } from 'react';
-import { Linking, Platform, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Linking, Platform, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
 import Animated, {
   Easing,
   Extrapolation,
   FadeIn,
   FadeInDown,
   interpolate,
+  runOnJS,
   useAnimatedScrollHandler,
   useAnimatedStyle,
   useReducedMotion,
@@ -35,6 +36,7 @@ import { anilistIdOf, type GuideEpisode } from '@/lib/episodeGuide';
 import { displayTitle, useSettings } from '@/lib/settings';
 import { colors, fonts, radius, springs } from '@/lib/theme';
 import type { AnimeDetail } from '@/lib/types';
+import { navigateToWatchSafe, resetWatchNavigationLock } from '@/lib/navigation';
 
 const haptic = (kind: 'tap' | 'success' | 'warn' = 'tap') => {
   if (Platform.OS === 'web') return;
@@ -49,6 +51,8 @@ const openLink = (url: string) => {
 
 const goBack = () => (router.canGoBack() ? router.back() : router.replace('/'));
 const BOTTOM_BAR = 76;
+// Episodes drawn per step (long seasons grow as you scroll).
+const EP_PAGE = 30;
 
 type Tab = 'episodes' | 'more';
 
@@ -61,6 +65,12 @@ export default function DetailScreen() {
 
   // The episode list and recommendations are drawn once the open transition
   // has finished, so the page starts appearing the moment it's tapped.
+  useFocusEffect(
+    useCallback(() => {
+      resetWatchNavigationLock();
+    }, [])
+  );
+
   const navigation = useNavigation();
   const [opened2, setOpened2] = useState(false);
   useEffect(() => {
@@ -104,10 +114,27 @@ export default function DetailScreen() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [seasonOpen, setSeasonOpen] = useState(false);
 
+  // Long seasons (One Piece has 1,100+ episodes) are drawn 30 at a time as you
+  // scroll near the end, so the page never builds hundreds of rows and images
+  // at once: it opens, scrolls and closes as lightly as a short show.
+  const [epLimit, setEpLimit] = useState(EP_PAGE);
+  useEffect(() => setEpLimit(EP_PAGE), [seasonId]);
+  const epTotal = useRef(0);
+  const loadMore = useCallback(() => setEpLimit((l) => (l < epTotal.current ? l + EP_PAGE : l)), []);
+
   // ---- Motion ----
   const scrollY = useSharedValue(0);
+  const lastMore = useSharedValue(0);
   const onScroll = useAnimatedScrollHandler((e) => {
     scrollY.value = e.contentOffset.y;
+    // Near the bottom: draw the next episodes (at most every 300 ms).
+    if (e.contentOffset.y + e.layoutMeasurement.height > e.contentSize.height - 1400) {
+      const t = Date.now();
+      if (t - lastMore.value > 300) {
+        lastMore.value = t;
+        runOnJS(loadMore)();
+      }
+    }
   });
   // Key art settles in (slow zoom-out), moves at half speed while scrolling,
   // stretches when pulled down.
@@ -149,6 +176,7 @@ export default function DetailScreen() {
   const showLogoArea = !artSettled && !opened.current?.logoKnown;
   const meta = [a.year ? String(a.year) : '', a.type || '', ...(a.genres || []).slice(0, 3)].filter(Boolean);
   const episodes = guide.data || [];
+  epTotal.current = episodes.length;
   const seasonLabel = current?.label || 'Season 1';
   const watchId = current?.id || a.id; // episodes play from that season's own entry
   const runtime = a.duration ? parseInt(a.duration, 10) || null : null;
@@ -257,7 +285,7 @@ export default function DetailScreen() {
 
             <View style={styles.epList}>
               {episodes.length ? (
-                episodes.map((ep, i) => (
+                episodes.slice(0, epLimit).map((ep, i) => (
                   <EpisodeRow
                     key={`${seasonId}-${ep.number}`}
                     ep={ep}
@@ -275,6 +303,14 @@ export default function DetailScreen() {
               ) : (
                 <Text style={styles.empty}>Episodes aren't listed for this season yet.</Text>
               )}
+              {episodes.length > epLimit ? (
+                <View style={styles.moreEps}>
+                  <ActivityIndicator size="small" color={colors.accent} />
+                  <Text style={styles.moreEpsText}>
+                    Showing {epLimit} of {episodes.length} episodes
+                  </Text>
+                </View>
+              ) : null}
             </View>
           </Animated.View>
         ) : (
@@ -444,7 +480,7 @@ function BottomBar({ anime, currentSeason = 1, bottom }: { anime: AnimeDetail; c
   return (
     <View style={[styles.bottomBar, { paddingBottom: bottom + 10 }]} pointerEvents="box-none">
       <LinearGradient colors={['transparent', 'rgba(0,0,0,0.92)', '#000']} locations={[0, 0.45, 1]} style={StyleSheet.absoluteFill} pointerEvents="none" />
-      <PressableScale haptic style={styles.primaryBtn} scaleTo={0.97} onPress={() => router.push(`/watch/${anime.id}?season=${currentSeason}&ep=${targetEp}` as any)}>
+      <PressableScale haptic style={styles.primaryBtn} scaleTo={0.97} onPress={() => navigateToWatchSafe(`/watch/${anime.id}?season=${currentSeason}&ep=${targetEp}`)}>
         <Icon name="play" size={20} color="#000" />
         <Text style={styles.primaryText} numberOfLines={1}>
           {watchedEp > 0 ? (isDoneAll ? 'Replay E1' : `Continue E${targetEp}`) : 'Start Watching E1'}
@@ -540,7 +576,7 @@ const EpisodeRow = memo(function EpisodeRow({
   return (
     <Animated.View entering={reduce || index > 7 ? undefined : FadeInDown.delay(index * 45).duration(320)}>
       <PressableScale
-        onPress={() => router.push(`/watch/${watchId}?season=${seasonNumber}&ep=${ep.number}` as any)}
+        onPress={() => navigateToWatchSafe(`/watch/${watchId}?season=${seasonNumber}&ep=${ep.number}`)}
         style={styles.epRow}
         scaleTo={0.98}
         accessibilityLabel={`Episode ${ep.number}, ${ep.title}`}
@@ -686,6 +722,8 @@ const styles = StyleSheet.create({
   epDurationText: { color: '#fff', fontFamily: fonts.regular, fontSize: 12 },
   epTitle: { color: '#fff', fontFamily: fonts.regular, fontSize: 15.5, lineHeight: 21 },
   epMeta: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12.5, marginTop: 6 },
+  moreEps: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingVertical: 18 },
+  moreEpsText: { color: colors.muted, fontFamily: fonts.medium, fontSize: 12.5 },
   empty: { color: colors.muted, fontFamily: fonts.regular, fontSize: 14, paddingVertical: 12 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', columnGap: 12, rowGap: 18, paddingHorizontal: 16, paddingTop: 18 },
   topBar: { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10 },

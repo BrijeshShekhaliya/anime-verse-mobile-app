@@ -18,7 +18,11 @@ export type NativeSubtitle = {
 };
 
 export type NativeVideoLevel = { index: number; height: number; width: number; bitrate: number };
-export type NativeVideoPlayerHandle = { seek: (time: number) => void };
+export type NativeVideoPlayerHandle = {
+  seek: (time: number) => void;
+  pause?: () => void;
+  play?: () => void;
+};
 type SubtitleCue = { start: number; end: number; text: string };
 
 type Props = {
@@ -84,39 +88,58 @@ function parseSubtitleCues(raw: string): SubtitleCue[] {
 }
 
 function toAudioTracks(player: ReturnType<typeof useVideoPlayer>): NativePlayerTrack[] {
-  return player.availableAudioTracks.map((track, index) => ({
-    id: index,
-    name: track.name || track.label || track.language || `Audio ${index + 1}`,
-    lang: track.language || '',
-    type: 'audio' as const,
-    selected: player.audioTrack === track || (!!player.audioTrack?.language && track.language === player.audioTrack?.language),
-  }));
+  try {
+    const tracks = player.availableAudioTracks;
+    if (!tracks || !Array.isArray(tracks)) return [];
+    const currentTrack = player.audioTrack;
+    return tracks.map((track, index) => ({
+      id: index,
+      name: track.name || track.label || track.language || `Audio ${index + 1}`,
+      lang: track.language || '',
+      type: 'audio' as const,
+      selected: currentTrack === track || (!!currentTrack?.language && track.language === currentTrack?.language),
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function toTextTracks(player: ReturnType<typeof useVideoPlayer>): NativePlayerTrack[] {
-  return player.availableSubtitleTracks.map((track, index) => ({
-    id: index,
-    name: track.name || track.label || track.language || `Subtitle ${index + 1}`,
-    lang: track.language || '',
-    type: 'text' as const,
-  }));
+  try {
+    const tracks = player.availableSubtitleTracks;
+    if (!tracks || !Array.isArray(tracks)) return [];
+    return tracks.map((track, index) => ({
+      id: index,
+      name: track.name || track.label || track.language || `Subtitle ${index + 1}`,
+      lang: track.language || '',
+      type: 'text' as const,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function toVideoLevels(player: ReturnType<typeof useVideoPlayer>): NativeVideoLevel[] {
-  return player.availableVideoTracks.map((track, index) => {
-    const value = track as unknown as {
-      size?: { width?: number; height?: number };
-      width?: number;
-      height?: number;
-      bitrate?: number;
-    };
-    return {
-      index,
-      width: value.size?.width || value.width || 0,
-      height: value.size?.height || value.height || 0,
-      bitrate: value.bitrate || 0,
-    };
-  });
+  try {
+    const tracks = player.availableVideoTracks;
+    if (!tracks || !Array.isArray(tracks)) return [];
+    return tracks.map((track, index) => {
+      const value = track as unknown as {
+        size?: { width?: number; height?: number };
+        width?: number;
+        height?: number;
+        bitrate?: number;
+      };
+      return {
+        index,
+        width: value.size?.width || value.width || 0,
+        height: value.size?.height || value.height || 0,
+        bitrate: value.bitrate || 0,
+      };
+    });
+  } catch {
+    return [];
+  }
 }
 
 const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function ExpoVideoHlsPlayer({
@@ -152,8 +175,32 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
     instance.staysActiveInBackground = false;
   });
 
+  // Explicitly pause playback on unmount so audio stops immediately and
+  // does not persist in the background notification shade.
+  useEffect(() => {
+    return () => {
+      try {
+        player.pause();
+      } catch {}
+    };
+  }, [player]);
+
   useImperativeHandle(forwardedRef, () => ({
-    seek: (time: number) => { player.currentTime = Math.max(0, time); },
+    seek: (time: number) => {
+      try {
+        player.currentTime = Math.max(0, time);
+      } catch {}
+    },
+    pause: () => {
+      try {
+        player.pause();
+      } catch {}
+    },
+    play: () => {
+      try {
+        player.play();
+      } catch {}
+    },
   }), [player]);
 
   const source: VideoSource | null = uri ? {
@@ -192,26 +239,28 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
     player.playbackRate = playbackRate;
   }, [player, playbackRate]);
 
-    const syncAudioTrack = useCallback(() => {
-    const available = player.availableAudioTracks;
-    if (!available || available.length === 0) return;
+  const syncAudioTrack = useCallback(() => {
+    try {
+      const available = player.availableAudioTracks;
+      if (!available || available.length === 0) return;
 
-    if (selectedAudioTrackId !== null && selectedAudioTrackId >= 0 && available[selectedAudioTrackId]) {
-      const target = available[selectedAudioTrackId];
-      if (player.audioTrack !== target) {
-        player.audioTrack = target;
+      if (selectedAudioTrackId !== null && selectedAudioTrackId >= 0 && available[selectedAudioTrackId]) {
+        const target = available[selectedAudioTrackId];
+        if (player.audioTrack !== target) {
+          player.audioTrack = target;
+        }
+        return;
       }
-      return;
-    }
 
-    if (preferredAudioLanguage) {
-      const match = available.find((t) =>
-        isAudioLanguageMatch(t.name || t.label || '', t.language || '', preferredAudioLanguage),
-      );
-      if (match && player.audioTrack !== match) {
-        player.audioTrack = match;
+      if (preferredAudioLanguage) {
+        const match = available.find((t) =>
+          isAudioLanguageMatch(t.name || t.label || '', t.language || '', preferredAudioLanguage),
+        );
+        if (match && player.audioTrack !== match) {
+          player.audioTrack = match;
+        }
       }
-    }
+    } catch {}
   }, [player, selectedAudioTrackId, preferredAudioLanguage]);
 
   useEffect(() => {
@@ -219,44 +268,49 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
   }, [syncAudioTrack]);
 
   useEffect(() => {
-    if (!subtitlesEnabled) {
-      player.subtitleTrack = null;
-      return;
-    }
-    if (selectedTextTrackId !== null && selectedTextTrackId >= 0) {
-      const track = player.availableSubtitleTracks[selectedTextTrackId];
-      if (track) player.subtitleTrack = track;
-    }
+    try {
+      if (!subtitlesEnabled) {
+        player.subtitleTrack = null;
+        return;
+      }
+      if (selectedTextTrackId !== null && selectedTextTrackId >= 0) {
+        const track = player.availableSubtitleTracks?.[selectedTextTrackId];
+        if (track) player.subtitleTrack = track;
+      }
+    } catch {}
   }, [player, selectedTextTrackId, subtitlesEnabled]);
 
   const applyVideoQuality = useCallback(() => {
-    if (selectedQualityHeight < 0) {
-      // Expo Video exposes adaptive quality through maxResolution. videoTrack is
-      // read-only; setting it does not force a rendition and can fail at runtime.
-      player.maxResolution = null;
-      return;
-    }
+    try {
+      if (selectedQualityHeight < 0) {
+        // Expo Video exposes adaptive quality through maxResolution. videoTrack is
+        // read-only; setting it does not force a rendition and can fail at runtime.
+        player.maxResolution = null;
+        return;
+      }
 
-    const available = player.availableVideoTracks;
-    const readHeight = (track: (typeof available)[number]) => {
-      const value = track as unknown as {
-        size?: { width?: number; height?: number };
-        width?: number;
-        height?: number;
+      const available = player.availableVideoTracks;
+      if (!available || available.length === 0) return;
+      const readHeight = (track: (typeof available)[number]) => {
+        const value = track as unknown as {
+          size?: { width?: number; height?: number };
+          width?: number;
+          height?: number;
+        };
+        return value.size?.height || value.height || 0;
       };
-      return value.size?.height || value.height || 0;
-    };
-    const exact = available.find((track) => readHeight(track) === selectedQualityHeight);
-    const requestedHeight = exact ? readHeight(exact) : selectedQualityHeight;
-    // Expo Video's supported manual-quality API is maxResolution (the current
-    // videoTrack is read-only). On Android this is a hard ceiling, so ExoPlayer
-    // cannot silently choose a resolution above the user's selection.
-    player.maxResolution = {
-      width: exact
-        ? ((exact as unknown as { size?: { width?: number } }).size?.width || Math.round((requestedHeight * 16) / 9))
-        : Math.round((requestedHeight * 16) / 9),
-      height: requestedHeight,
-    };
+      const exact = available.find((track) => readHeight(track) === selectedQualityHeight);
+      const requestedHeight = exact ? readHeight(exact) : selectedQualityHeight;
+      // Expo Video's supported manual-quality API is maxResolution (the current
+      // videoTrack is read-only). On Android this is a hard ceiling, so ExoPlayer
+      // cannot silently choose a resolution above the user's selection.
+      player.maxResolution = {
+        width: exact
+          ? ((exact as unknown as { size?: { width?: number } }).size?.width || Math.round((requestedHeight * 16) / 9))
+          : Math.round((requestedHeight * 16) / 9),
+        height: requestedHeight,
+      };
+    } catch {}
   }, [player, selectedQualityHeight]);
 
   useEffect(() => {
@@ -264,12 +318,14 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
   }, [applyVideoQuality]);
 
   const publishTracks = useCallback(() => {
-    onAudioTracks(toAudioTracks(player));
-    const textTracks = toTextTracks(player);
-    setHasEmbeddedSubtitleTracks(textTracks.length > 0);
-    onTextTracks(textTracks);
-    onVideoTracks(toVideoLevels(player));
-    applyVideoQuality();
+    try {
+      onAudioTracks(toAudioTracks(player));
+      const textTracks = toTextTracks(player);
+      setHasEmbeddedSubtitleTracks(textTracks.length > 0);
+      onTextTracks(textTracks);
+      onVideoTracks(toVideoLevels(player));
+      applyVideoQuality();
+    } catch {}
   }, [player, onAudioTracks, onTextTracks, onVideoTracks, applyVideoQuality]);
 
   // Expo Video supports in-band HLS subtitles. Resolver-provided sidecar VTT/SRT
@@ -297,41 +353,59 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
   useEffect(() => {
     const subscriptions = [
       player.addListener('sourceLoad', () => {
-        syncAudioTrack();
-        // Source metadata and track lists can arrive before the first frame is
-        // actually ready. Publish tracks now, but restore the playhead only when
-        // ExoPlayer reports readyToPlay.
-        publishTracks();
+        try {
+          syncAudioTrack();
+          // Source metadata and track lists can arrive before the first frame is
+          // actually ready. Publish tracks now, but restore the playhead only when
+          // ExoPlayer reports readyToPlay.
+          publishTracks();
+        } catch {}
       }),
       player.addListener('timeUpdate', (event) => {
-        const time = Math.max(0, event.currentTime || 0);
-        setPlaybackTime(time);
-        onProgress(time, Math.max(0, player.duration || 0), Math.max(0, event.bufferedPosition || 0));
+        try {
+          const time = Math.max(0, event.currentTime || 0);
+          setPlaybackTime(time);
+          onProgress(time, Math.max(0, player.duration || 0), Math.max(0, event.bufferedPosition || 0));
+        } catch {}
       }),
       player.addListener('statusChange', (event) => {
-        if (event.status === 'loading') onBuffer(true);
-        if (event.status === 'readyToPlay') {
-          onBuffer(false);
-          if (readySourceRef.current !== uri) {
-            readySourceRef.current = uri;
-            onLoad(Math.max(0, player.duration || 0));
-            publishTracks();
+        try {
+          if (event.status === 'loading') onBuffer(true);
+          if (event.status === 'readyToPlay') {
+            onBuffer(false);
+            if (readySourceRef.current !== uri) {
+              readySourceRef.current = uri;
+              onLoad(Math.max(0, player.duration || 0));
+              publishTracks();
+            }
           }
-        }
-        if (event.status === 'error') {
-          onBuffer(false);
-          const error = event.error as unknown as { message?: string } | undefined;
-          onError(error?.message || 'HLS playback failed');
-        }
+          if (event.status === 'error') {
+            onBuffer(false);
+            const error = event.error as unknown as { message?: string } | undefined;
+            onError(error?.message || 'HLS playback failed');
+          }
+        } catch {}
       }),
       player.addListener('availableAudioTracksChange', () => {
-        syncAudioTrack();
-        publishTracks();
+        try {
+          syncAudioTrack();
+          publishTracks();
+        } catch {}
       }),
-      player.addListener('availableSubtitleTracksChange', publishTracks),
+      player.addListener('availableSubtitleTracksChange', () => {
+        try {
+          publishTracks();
+        } catch {}
+      }),
       player.addListener('playToEnd', onEnd),
     ];
-    return () => subscriptions.forEach((subscription) => subscription.remove());
+    return () => {
+      subscriptions.forEach((subscription) => {
+        try {
+          subscription.remove();
+        } catch {}
+      });
+    };
   }, [player, uri, onLoad, onProgress, onBuffer, onError, onEnd, publishTracks, syncAudioTrack]);
 
   const activeSubtitle = externalSubtitleCues.find((cue) => playbackTime >= cue.start && playbackTime <= cue.end);

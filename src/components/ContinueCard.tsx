@@ -1,6 +1,7 @@
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
+import { navigateToWatchSafe } from '@/lib/navigation';
 import { useEffect } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import Animated, { Easing, FadeInRight, useAnimatedStyle, useReducedMotion, useSharedValue, withDelay, withTiming } from 'react-native-reanimated';
@@ -47,7 +48,7 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W }: { ite
   return (
     <Animated.View entering={reduce ? undefined : FadeInRight.delay(Math.min(index, 5) * 70).duration(420)} style={{ width }}>
       <PressableScale
-        onPress={() => router.push(`/watch/${a.id}?ep=${targetEp}` as any)}
+        onPress={() => navigateToWatchSafe(`/watch/${a.id}?ep=${targetEp}`)}
         scaleTo={0.97}
         accessibilityLabel={`Continue ${title}, episode ${targetEp}`}
       >
