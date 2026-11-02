@@ -9,7 +9,6 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Animated,
   BackHandler,
   GestureResponderEvent,
   LayoutChangeEvent,
@@ -83,14 +82,35 @@ function formatDuration(sec: number) {
 export default function WatchScreen() {
   const { id, season: paramSeason, ep: paramEp } = useLocalSearchParams<{ id: string; season?: string; ep?: string }>();
   const insets = useSafeAreaInsets();
-  const windowDims = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
 
   // Authoritative fullscreen state
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
-  const isPhysicalLandscape = isFullscreen || (windowDims.width > windowDims.height);
-  const isFullscreenView = isPhysicalLandscape;
 
-  const portraitPlayerWidth = Math.min(windowDims.width, windowDims.height);
+  // Live container layout measurements (avoids pre-rotation Dimensions stale reads)
+  const [layoutDimensions, setLayoutDimensions] = useState<{ width: number; height: number }>({
+    width: width,
+    height: height,
+  });
+
+  // Keep layoutDimensions synchronized with window dimension changes
+  useEffect(() => {
+    setLayoutDimensions({ width, height });
+  }, [width, height]);
+
+  const onRootLayout = useCallback((e: LayoutChangeEvent) => {
+    const { width: w, height: h } = e.nativeEvent.layout;
+    if (w > 0 && h > 0) {
+      setLayoutDimensions({ width: Math.round(w), height: Math.round(h) });
+    }
+  }, []);
+
+  const activeWidth = layoutDimensions.width || width;
+  const activeHeight = layoutDimensions.height || height;
+  const isPhysicalLandscape = isFullscreen || width > height || activeWidth > activeHeight;
+  // Fullscreen presentation follows authoritative user intent or physical landscape geometry
+  const isFullscreenView = isPhysicalLandscape;
+  const portraitPlayerWidth = Math.min(width, height);
   const portraitPlayerHeight = Math.floor((portraitPlayerWidth * 9) / 16);
   const topInset = Platform.OS === 'android' ? Math.max(insets.top, RNStatusBar.currentHeight || 0) : insets.top;
 
@@ -168,27 +188,13 @@ export default function WatchScreen() {
   const [nativeTextTrackId, setNativeTextTrackId] = useState<number | null>(null);
   const [resumeAfterSourceChange, setResumeAfterSourceChange] = useState<{ key: string; time: number; shouldPlay: boolean } | null>(null);
   const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const controlsOpacity = useRef(new Animated.Value(1)).current;
-
-  const setControlsVisibility = useCallback(
-    (visible: boolean) => {
-      setControlsVisible(visible);
-      Animated.timing(controlsOpacity, {
-        toValue: visible ? 1 : 0,
-        duration: 200,
-        useNativeDriver: true,
-      }).start();
-      console.log(`[Player Controls] Controls ${visible ? 'SHOWN' : 'HIDDEN'} (200ms animation)`);
-    },
-    [controlsOpacity],
-  );
   const advisoryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTapRef = useRef<{ time: number; x: number }>({ time: 0, x: 0 });
   const initialPinchDistRef = useRef<number | null>(null);
   const { setProgress } = useLibrary();
   const recordedEpRef = useRef<string | null>(null);
-  const progressBarWidthRef = useRef<number>(windowDims.width);
+  const progressBarWidthRef = useRef<number>(width);
 
   const mountedStreamEpisodeKeyRef = useRef<string | null>(null);
   const audioSwitchRequestRef = useRef(0);
@@ -245,7 +251,12 @@ export default function WatchScreen() {
     };
   }, [audioLang, defaultQualityHeight]);
 
-
+  // Unlock orientation sensor on unmount
+  useEffect(() => {
+    return () => {
+      ScreenOrientation.unlockAsync().catch(() => {});
+    };
+  }, []);
 
   // Stale callback protection across episode/stream switches
   const currentEpisodeKeyRef = useRef<string>(`${currentSeason}:${currentEp}`);
@@ -253,29 +264,33 @@ export default function WatchScreen() {
     currentEpisodeKeyRef.current = `${currentSeason}:${currentEp}`;
   }, [currentSeason, currentEp]);
 
-  // Integrated Orientation Control with comprehensive logging
+  // Integrated Orientation Control (immediate non-blocking request)
   const enterLandscape = useCallback(() => {
-    console.log('[Player Action] Locking orientation to LANDSCAPE');
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch((e) => {
-      console.warn('[Player Orientation] lockAsync(LANDSCAPE) error:', e);
-    });
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch(() => {});
   }, []);
 
   const restoreOrientation = useCallback(() => {
-    console.log('[Player Action] Locking orientation to PORTRAIT_UP');
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch((e) => {
-      console.warn('[Player Orientation] lockAsync(PORTRAIT_UP) error:', e);
-    });
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP)
+      .then(() => {
+        setTimeout(() => {
+          ScreenOrientation.unlockAsync().catch(() => {});
+        }, 350);
+      })
+      .catch(() => {
+        ScreenOrientation.unlockAsync().catch(() => {});
+      });
   }, []);
 
   const enterFullscreen = useCallback(() => {
-    console.log('[Player Action] enterFullscreen triggered');
+    // Request rotation; the visual layout waits for measured landscape geometry.
+    setControlsVisible(false);
     setIsFullscreen(true);
     enterLandscape();
   }, [enterLandscape]);
 
   const exitFullscreen = useCallback(() => {
-    console.log('[Player Action] exitFullscreen triggered');
+    // The view and status bar return to portrait when the measured bounds do.
+    setControlsVisible(false);
     setIsFullscreen(false);
     restoreOrientation();
   }, [restoreOrientation]);
@@ -288,14 +303,19 @@ export default function WatchScreen() {
     }
   }, [isFullscreenView, enterFullscreen, exitFullscreen]);
 
-  // Seamless physical device rotation support (auto-rotate)
+  // Listen to physical device orientation changes
   useEffect(() => {
     const sub = ScreenOrientation.addOrientationChangeListener((evt) => {
-      const o = evt.orientationInfo.orientation;
+      const orientation = evt.orientationInfo.orientation;
       const isLand =
-        o === ScreenOrientation.Orientation.LANDSCAPE_LEFT ||
-        o === ScreenOrientation.Orientation.LANDSCAPE_RIGHT;
-      setIsFullscreen(isLand);
+        orientation === ScreenOrientation.Orientation.LANDSCAPE_LEFT ||
+        orientation === ScreenOrientation.Orientation.LANDSCAPE_RIGHT;
+      setControlsVisible(false);
+      if (isLand) {
+        setIsFullscreen(true);
+      } else {
+        setIsFullscreen(false);
+      }
     });
     return () => {
       ScreenOrientation.removeOrientationChangeListener(sub);
@@ -321,18 +341,24 @@ export default function WatchScreen() {
     return () => sub.remove();
   }, [isFullscreenView, settingsOpen, exitFullscreen]);
 
-  // Clean status bar handling for Android (instant 0ms switch without animation jitter)
+  // Clean status bar handling for Android
   useEffect(() => {
-    console.log('[Player SystemUI] StatusBar hidden:', isFullscreenView);
-    RNStatusBar.setHidden(isFullscreenView, 'none');
+    RNStatusBar.setHidden(isFullscreenView, 'fade');
+    if (Platform.OS === 'android') {
+      NavigationBar.setVisibilityAsync(isFullscreenView ? 'hidden' : 'visible').catch(() => {});
+    }
   }, [isFullscreenView]);
 
-  // Ensure clean portrait orientation on mount and unmount
+  // Restore screen orientation on unmount
   useEffect(() => {
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
     return () => {
       RNStatusBar.setHidden(false, 'none');
-      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+      if (Platform.OS === 'android') {
+        NavigationBar.setVisibilityAsync('visible').catch(() => {});
+      }
+      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP)
+        .catch(() => {})
+        .then(() => ScreenOrientation.unlockAsync().catch(() => {}));
     };
   }, []);
 
@@ -619,25 +645,28 @@ export default function WatchScreen() {
     };
   }, [currentEp, currentSeason]);
 
-  // Auto-hide controls overlay with smooth animated opacity
+  // Auto-hide controls overlay
   const resetHideTimer = useCallback(() => {
     if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
-    setControlsVisibility(true);
+    setControlsVisible(true);
     hideControlsTimer.current = setTimeout(() => {
-      if (isPlayingRef.current) {
-        setControlsVisibility(false);
-      }
-    }, 3500);
-  }, [setControlsVisibility]);
+      setIsPlaying((playing) => {
+        if (playing) {
+          setControlsVisible(false);
+        }
+        return playing;
+      });
+    }, 3800);
+  }, []);
 
   const toggleControls = useCallback(() => {
     if (controlsVisible) {
+      setControlsVisible(false);
       if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
-      setControlsVisibility(false);
     } else {
       resetHideTimer();
     }
-  }, [controlsVisible, setControlsVisibility, resetHideTimer]);
+  }, [controlsVisible, resetHideTimer]);
 
   useEffect(() => {
     resetHideTimer();
@@ -670,18 +699,14 @@ export default function WatchScreen() {
   const handleRewind10 = useCallback(() => {
     const next = Math.max(0, nativePlayerTimeRef.current - 10);
     if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.currentTime=${next};`); else seekNativePlayer(next);
-    setCurrentTime(next);
-    showBadge('-10s');
-    resetHideTimer();
-  }, [server, sendPlayerCommand, seekNativePlayer, showBadge, resetHideTimer]);
+    setCurrentTime(next); resetHideTimer();
+  }, [server, sendPlayerCommand, seekNativePlayer, resetHideTimer]);
 
   const handleForward10 = useCallback(() => {
     const next = Math.min(duration || Number.MAX_SAFE_INTEGER, nativePlayerTimeRef.current + 10);
     if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.currentTime=${next};`); else seekNativePlayer(next);
-    setCurrentTime(next);
-    showBadge('+10s');
-    resetHideTimer();
-  }, [duration, server, sendPlayerCommand, seekNativePlayer, showBadge, resetHideTimer]);
+    setCurrentTime(next); resetHideTimer();
+  }, [duration, server, sendPlayerCommand, seekNativePlayer, resetHideTimer]);
 
   const handleSeek = useCallback(
     (targetSec: number) => {
@@ -869,40 +894,52 @@ export default function WatchScreen() {
   const scrubberAreaRef = useRef<any>(null);
   const scrubberLayoutRef = useRef<{ pageX: number; width: number }>({ pageX: 0, width: 1 });
 
-  const singleTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // 0ms Latency Tap & Double-Tap handler with smooth fade animation
+  // Instant Double-tap & Tap handler (YouTube / MX Player style with 0ms latency)
   const handlePlayerAreaPress = useCallback(
     (e: GestureResponderEvent) => {
       const now = Date.now();
       const touchX = e.nativeEvent.locationX;
-      const barW = progressBarWidthRef.current || windowDims.width;
-      const isLeftWing = touchX < barW * 0.3;
-      const isRightWing = touchX > barW * 0.7;
+      const barW = progressBarWidthRef.current || width;
 
-      // Check for double tap on left/right wings (-10s / +10s)
-      if (now - lastTapRef.current.time < 300 && (isLeftWing || isRightWing)) {
-        if (singleTapTimerRef.current) {
-          clearTimeout(singleTapTimerRef.current);
-          singleTapTimerRef.current = null;
-        }
+      // When controls are already visible, ANY single tap anywhere hides controls IMMEDIATELY (0ms!)
+      if (controlsVisible) {
+        setControlsVisible(false);
+        if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
         lastTapRef.current = { time: 0, x: 0 };
-        if (isLeftWing) {
-          handleRewind10();
-        } else {
-          handleForward10();
-        }
         return;
       }
 
-      lastTapRef.current = { time: now, x: touchX };
-      if (singleTapTimerRef.current) clearTimeout(singleTapTimerRef.current);
-      singleTapTimerRef.current = setTimeout(() => {
-        toggleControls();
-        singleTapTimerRef.current = null;
-      }, 220);
+      // When controls are hidden:
+      // Center zone (28% to 72% width) reveals controls INSTANTLY (0ms!) without any double-tap delay
+      const isLeftWing = touchX < barW * 0.28;
+      const isRightWing = touchX > barW * 0.72;
+
+      if (!isLeftWing && !isRightWing) {
+        resetHideTimer();
+        lastTapRef.current = { time: 0, x: 0 };
+        return;
+      }
+
+      // On left/right wings: check for double tap
+      if (now - lastTapRef.current.time < 300) {
+        if (isLeftWing) {
+          handleRewind10();
+          showBadge('-10s');
+        } else if (isRightWing) {
+          handleForward10();
+          showBadge('+10s');
+        }
+        lastTapRef.current = { time: 0, x: 0 };
+      } else {
+        lastTapRef.current = { time: now, x: touchX };
+        setTimeout(() => {
+          if (lastTapRef.current.time === now) {
+            resetHideTimer();
+          }
+        }, 220);
+      }
     },
-    [windowDims.width, handleRewind10, handleForward10, toggleControls],
+    [controlsVisible, width, handleRewind10, handleForward10, resetHideTimer, showBadge],
   );
 
   // Two-Finger Pinch-to-Zoom Gesture (Dynamic Fit / Fill like MX Player & YouTube)
@@ -1434,7 +1471,8 @@ export default function WatchScreen() {
 
   return (
     <View
-      style={[styles.container, isFullscreenView ? { paddingTop: 0 } : { paddingTop: topInset }]}
+      style={[styles.container, isFullscreenView ? styles.containerFullscreen : { paddingTop: topInset }]}
+      onLayout={onRootLayout}
     >
       <StatusBar hidden={isFullscreenView} style="light" />
 
@@ -1443,12 +1481,15 @@ export default function WatchScreen() {
         style={[
           styles.playerContainer,
           isFullscreenView
-            ? styles.playerContainerFullscreen
+            ? styles.playerContainerLandscape
             : [styles.playerContainerPortrait, { height: portraitPlayerHeight }],
         ]}
         onLayout={(e) => {
           progressBarWidthRef.current = e.nativeEvent.layout.width;
         }}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
       >
         {server === 'hianime' ? (
           mountedStream?.streamUrl ? (
@@ -1556,21 +1597,12 @@ export default function WatchScreen() {
           </View>
         )}
 
-        {/* Touch Handler Surface with collapsable={false} & subtle hit test color for 100% reliable Android tap capture */}
-        {!settingsOpen && (
-          <Pressable
-            style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.001)' }]}
-            collapsable={false}
-            onPress={handlePlayerAreaPress}
-          />
-        )}
+        {/* Touch Handler Surface (Single tap: toggle controls, Double tap: +/- 10s or play/pause) */}
+        {!settingsOpen && <Pressable style={StyleSheet.absoluteFill} onPress={handlePlayerAreaPress} />}
 
-        {/* 100% Integrated Crunchyroll Video Player UI with Smooth Animated Opacity */}
-        {!settingsOpen && (
-          <Animated.View
-            style={[styles.controlsOverlay, { opacity: controlsOpacity }]}
-            pointerEvents={controlsVisible ? 'box-none' : 'none'}
-          >
+        {/* 100% Integrated Crunchyroll Video Player UI */}
+        {controlsVisible && !settingsOpen && (
+          <View style={styles.controlsOverlay} pointerEvents="box-none">
             {/* Top Bar with subtle vignette gradient */}
             <LinearGradient
               colors={['rgba(0,0,0,0.85)', 'rgba(0,0,0,0.3)', 'transparent']}
@@ -1760,7 +1792,7 @@ export default function WatchScreen() {
                 />
               </View>
             </LinearGradient>
-          </Animated.View>
+          </View>
         )}
 
         {/* Crunchyroll In-Place Playback Settings Screen Overlay (Matches Screenshots 3 & 4) */}
@@ -2136,15 +2168,13 @@ export default function WatchScreen() {
         )}
       </View>
 
-      {/* Under-Player Content Area (Permanently mounted: zero layout passes on rotation) */}
-      <ScrollView
-        style={[
-          styles.detailsScroll,
-          isFullscreenView && styles.detailsScrollHidden,
-        ]}
-        contentContainerStyle={[styles.detailsContent, { paddingBottom: insets.bottom + 30 }]}
-        showsVerticalScrollIndicator={false}
-      >
+      {/* Under-Player Content Area (Crunchyroll Layout in Portrait) */}
+      {!isFullscreenView && (
+        <ScrollView
+          style={styles.detailsScroll}
+          contentContainerStyle={[styles.detailsContent, { paddingBottom: insets.bottom + 30 }]}
+          showsVerticalScrollIndicator={false}
+        >
           {/* Series Name in orange */}
           <Text style={styles.seriesName}>{displayTitle(anime, titleLang) || anime?.title || 'Anime'}</Text>
 
@@ -2347,7 +2377,8 @@ export default function WatchScreen() {
             <Text style={styles.allEpisodesButtonText}>View All Episodes</Text>
             <Icon name="right" size={14} color="rgba(255,255,255,0.4)" />
           </PressableScale>
-      </ScrollView>
+        </ScrollView>
+      )}
     </View>
   );
 }
@@ -2358,26 +2389,31 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
   },
   containerFullscreen: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  playerContainer: {
-    backgroundColor: '#000',
-    overflow: 'hidden',
-    position: 'relative',
-    width: '100%',
-  },
-  playerContainerPortrait: {
-    width: '100%',
-  },
-  playerContainerFullscreen: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
     bottom: 0,
-    zIndex: 10,
-    elevation: 10,
+    backgroundColor: '#000',
+    zIndex: 9999,
+  },
+  playerContainer: {
+    backgroundColor: '#000',
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  playerContainerPortrait: {
+    width: '100%',
+  },
+  playerContainerLandscape: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    width: '100%',
+    height: '100%',
+    zIndex: 9999,
     backgroundColor: '#000',
   },
   webView: {
@@ -2695,15 +2731,6 @@ const styles = StyleSheet.create({
   detailsScroll: {
     flex: 1,
     backgroundColor: '#000',
-  },
-  detailsScrollHidden: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: '100%',
-    opacity: 0,
-    transform: [{ translateY: 5000 }],
-    pointerEvents: 'none',
   },
   detailsContent: {
     paddingHorizontal: 16,
