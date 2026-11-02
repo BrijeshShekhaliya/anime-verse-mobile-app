@@ -462,11 +462,7 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
 
   override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
     val width = MeasureSpec.getSize(widthMeasureSpec)
-    var height = MeasureSpec.getSize(heightMeasureSpec)
-    val isPortrait = context.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-    if (isPortrait && width > 0 && height > (width * 9 / 16)) {
-      height = (width * 9) / 16
-    }
+    val height = MeasureSpec.getSize(heightMeasureSpec)
     setMeasuredDimension(width, height)
     playerView.measure(
       MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
@@ -477,22 +473,13 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
   override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
     super.onLayout(changed, left, top, right, bottom)
     val w = right - left
-    var h = bottom - top
-    val isPortrait = context.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-    if (isPortrait && w > 0 && h > (w * 9 / 16)) {
-      h = (w * 9) / 16
-    }
+    val h = bottom - top
     playerView.layout(0, 0, w, h)
   }
 
   override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
     super.onSizeChanged(w, h, oldw, oldh)
-    var finalH = h
-    val isPortrait = context.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-    if (isPortrait && w > 0 && finalH > (w * 9 / 16)) {
-      finalH = (w * 9) / 16
-    }
-    playerView.layout(0, 0, w, finalH)
+    playerView.layout(0, 0, w, h)
   }
 
   fun releasePlayer() {
