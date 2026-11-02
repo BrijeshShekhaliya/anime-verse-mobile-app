@@ -257,7 +257,10 @@ export default function WatchScreen() {
   const exitFullscreen = useCallback(() => {
     setControlsVisible(false);
     setIsFullscreen(false);
-    restoreOrientation();
+    // Request portrait lock on the next frame so React commits inline layout before native window rotation
+    requestAnimationFrame(() => {
+      restoreOrientation();
+    });
   }, [restoreOrientation]);
 
   const toggleFullscreen = useCallback(() => {
@@ -1425,7 +1428,7 @@ export default function WatchScreen() {
         style={[
           styles.playerContainer,
           isFullscreenView
-            ? styles.playerContainerLandscape
+            ? [styles.playerContainerLandscape, { maxHeight: portraitPlayerWidth }]
             : [styles.playerContainerPortrait, { height: portraitPlayerHeight }],
         ]}
         onLayout={(e) => {
