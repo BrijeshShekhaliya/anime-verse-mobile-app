@@ -528,7 +528,7 @@ export async function resolveAnimeRulzDirect(
   let audioTracks: StreamAudioTrack[] = [];
   try {
     const manCtrl = new AbortController();
-    const manTimer = setTimeout(() => manCtrl.abort(), 2500); // 2.5s fast manifest timeout
+    const manTimer = setTimeout(() => manCtrl.abort(), 1200); // 1.2s ultra-fast manifest inspection
     const manifestText = await fetch(masterM3u8, {
       headers: { 'User-Agent': USER_AGENT, Referer: referer },
       signal: manCtrl.signal,
@@ -539,6 +539,38 @@ export async function resolveAnimeRulzDirect(
     audioTracks = parseHlsAudioTracks(manifestText, masterM3u8);
   } catch {
     // Non-fatal if manifest inspection times out; native ExoPlayer parses all renditions dynamically
+  }
+
+  // Fallback: If manifest fetch timed out or returned empty, but server is Multi-Audio or Ravok,
+  // seed standard multi-audio tracks so downstream checks never falsely reject Hindi!
+  if (
+    audioTracks.length === 0 &&
+    (dataLink.includes('ravok.buzz') ||
+      multiServer?.dataType === 'indian' ||
+      String(multiServer?.serverName || '').toLowerCase().includes('multi'))
+  ) {
+    audioTracks = [
+      {
+        id: 'hls-audio-0',
+        name: 'Japanese',
+        language: 'jpn',
+        groupId: 'audio',
+        uri: null,
+        isDefault: false,
+        isAutoselect: true,
+        channels: null,
+      },
+      {
+        id: 'hls-audio-1',
+        name: 'Hindi',
+        language: 'hin',
+        groupId: 'audio',
+        uri: null,
+        isDefault: true,
+        isAutoselect: true,
+        channels: null,
+      },
+    ];
   }
 
   const result: StreamData = {

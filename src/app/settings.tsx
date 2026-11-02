@@ -107,6 +107,23 @@ export default function SettingsScreen() {
             <Segmented value={quality} options={QUALITY_OPTIONS} onChange={chooseQuality} />
           </View>
         </Section>
+
+        <Section title="Labs">
+          <PressableScale onPress={() => router.push('/player-lab')} scaleTo={0.98} accessibilityRole="button" accessibilityLabel="Open Player 2.1">
+            <View style={styles.row}>
+              <GradientTile colors={['#F43F5E', '#F97316']}>
+                <Icon name="play" size={18} color="#fff" />
+              </GradientTile>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.rowTitle}>Player 2.1</Text>
+                <Text style={styles.rowHint} numberOfLines={1}>
+                  Try the new player: gestures, fullscreen, view modes
+                </Text>
+              </View>
+              <Icon name="right" size={18} color={colors.muted} />
+            </View>
+          </PressableScale>
+        </Section>
       </ScrollView>
     </View>
   );

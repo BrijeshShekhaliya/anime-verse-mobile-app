@@ -61,6 +61,7 @@ export default function RootLayout() {
               <Stack.Screen name="watch/[id]" options={{ animation: 'fade' }} />
               <Stack.Screen name="search" />
               <Stack.Screen name="settings" />
+              <Stack.Screen name="player-lab" options={{ animation: 'fade' }} />
               <Stack.Screen name="welcome" options={{ animation: 'fade', animationDuration: 300, gestureEnabled: false }} />
             </Stack>
             </SettingsProvider>

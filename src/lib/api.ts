@@ -217,7 +217,11 @@ export const api = {
             options?.forceRefresh,
           );
           if (multiStream && multiStream.streamUrl) {
-            if (!isHindiTarget || hasAudioLanguage(multiStream.audioTracks, 'hindi')) {
+            const isMultiAudioSource =
+              multiStream.source?.toLowerCase().includes('multi') ||
+              multiStream.referer?.includes('ravok') ||
+              multiStream.streamUrl?.includes('ravok');
+            if (!isHindiTarget || hasAudioLanguage(multiStream.audioTracks, 'hindi') || isMultiAudioSource) {
               return multiStream;
             }
           }
@@ -263,8 +267,17 @@ export const api = {
 
       // If user specifically requested Hindi audio:
       if (isHindiTarget) {
-        // Check if AnimeRulz actually has Hindi audio
-        if (multiStream && multiStream.streamUrl && hasAudioLanguage(multiStream.audioTracks, 'hindi')) {
+        const isMultiAudioSource =
+          multiStream?.source?.toLowerCase().includes('multi') ||
+          multiStream?.referer?.includes('ravok') ||
+          multiStream?.streamUrl?.includes('ravok');
+
+        // Check if AnimeRulz actually has Hindi audio or is a Multi-Audio stream
+        if (
+          multiStream &&
+          multiStream.streamUrl &&
+          (hasAudioLanguage(multiStream.audioTracks, 'hindi') || isMultiAudioSource)
+        ) {
           if (memoryKey) providerMemory.set(memoryKey, 'animerulz');
           return multiStream;
         }

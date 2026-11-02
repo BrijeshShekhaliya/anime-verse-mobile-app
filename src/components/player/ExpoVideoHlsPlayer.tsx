@@ -84,39 +84,58 @@ function parseSubtitleCues(raw: string): SubtitleCue[] {
 }
 
 function toAudioTracks(player: ReturnType<typeof useVideoPlayer>): NativePlayerTrack[] {
-  return player.availableAudioTracks.map((track, index) => ({
-    id: index,
-    name: track.name || track.label || track.language || `Audio ${index + 1}`,
-    lang: track.language || '',
-    type: 'audio' as const,
-    selected: player.audioTrack === track || (!!player.audioTrack?.language && track.language === player.audioTrack?.language),
-  }));
+  try {
+    const tracks = player.availableAudioTracks;
+    if (!tracks || !Array.isArray(tracks)) return [];
+    const currentTrack = player.audioTrack;
+    return tracks.map((track, index) => ({
+      id: index,
+      name: track.name || track.label || track.language || `Audio ${index + 1}`,
+      lang: track.language || '',
+      type: 'audio' as const,
+      selected: currentTrack === track || (!!currentTrack?.language && track.language === currentTrack?.language),
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function toTextTracks(player: ReturnType<typeof useVideoPlayer>): NativePlayerTrack[] {
-  return player.availableSubtitleTracks.map((track, index) => ({
-    id: index,
-    name: track.name || track.label || track.language || `Subtitle ${index + 1}`,
-    lang: track.language || '',
-    type: 'text' as const,
-  }));
+  try {
+    const tracks = player.availableSubtitleTracks;
+    if (!tracks || !Array.isArray(tracks)) return [];
+    return tracks.map((track, index) => ({
+      id: index,
+      name: track.name || track.label || track.language || `Subtitle ${index + 1}`,
+      lang: track.language || '',
+      type: 'text' as const,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function toVideoLevels(player: ReturnType<typeof useVideoPlayer>): NativeVideoLevel[] {
-  return player.availableVideoTracks.map((track, index) => {
-    const value = track as unknown as {
-      size?: { width?: number; height?: number };
-      width?: number;
-      height?: number;
-      bitrate?: number;
-    };
-    return {
-      index,
-      width: value.size?.width || value.width || 0,
-      height: value.size?.height || value.height || 0,
-      bitrate: value.bitrate || 0,
-    };
-  });
+  try {
+    const tracks = player.availableVideoTracks;
+    if (!tracks || !Array.isArray(tracks)) return [];
+    return tracks.map((track, index) => {
+      const value = track as unknown as {
+        size?: { width?: number; height?: number };
+        width?: number;
+        height?: number;
+        bitrate?: number;
+      };
+      return {
+        index,
+        width: value.size?.width || value.width || 0,
+        height: value.size?.height || value.height || 0,
+        bitrate: value.bitrate || 0,
+      };
+    });
+  } catch {
+    return [];
+  }
 }
 
 const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function ExpoVideoHlsPlayer({

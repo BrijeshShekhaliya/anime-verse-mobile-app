@@ -7,6 +7,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.ViewGroup
 import android.view.LayoutInflater
+import android.view.View.MeasureSpec
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -67,6 +68,7 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
   private var playbackRate = 1f
   private var selectedQualityHeight = -1
   private var selectedAudioTrackId: Int? = null
+  private var activeAudioTrackId: Int? = null
   private var preferredAudioLanguage: String? = null
   private var selectedTextTrackId: Int? = null
   private var subtitlesEnabled = true
@@ -202,23 +204,18 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
       Log.d("AnimeVersePlayer", "setSelectedQualityHeight: $value (was $selectedQualityHeight)")
       selectedQualityHeight = value
       applyTrackPreferences()
-      player?.let { p ->
-        if (p.playbackState == Player.STATE_READY) {
-          p.seekTo(p.currentPosition)
-        }
-      }
     }
   }
   fun setSelectedAudioTrackId(value: Int?) {
     if (selectedAudioTrackId != value) {
       Log.d("AnimeVersePlayer", "setSelectedAudioTrackId: $value (was $selectedAudioTrackId)")
       selectedAudioTrackId = value
-      applyTrackPreferences()
-      player?.let { p ->
-        if (p.playbackState == Player.STATE_READY || p.playbackState == Player.STATE_BUFFERING) {
-          p.seekTo(p.currentPosition)
-        }
+      // If already playing this track (e.g. native preferredAudioLanguage already selected it),
+      // avoid re-applying preferences to prevent buffer drops.
+      if (value != null && value == activeAudioTrackId) {
+        return
       }
+      applyTrackPreferences()
     }
   }
   fun setPreferredAudioLanguage(value: String?) {
@@ -322,7 +319,10 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
         builder.setOverrideForType(TrackSelectionOverride(group, listOf(trackIndex)))
       }
     }
-    trackSelector.setParameters(builder)
+    val newParams = builder.build()
+    if (trackSelector.parameters != newParams) {
+      trackSelector.parameters = newParams
+    }
   }
 
   private fun publishTracks(tracks: Tracks) {
@@ -405,15 +405,17 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     audioGroups.clear(); audioGroups.addAll(newAudio)
     textGroups.clear(); textGroups.addAll(newText)
     videoTracks.clear(); videoTracks.addAll(newVideo)
+    activeAudioTrackId = activeAudioId
     Log.d("AnimeVersePlayer", "publishTracks: detected ${audioOut.size} audios (active: $activeAudioId), ${videoOut.size} video variants")
-    val signature = "${audioOut}| ${textOut}| ${videoOut}"
+    val signature = audioOut.joinToString { "${it["id"]}:${it["name"]}:${it["lang"]}" } + "|" +
+                    textOut.joinToString { "${it["id"]}:${it["name"]}:${it["lang"]}" } + "|" +
+                    videoOut.joinToString { "${it["height"]}x${it["width"]}" }
     if (signature != lastTracksSignature) {
       lastTracksSignature = signature
       emit("onAudioTracks", mapOf("tracks" to audioOut))
       emit("onTextTracks", mapOf("tracks" to textOut))
       emit("onVideoTracks", mapOf("levels" to videoOut))
     }
-    applyTrackPreferences()
   }
 
   private fun startProgressLoop() {
@@ -456,6 +458,28 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
       "onEnd" -> onEnd(payload)
       "onError" -> onError(payload)
     }
+  }
+
+  override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+    val width = MeasureSpec.getSize(widthMeasureSpec)
+    val height = MeasureSpec.getSize(heightMeasureSpec)
+    setMeasuredDimension(width, height)
+    playerView.measure(
+      MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
+      MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
+    )
+  }
+
+  override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+    super.onLayout(changed, left, top, right, bottom)
+    val w = right - left
+    val h = bottom - top
+    playerView.layout(0, 0, w, h)
+  }
+
+  override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+    super.onSizeChanged(w, h, oldw, oldh)
+    playerView.layout(0, 0, w, h)
   }
 
   fun releasePlayer() {
