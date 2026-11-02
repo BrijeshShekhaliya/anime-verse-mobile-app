@@ -84,35 +84,13 @@ export default function WatchScreen() {
   const { id, season: paramSeason, ep: paramEp } = useLocalSearchParams<{ id: string; season?: string; ep?: string }>();
   const insets = useSafeAreaInsets();
   const windowDims = useWindowDimensions();
-  const [layoutDims, setLayoutDims] = useState<{ width: number; height: number }>({
-    width: windowDims.width,
-    height: windowDims.height,
-  });
 
-  useEffect(() => {
-    setLayoutDims({ width: windowDims.width, height: windowDims.height });
-  }, [windowDims.width, windowDims.height]);
-
-  const handleRootLayout = useCallback((e: LayoutChangeEvent) => {
-    const { width: w, height: h } = e.nativeEvent.layout;
-    if (w > 0 && h > 0) {
-      setLayoutDims((prev) => {
-        if (prev.width !== w || prev.height !== h) {
-          const isLand = w > h;
-          console.log(`[Player Layout] Surface resized to ${Math.round(w)}x${Math.round(h)} -> Mode: ${isLand ? 'LANDSCAPE (Fullscreen)' : 'PORTRAIT (Inline)'}`);
-          return { width: w, height: h };
-        }
-        return prev;
-      });
-    }
-  }, []);
-
-  // Harmonized fullscreen: strictly driven by physical layout dimensions
-  const isPhysicalLandscape = layoutDims.width > layoutDims.height;
+  // Authoritative fullscreen state
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const isPhysicalLandscape = isFullscreen || (windowDims.width > windowDims.height);
   const isFullscreenView = isPhysicalLandscape;
-  const showDetails = !isFullscreenView;
 
-  const portraitPlayerWidth = Math.min(layoutDims.width, layoutDims.height);
+  const portraitPlayerWidth = Math.min(windowDims.width, windowDims.height);
   const portraitPlayerHeight = Math.floor((portraitPlayerWidth * 9) / 16);
   const topInset = Platform.OS === 'android' ? Math.max(insets.top, RNStatusBar.currentHeight || 0) : insets.top;
 
@@ -292,11 +270,13 @@ export default function WatchScreen() {
 
   const enterFullscreen = useCallback(() => {
     console.log('[Player Action] enterFullscreen triggered');
+    setIsFullscreen(true);
     enterLandscape();
   }, [enterLandscape]);
 
   const exitFullscreen = useCallback(() => {
     console.log('[Player Action] exitFullscreen triggered');
+    setIsFullscreen(false);
     restoreOrientation();
   }, [restoreOrientation]);
 
@@ -307,6 +287,20 @@ export default function WatchScreen() {
       enterFullscreen();
     }
   }, [isFullscreenView, enterFullscreen, exitFullscreen]);
+
+  // Seamless physical device rotation support (auto-rotate)
+  useEffect(() => {
+    const sub = ScreenOrientation.addOrientationChangeListener((evt) => {
+      const o = evt.orientationInfo.orientation;
+      const isLand =
+        o === ScreenOrientation.Orientation.LANDSCAPE_LEFT ||
+        o === ScreenOrientation.Orientation.LANDSCAPE_RIGHT;
+      setIsFullscreen(isLand);
+    });
+    return () => {
+      ScreenOrientation.removeOrientationChangeListener(sub);
+    };
+  }, []);
 
   // Handle hardware Android back button / back swipe
   useEffect(() => {
@@ -875,17 +869,23 @@ export default function WatchScreen() {
   const scrubberAreaRef = useRef<any>(null);
   const scrubberLayoutRef = useRef<{ pageX: number; width: number }>({ pageX: 0, width: 1 });
 
+  const singleTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // 0ms Latency Tap & Double-Tap handler with smooth fade animation
   const handlePlayerAreaPress = useCallback(
     (e: GestureResponderEvent) => {
       const now = Date.now();
       const touchX = e.nativeEvent.locationX;
-      const barW = progressBarWidthRef.current || layoutDims.width;
-      const isLeftWing = touchX < barW * 0.28;
-      const isRightWing = touchX > barW * 0.72;
+      const barW = progressBarWidthRef.current || windowDims.width;
+      const isLeftWing = touchX < barW * 0.3;
+      const isRightWing = touchX > barW * 0.7;
 
       // Check for double tap on left/right wings (-10s / +10s)
       if (now - lastTapRef.current.time < 300 && (isLeftWing || isRightWing)) {
+        if (singleTapTimerRef.current) {
+          clearTimeout(singleTapTimerRef.current);
+          singleTapTimerRef.current = null;
+        }
         lastTapRef.current = { time: 0, x: 0 };
         if (isLeftWing) {
           handleRewind10();
@@ -896,9 +896,13 @@ export default function WatchScreen() {
       }
 
       lastTapRef.current = { time: now, x: touchX };
-      toggleControls();
+      if (singleTapTimerRef.current) clearTimeout(singleTapTimerRef.current);
+      singleTapTimerRef.current = setTimeout(() => {
+        toggleControls();
+        singleTapTimerRef.current = null;
+      }, 220);
     },
-    [layoutDims.width, handleRewind10, handleForward10, toggleControls],
+    [windowDims.width, handleRewind10, handleForward10, toggleControls],
   );
 
   // Two-Finger Pinch-to-Zoom Gesture (Dynamic Fit / Fill like MX Player & YouTube)
@@ -1431,7 +1435,6 @@ export default function WatchScreen() {
   return (
     <View
       style={[styles.container, isFullscreenView ? { paddingTop: 0 } : { paddingTop: topInset }]}
-      onLayout={handleRootLayout}
     >
       <StatusBar hidden={isFullscreenView} style="light" />
 
@@ -1440,15 +1443,12 @@ export default function WatchScreen() {
         style={[
           styles.playerContainer,
           isFullscreenView
-            ? styles.playerContainerLandscape
+            ? styles.playerContainerFullscreen
             : [styles.playerContainerPortrait, { height: portraitPlayerHeight }],
         ]}
         onLayout={(e) => {
           progressBarWidthRef.current = e.nativeEvent.layout.width;
         }}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
       >
         {server === 'hianime' ? (
           mountedStream?.streamUrl ? (
@@ -2136,9 +2136,12 @@ export default function WatchScreen() {
         )}
       </View>
 
-      {/* Under-Player Content Area (Only rendered in portrait layout; zero text flash on exit) */}
+      {/* Under-Player Content Area (Permanently mounted: zero layout passes on rotation) */}
       <ScrollView
-        style={[styles.detailsScroll, isFullscreenView && { display: 'none' }]}
+        style={[
+          styles.detailsScroll,
+          isFullscreenView && styles.detailsScrollHidden,
+        ]}
         contentContainerStyle={[styles.detailsContent, { paddingBottom: insets.bottom + 30 }]}
         showsVerticalScrollIndicator={false}
       >
@@ -2367,10 +2370,14 @@ const styles = StyleSheet.create({
   playerContainerPortrait: {
     width: '100%',
   },
-  playerContainerLandscape: {
-    flex: 1,
-    width: '100%',
-    height: '100%',
+  playerContainerFullscreen: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 10,
+    elevation: 10,
     backgroundColor: '#000',
   },
   webView: {
@@ -2688,6 +2695,15 @@ const styles = StyleSheet.create({
   detailsScroll: {
     flex: 1,
     backgroundColor: '#000',
+  },
+  detailsScrollHidden: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: '100%',
+    opacity: 0,
+    transform: [{ translateY: 5000 }],
+    pointerEvents: 'none',
   },
   detailsContent: {
     paddingHorizontal: 16,
