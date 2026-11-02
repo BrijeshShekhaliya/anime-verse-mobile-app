@@ -1416,7 +1416,7 @@ export default function WatchScreen() {
 
   return (
     <View
-      style={[styles.container, isFullscreenView ? styles.containerFullscreen : { paddingTop: topInset }]}
+      style={[styles.container, isFullscreenView ? { paddingTop: 0 } : { paddingTop: topInset }]}
     >
       <StatusBar hidden={isFullscreenView} style="light" />
 
@@ -2113,12 +2113,11 @@ export default function WatchScreen() {
       </View>
 
       {/* Under-Player Content Area (Crunchyroll Layout in Portrait) */}
-      {!isFullscreenView && (
-        <ScrollView
-          style={styles.detailsScroll}
-          contentContainerStyle={[styles.detailsContent, { paddingBottom: insets.bottom + 30 }]}
-          showsVerticalScrollIndicator={false}
-        >
+      <ScrollView
+        style={[styles.detailsScroll, isFullscreenView && { display: 'none' }]}
+        contentContainerStyle={[styles.detailsContent, { paddingBottom: insets.bottom + 30 }]}
+        showsVerticalScrollIndicator={false}
+      >
           {/* Series Name in orange */}
           <Text style={styles.seriesName}>{displayTitle(anime, titleLang) || anime?.title || 'Anime'}</Text>
 
@@ -2321,8 +2320,7 @@ export default function WatchScreen() {
             <Text style={styles.allEpisodesButtonText}>View All Episodes</Text>
             <Icon name="right" size={14} color="rgba(255,255,255,0.4)" />
           </PressableScale>
-        </ScrollView>
-      )}
+      </ScrollView>
     </View>
   );
 }
@@ -2333,31 +2331,22 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
   },
   containerFullscreen: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    flex: 1,
     backgroundColor: '#000',
-    zIndex: 9999,
   },
   playerContainer: {
     backgroundColor: '#000',
     overflow: 'hidden',
     position: 'relative',
+    width: '100%',
   },
   playerContainerPortrait: {
     width: '100%',
   },
   playerContainerLandscape: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    flex: 1,
     width: '100%',
     height: '100%',
-    zIndex: 9999,
     backgroundColor: '#000',
   },
   webView: {
