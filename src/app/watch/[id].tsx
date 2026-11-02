@@ -9,6 +9,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   BackHandler,
   GestureResponderEvent,
   LayoutChangeEvent,
@@ -86,10 +87,15 @@ export default function WatchScreen() {
 
   // Authoritative fullscreen state
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const isLandscapeWindow = width > height;
 
-  // Fullscreen presentation strictly follows authoritative user intent with zero sensor fighting
-  const isPhysicalLandscape = isFullscreen;
+  // Harmonized fullscreen: active when user requested fullscreen or window is in landscape
+  const isPhysicalLandscape = isFullscreen || isLandscapeWindow;
   const isFullscreenView = isPhysicalLandscape;
+
+  // Details are only visible when the user is NOT in fullscreen AND the window is in portrait
+  const showDetails = !isFullscreen && !isLandscapeWindow;
+
   const portraitPlayerWidth = Math.min(width, height);
   const portraitPlayerHeight = Math.floor((portraitPlayerWidth * 9) / 16);
   const topInset = Platform.OS === 'android' ? Math.max(insets.top, RNStatusBar.currentHeight || 0) : insets.top;
@@ -168,6 +174,15 @@ export default function WatchScreen() {
   const [nativeTextTrackId, setNativeTextTrackId] = useState<number | null>(null);
   const [resumeAfterSourceChange, setResumeAfterSourceChange] = useState<{ key: string; time: number; shouldPlay: boolean } | null>(null);
   const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const controlsOpacity = useRef(new Animated.Value(1)).current;
+
+  const animateControls = useCallback((visible: boolean) => {
+    Animated.timing(controlsOpacity, {
+      toValue: visible ? 1 : 0,
+      duration: visible ? 180 : 220,
+      useNativeDriver: true,
+    }).start();
+  }, [controlsOpacity]);
   const advisoryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTapRef = useRef<{ time: number; x: number }>({ time: 0, x: 0 });
@@ -239,26 +254,36 @@ export default function WatchScreen() {
     currentEpisodeKeyRef.current = `${currentSeason}:${currentEp}`;
   }, [currentSeason, currentEp]);
 
-  // Integrated Orientation Control (immediate non-blocking request)
+  // Integrated Orientation Control with comprehensive logging
   const enterLandscape = useCallback(() => {
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch(() => {});
+    console.log('[Player Orientation] Locking orientation to LANDSCAPE');
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch((e) => {
+      console.warn('[Player Orientation] lockAsync(LANDSCAPE) error:', e);
+    });
   }, []);
 
   const restoreOrientation = useCallback(() => {
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+    console.log('[Player Orientation] Locking orientation to PORTRAIT_UP');
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch((e) => {
+      console.warn('[Player Orientation] lockAsync(PORTRAIT_UP) error:', e);
+    });
   }, []);
 
   const enterFullscreen = useCallback(() => {
+    console.log('[Player] enterFullscreen triggered');
     setControlsVisible(false);
+    animateControls(false);
     setIsFullscreen(true);
     enterLandscape();
-  }, [enterLandscape]);
+  }, [enterLandscape, animateControls]);
 
   const exitFullscreen = useCallback(() => {
+    console.log('[Player] exitFullscreen triggered');
     setControlsVisible(false);
+    animateControls(false);
     setIsFullscreen(false);
     restoreOrientation();
-  }, [restoreOrientation]);
+  }, [restoreOrientation, animateControls]);
 
   const toggleFullscreen = useCallback(() => {
     if (isFullscreenView) {
@@ -287,9 +312,10 @@ export default function WatchScreen() {
     return () => sub.remove();
   }, [isFullscreenView, settingsOpen, exitFullscreen]);
 
-  // Clean status bar handling for Android
+  // Clean status bar handling for Android (instant 0ms switch without animation jitter)
   useEffect(() => {
-    RNStatusBar.setHidden(isFullscreenView, 'fade');
+    console.log('[Player SystemUI] StatusBar & NavigationBar visibility:', isFullscreenView ? 'hidden' : 'visible');
+    RNStatusBar.setHidden(isFullscreenView, 'none');
     if (Platform.OS === 'android') {
       NavigationBar.setVisibilityAsync(isFullscreenView ? 'hidden' : 'visible').catch(() => {});
     }
@@ -590,28 +616,31 @@ export default function WatchScreen() {
     };
   }, [currentEp, currentSeason]);
 
-  // Auto-hide controls overlay
+  // Auto-hide controls overlay with smooth animated opacity
   const resetHideTimer = useCallback(() => {
     if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
     setControlsVisible(true);
+    animateControls(true);
     hideControlsTimer.current = setTimeout(() => {
       setIsPlaying((playing) => {
         if (playing) {
           setControlsVisible(false);
+          animateControls(false);
         }
         return playing;
       });
     }, 3800);
-  }, []);
+  }, [animateControls]);
 
   const toggleControls = useCallback(() => {
     if (controlsVisible) {
       setControlsVisible(false);
+      animateControls(false);
       if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
     } else {
       resetHideTimer();
     }
-  }, [controlsVisible, resetHideTimer]);
+  }, [controlsVisible, resetHideTimer, animateControls]);
 
   useEffect(() => {
     resetHideTimer();
@@ -839,52 +868,40 @@ export default function WatchScreen() {
   const scrubberAreaRef = useRef<any>(null);
   const scrubberLayoutRef = useRef<{ pageX: number; width: number }>({ pageX: 0, width: 1 });
 
-  // Instant Double-tap & Tap handler (YouTube / MX Player style with 0ms latency)
+  // 0ms Latency Tap & Double-Tap handler with smooth fade animation
   const handlePlayerAreaPress = useCallback(
     (e: GestureResponderEvent) => {
       const now = Date.now();
       const touchX = e.nativeEvent.locationX;
       const barW = progressBarWidthRef.current || width;
-
-      // When controls are already visible, ANY single tap anywhere hides controls IMMEDIATELY (0ms!)
-      if (controlsVisible) {
-        setControlsVisible(false);
-        if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
-        lastTapRef.current = { time: 0, x: 0 };
-        return;
-      }
-
-      // When controls are hidden:
-      // Center zone (28% to 72% width) reveals controls INSTANTLY (0ms!) without any double-tap delay
       const isLeftWing = touchX < barW * 0.28;
       const isRightWing = touchX > barW * 0.72;
 
-      if (!isLeftWing && !isRightWing) {
-        resetHideTimer();
-        lastTapRef.current = { time: 0, x: 0 };
-        return;
-      }
-
-      // On left/right wings: check for double tap
-      if (now - lastTapRef.current.time < 300) {
+      // Check for double tap on left/right wings (-10s / +10s)
+      if (now - lastTapRef.current.time < 300 && (isLeftWing || isRightWing)) {
         if (isLeftWing) {
           handleRewind10();
           showBadge('-10s');
-        } else if (isRightWing) {
+        } else {
           handleForward10();
           showBadge('+10s');
         }
         lastTapRef.current = { time: 0, x: 0 };
+        return;
+      }
+
+      lastTapRef.current = { time: now, x: touchX };
+
+      // Instant 0ms toggle across entire screen with smooth fade
+      if (controlsVisible) {
+        setControlsVisible(false);
+        animateControls(false);
+        if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
       } else {
-        lastTapRef.current = { time: now, x: touchX };
-        setTimeout(() => {
-          if (lastTapRef.current.time === now) {
-            resetHideTimer();
-          }
-        }, 220);
+        resetHideTimer();
       }
     },
-    [controlsVisible, width, handleRewind10, handleForward10, resetHideTimer, showBadge],
+    [controlsVisible, width, handleRewind10, handleForward10, resetHideTimer, animateControls, showBadge],
   );
 
   // Two-Finger Pinch-to-Zoom Gesture (Dynamic Fit / Fill like MX Player & YouTube)
@@ -1544,9 +1561,12 @@ export default function WatchScreen() {
         {/* Touch Handler Surface (Single tap: toggle controls, Double tap: +/- 10s or play/pause) */}
         {!settingsOpen && <Pressable style={StyleSheet.absoluteFill} onPress={handlePlayerAreaPress} />}
 
-        {/* 100% Integrated Crunchyroll Video Player UI */}
-        {controlsVisible && !settingsOpen && (
-          <View style={styles.controlsOverlay} pointerEvents="box-none">
+        {/* 100% Integrated Crunchyroll Video Player UI with Smooth Animated Opacity */}
+        {!settingsOpen && (
+          <Animated.View
+            style={[styles.controlsOverlay, { opacity: controlsOpacity }]}
+            pointerEvents={controlsVisible ? 'box-none' : 'none'}
+          >
             {/* Top Bar with subtle vignette gradient */}
             <LinearGradient
               colors={['rgba(0,0,0,0.85)', 'rgba(0,0,0,0.3)', 'transparent']}
@@ -1736,7 +1756,7 @@ export default function WatchScreen() {
                 />
               </View>
             </LinearGradient>
-          </View>
+          </Animated.View>
         )}
 
         {/* Crunchyroll In-Place Playback Settings Screen Overlay (Matches Screenshots 3 & 4) */}
@@ -2112,9 +2132,9 @@ export default function WatchScreen() {
         )}
       </View>
 
-      {/* Under-Player Content Area (Crunchyroll Layout in Portrait) */}
+      {/* Under-Player Content Area (Only rendered in portrait layout; zero text flash on exit) */}
       <ScrollView
-        style={[styles.detailsScroll, isFullscreenView && { display: 'none' }]}
+        style={[styles.detailsScroll, !showDetails && { display: 'none' }]}
         contentContainerStyle={[styles.detailsContent, { paddingBottom: insets.bottom + 30 }]}
         showsVerticalScrollIndicator={false}
       >
