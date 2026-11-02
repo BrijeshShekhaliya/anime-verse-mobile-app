@@ -87,28 +87,8 @@ export default function WatchScreen() {
   // Authoritative fullscreen state
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
 
-  // Live container layout measurements (avoids pre-rotation Dimensions stale reads)
-  const [layoutDimensions, setLayoutDimensions] = useState<{ width: number; height: number }>({
-    width: width,
-    height: height,
-  });
-
-  // Keep layoutDimensions synchronized with window dimension changes
-  useEffect(() => {
-    setLayoutDimensions({ width, height });
-  }, [width, height]);
-
-  const onRootLayout = useCallback((e: LayoutChangeEvent) => {
-    const { width: w, height: h } = e.nativeEvent.layout;
-    if (w > 0 && h > 0) {
-      setLayoutDimensions({ width: Math.round(w), height: Math.round(h) });
-    }
-  }, []);
-
-  const activeWidth = layoutDimensions.width || width;
-  const activeHeight = layoutDimensions.height || height;
-  const isPhysicalLandscape = isFullscreen || width > height || activeWidth > activeHeight;
-  // Fullscreen presentation follows authoritative user intent or physical landscape geometry
+  // Fullscreen presentation strictly follows authoritative user intent with zero sensor fighting
+  const isPhysicalLandscape = isFullscreen;
   const isFullscreenView = isPhysicalLandscape;
   const portraitPlayerWidth = Math.min(width, height);
   const portraitPlayerHeight = Math.floor((portraitPlayerWidth * 9) / 16);
@@ -251,12 +231,7 @@ export default function WatchScreen() {
     };
   }, [audioLang, defaultQualityHeight]);
 
-  // Unlock orientation sensor on unmount
-  useEffect(() => {
-    return () => {
-      ScreenOrientation.unlockAsync().catch(() => {});
-    };
-  }, []);
+
 
   // Stale callback protection across episode/stream switches
   const currentEpisodeKeyRef = useRef<string>(`${currentSeason}:${currentEp}`);
@@ -270,26 +245,16 @@ export default function WatchScreen() {
   }, []);
 
   const restoreOrientation = useCallback(() => {
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP)
-      .then(() => {
-        setTimeout(() => {
-          ScreenOrientation.unlockAsync().catch(() => {});
-        }, 350);
-      })
-      .catch(() => {
-        ScreenOrientation.unlockAsync().catch(() => {});
-      });
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
   }, []);
 
   const enterFullscreen = useCallback(() => {
-    // Request rotation; the visual layout waits for measured landscape geometry.
     setControlsVisible(false);
     setIsFullscreen(true);
     enterLandscape();
   }, [enterLandscape]);
 
   const exitFullscreen = useCallback(() => {
-    // The view and status bar return to portrait when the measured bounds do.
     setControlsVisible(false);
     setIsFullscreen(false);
     restoreOrientation();
@@ -302,25 +267,6 @@ export default function WatchScreen() {
       enterFullscreen();
     }
   }, [isFullscreenView, enterFullscreen, exitFullscreen]);
-
-  // Listen to physical device orientation changes
-  useEffect(() => {
-    const sub = ScreenOrientation.addOrientationChangeListener((evt) => {
-      const orientation = evt.orientationInfo.orientation;
-      const isLand =
-        orientation === ScreenOrientation.Orientation.LANDSCAPE_LEFT ||
-        orientation === ScreenOrientation.Orientation.LANDSCAPE_RIGHT;
-      setControlsVisible(false);
-      if (isLand) {
-        setIsFullscreen(true);
-      } else {
-        setIsFullscreen(false);
-      }
-    });
-    return () => {
-      ScreenOrientation.removeOrientationChangeListener(sub);
-    };
-  }, []);
 
   // Handle hardware Android back button / back swipe
   useEffect(() => {
@@ -349,16 +295,15 @@ export default function WatchScreen() {
     }
   }, [isFullscreenView]);
 
-  // Restore screen orientation on unmount
+  // Ensure clean portrait orientation on mount and unmount
   useEffect(() => {
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
     return () => {
       RNStatusBar.setHidden(false, 'none');
       if (Platform.OS === 'android') {
         NavigationBar.setVisibilityAsync('visible').catch(() => {});
       }
-      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP)
-        .catch(() => {})
-        .then(() => ScreenOrientation.unlockAsync().catch(() => {}));
+      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
     };
   }, []);
 
@@ -1472,7 +1417,6 @@ export default function WatchScreen() {
   return (
     <View
       style={[styles.container, isFullscreenView ? styles.containerFullscreen : { paddingTop: topInset }]}
-      onLayout={onRootLayout}
     >
       <StatusBar hidden={isFullscreenView} style="light" />
 
