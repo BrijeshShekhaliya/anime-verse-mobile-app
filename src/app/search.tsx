@@ -1,5 +1,5 @@
 import { Image } from 'expo-image';
-import { router } from 'expo-router';
+import { nav } from '@/lib/nav';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, Keyboard, StyleSheet, Text, TextInput, View } from 'react-native';
 import Animated, { FadeIn, FadeInDown } from 'react-native-reanimated';
@@ -10,6 +10,7 @@ import { Icon } from '@/components/Icon';
 import { PressableScale } from '@/components/PressableScale';
 import { EmptyState } from '@/components/States';
 import { api } from '@/lib/api';
+import { posterOf, useArt } from '@/lib/artwork';
 import { factsOf } from '@/lib/format';
 import { useLibrary } from '@/lib/library';
 import { rankByQuery } from '@/lib/searchRank';
@@ -53,14 +54,14 @@ export default function SearchScreen() {
     if (q.trim()) lib.addSearch(q);
     api.seedDetail(a);
     Keyboard.dismiss();
-    router.push(`/anime/${a.id}`);
+    nav.push(`/anime/${a.id}`);
   };
 
   const showing = results ?? null;
   return (
     <View style={[styles.screen, { paddingTop: insets.top + 8 }]}>
       <View style={styles.bar}>
-        <PressableScale onPress={() => router.back()} style={styles.back} accessibilityLabel="Close search" hitSlop={8}>
+        <PressableScale onPress={() => nav.back()} style={styles.back} accessibilityLabel="Close search" hitSlop={8}>
           <Icon name="left" size={22} color="#fff" />
         </PressableScale>
         <View style={styles.inputWrap}>
@@ -143,11 +144,18 @@ function Highlight({ text, query }: { text: string; query?: string }) {
   );
 }
 
+// TMDB poster (placeholder while it's looked up; AniList's only when TMDB has none).
+function ResultThumb({ anime }: { anime: Anime }) {
+  const { art, settled } = useArt(anime);
+  const uri = settled ? posterOf(anime, art, false) : undefined;
+  return uri ? <Image source={{ uri }} style={styles.thumb} contentFit="cover" transition={200} cachePolicy="memory-disk" /> : <View style={styles.thumb} />;
+}
+
 function ResultRow({ anime, index, onPress, query }: { anime: Anime; index: number; onPress: () => void; query?: string }) {
   return (
     <Animated.View entering={FadeInDown.delay(Math.min(index, 10) * 30).duration(280)}>
       <PressableScale onPress={onPress} style={styles.row} scaleTo={0.98}>
-        {anime.image ? <Image source={{ uri: anime.image }} style={styles.thumb} contentFit="cover" transition={200} /> : <View style={styles.thumb} />}
+        <ResultThumb anime={anime} />
         <View style={{ flex: 1 }}>
           <Highlight text={anime.title} query={query} />
           <View style={styles.meta}>

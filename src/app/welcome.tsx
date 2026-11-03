@@ -30,12 +30,16 @@ import { markOnboarded } from '@/lib/onboarding';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { useHome } from '@/lib/queries';
+import { usePosters } from '@/lib/artwork';
+import { tourItems } from '@/lib/onboarding';
 import { rankByQuery } from '@/lib/searchRank';
 import { colors, fonts, radius, springs } from '@/lib/theme';
 import type { Anime } from '@/lib/types';
 
 type Page = { key: string; title: string; text: string; scene: (p: SceneProps) => ReactNode };
-type SceneProps = { posters: (string | undefined)[]; items: Anime[]; results: Anime[]; active: boolean; width: number; reduce: boolean };
+type SceneProps = { posters: (string | undefined)[]; items: Anime[]; results: Anime[]; resultPosters: (string | undefined)[]; active: boolean; width: number; reduce: boolean };
+
+const EMPTY_POSTERS: undefined[] = Array.from({ length: 18 }, () => undefined);
 
 const PAGES: Page[] = [
   {
@@ -76,14 +80,10 @@ export default function WelcomeScreen() {
   const reduce = useReducedMotion();
   const { data } = useHome(); // also warms Home for when the tour ends
 
-  const items = useMemo(() => {
-    const seen = new Set<string>();
-    return [...(data?.trending || []), ...(data?.popular || []), ...(data?.topRated || [])].filter((a) => a.image && !seen.has(a.id) && seen.add(a.id));
-  }, [data]);
-  const posters = useMemo(() => {
-    const list = items.map((a) => a.image2x || a.image || undefined);
-    return list.length ? list : Array.from({ length: 18 }, () => undefined);
-  }, [items]);
+  const items = useMemo(() => tourItems(data), [data]);
+  // TMDB posters (the splash already downloaded the first ones).
+  const tmdbPosters = usePosters(items);
+  const posters = items.length ? tmdbPosters : EMPTY_POSTERS;
 
   // The search page shows the real results for what it types.
   const search = useQuery({
@@ -92,6 +92,7 @@ export default function WelcomeScreen() {
     staleTime: 24 * 60 * 60 * 1000,
   });
   const results = useMemo(() => rankByQuery(search.data?.items || [], QUERY), [search.data]);
+  const resultPosters = usePosters(results);
   const [termsOpen, setTermsOpen] = useState(false);
 
   const [page, setPage] = useState(0);
@@ -128,7 +129,7 @@ export default function WelcomeScreen() {
       >
         {PAGES.map((p, i) => (
           <View key={p.key} style={{ width, paddingTop: insets.top }}>
-            <View style={{ height: i === PAGES.length - 1 ? sceneH * 0.82 : sceneH, overflow: 'hidden' }}>{p.scene({ posters, items, results, active: page === i, width, reduce })}</View>
+            <View style={{ height: i === PAGES.length - 1 ? sceneH * 0.82 : sceneH, overflow: 'hidden' }}>{p.scene({ posters, items, results, resultPosters, active: page === i, width, reduce })}</View>
             <PageText index={i} scrollX={scrollX} width={width} title={p.title} text={p.text}>
               {i === PAGES.length - 1 ? <TermsNotice onRead={() => setTermsOpen(true)} /> : null}
             </PageText>
@@ -282,7 +283,7 @@ function FanCard({ rank, t, w, uri }: { rank: number; t: SharedValue<number>; w:
 
 // 3. A search bar that types by itself; the real results for that search appear.
 const QUERY = 'Solo Leveling';
-function SearchDemo({ results, active, width, reduce }: SceneProps) {
+function SearchDemo({ results, resultPosters, active, width, reduce }: SceneProps) {
   const [typed, setTyped] = useState(reduce ? QUERY : '');
   const started = useStarted(active);
   // Types once, the first time the page is shown; afterwards it stays typed.
@@ -311,7 +312,7 @@ function SearchDemo({ results, active, width, reduce }: SceneProps) {
         <View style={{ flexDirection: 'row', gap: 12, marginTop: 22 }}>
           {[0, 1, 2].map((i) => (
             <Animated.View key={i} entering={reduce ? undefined : FadeInDown.delay(i * 110).duration(380)}>
-              <Poster uri={results[i]?.image2x || results[i]?.image || undefined} w={w} />
+              <Poster uri={resultPosters[i]} w={w} />
               <Text style={styles.mockTitle} numberOfLines={1}>
                 {results[i]?.title || ' '}
               </Text>

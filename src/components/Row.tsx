@@ -1,4 +1,5 @@
-import { router, type Href } from 'expo-router';
+import { type Href } from 'expo-router';
+import { nav } from '@/lib/nav';
 import { FlatList, Platform, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeIn } from 'react-native-reanimated';
 import { Icon } from './Icon';
@@ -33,12 +34,14 @@ export function Row({ title, sub, items, more, ranked }: { title: string; sub?: 
   const data = ranked ? items.slice(0, 10) : items;
   return (
     <Animated.View entering={FadeIn.duration(400)} style={{ marginBottom: SECTION_GAP }}>
-      <SectionHeader title={title} sub={sub} onMore={more ? () => router.push(more) : undefined} />
+      <SectionHeader title={title} sub={sub} onMore={more ? () => nav.push(more) : undefined} />
       <FlatList
         horizontal
         data={data}
         keyExtractor={(a, i) => `${a.id}-${i}`}
-        renderItem={({ item, index }) => <PosterCard anime={item} index={index} width={ranked ? 136 : 124} rank={ranked ? index + 1 : undefined} />}
+        renderItem={({ item, index }) => <PosterCard anime={item} index={index} width={ranked ? 136 : 124} rank={ranked ? index + 1 : undefined} animate={false} />}
+        // Fixed-width cards: the list knows every position without measuring.
+        getItemLayout={(_, index) => ({ length: (ranked ? 136 : 124) + 12, offset: 16 + index * ((ranked ? 136 : 124) + 12), index })}
         contentContainerStyle={{ paddingHorizontal: 16, gap: 12 }}
         showsHorizontalScrollIndicator={false}
         decelerationRate="fast"

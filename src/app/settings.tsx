@@ -1,5 +1,5 @@
 import { LinearGradient } from 'expo-linear-gradient';
-import { router } from 'expo-router';
+import { nav } from '@/lib/nav';
 import { useEffect, useState, type ReactNode } from 'react';
 import { ScrollView, StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
 import Animated, { Easing, FadeInDown, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
@@ -53,7 +53,7 @@ export default function SettingsScreen() {
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
       <View style={styles.header}>
-        <PressableScale onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} style={styles.back} hitSlop={8} accessibilityLabel="Back">
+        <PressableScale onPress={() => nav.back()} style={styles.back} hitSlop={8} accessibilityLabel="Back">
           <Icon name="left" size={22} color="#fff" />
         </PressableScale>
         <Text style={styles.headerTitle}>Settings</Text>
@@ -106,23 +106,6 @@ export default function SettingsScreen() {
           <View style={styles.segWrap}>
             <Segmented value={quality} options={QUALITY_OPTIONS} onChange={chooseQuality} />
           </View>
-        </Section>
-
-        <Section title="Labs">
-          <PressableScale onPress={() => router.push('/player-lab')} scaleTo={0.98} accessibilityRole="button" accessibilityLabel="Open Player 2.1">
-            <View style={styles.row}>
-              <GradientTile colors={['#F43F5E', '#F97316']}>
-                <Icon name="play" size={18} color="#fff" />
-              </GradientTile>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.rowTitle}>Player 2.1</Text>
-                <Text style={styles.rowHint} numberOfLines={1}>
-                  Try the new player: gestures, fullscreen, view modes
-                </Text>
-              </View>
-              <Icon name="right" size={18} color={colors.muted} />
-            </View>
-          </PressableScale>
         </Section>
       </ScrollView>
     </View>

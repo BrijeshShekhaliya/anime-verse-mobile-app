@@ -1,5 +1,6 @@
 // Whether this phone has seen the welcome tour.
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import type { Anime, Home } from './types';
 
 const KEY = 'animeverse:onboarded:v1';
 let cached: boolean | null = null;
@@ -12,6 +13,14 @@ export const loadOnboarded = () =>
 
 // The value read at startup (null until then).
 export const onboarded = () => cached;
+
+// The titles the welcome tour's posters come from (the splash downloads the
+// first ones before the tour appears).
+export function tourItems(home: Home | undefined): Anime[] {
+  const seen = new Set<string>();
+  return [...(home?.trending || []), ...(home?.popular || []), ...(home?.topRated || [])].filter((a) => a.image && !seen.has(a.id) && seen.add(a.id));
+}
+export const TOUR_FIRST = 16;
 
 export const markOnboarded = () => {
   cached = true;

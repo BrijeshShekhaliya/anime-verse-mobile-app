@@ -145,7 +145,7 @@ export default function WatchScreen() {
   const [currentAudioTrackId, setCurrentAudioTrackId] = useState<number>(0);
   const [hasInBandAlternateAudio, setHasInBandAlternateAudio] = useState<boolean>(false);
   const [currentLang, setCurrentLang] = useState<'sub' | 'dub'>('sub');
-  const [playerPreferencesLoaded, setPlayerPreferencesLoaded] = useState<boolean>(false);
+  const [playerPreferencesLoaded, setPlayerPreferencesLoaded] = useState<boolean>(true);
   const [isSwitchingAudio, setIsSwitchingAudio] = useState<boolean>(false);
 
   const [availableLevels, setAvailableLevels] = useState<VideoLevelInfo[]>([]);
@@ -509,7 +509,7 @@ export default function WatchScreen() {
             { forceRefresh: force },
           );
           if (res && res.streamUrl) {
-            streamCacheRef.current.set(key, { data: res, expiresAt: Date.now() + 30 * 60 * 1000 });
+            streamCacheRef.current.set(key, { data: res, expiresAt: Date.now() + 15 * 60 * 1000 });
           }
           return res;
         } finally {

@@ -1,4 +1,5 @@
 import { router } from 'expo-router';
+import { nav } from '@/lib/nav';
 import { StyleSheet, View } from 'react-native';
 import Animated, { interpolate, useAnimatedStyle, type SharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -20,9 +21,9 @@ export function TopBar({ scrollY, solidAfter = 80 }: { scrollY: SharedValue<numb
         <View style={[StyleSheet.absoluteFill, styles.solid]} />
       </Animated.View>
       <View style={styles.bar}>
-        <Brand size={40} />
+        <Brand size={40} fromSplash />
         <View style={styles.actions}>
-          <PressableScale haptic onPress={() => router.push('/settings')} style={styles.search} accessibilityLabel="Settings">
+          <PressableScale haptic onPress={() => nav.push('/settings')} style={styles.search} accessibilityLabel="Settings">
             <Icon name="settings" size={20} color="#fff" />
           </PressableScale>
           <PressableScale

@@ -1,5 +1,5 @@
 import { Image } from 'expo-image';
-import { router } from 'expo-router';
+import { nav } from '@/lib/nav';
 import { useEffect, useState } from 'react';
 import { Alert, FlatList, Platform, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import Animated, { FadeInDown, FadeOut, LinearTransition, useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
@@ -36,6 +36,9 @@ export default function LibraryScreen() {
   const counts: Record<Tab, number> = { Continue: lib.continueWatching.length, 'My List': lib.list.length, History: lib.history.length };
   const cols = width >= 700 ? 5 : 3;
   const cardW = Math.floor((width - 32 - (cols - 1) * 12) / cols);
+  // Continue: two cards a row on phones (three on tablets).
+  const contCols = width >= 700 ? 3 : 2;
+  const contW = Math.floor((width - 32 - (contCols - 1) * 12) / contCols);
 
   const confirmClear = () => {
     if (Platform.OS === 'web') {
@@ -67,17 +70,20 @@ export default function LibraryScreen() {
 
       {tab === 'Continue' && (
         <FlatList
+          key={`continue-${contCols}`}
           data={lib.continueWatching}
+          numColumns={contCols}
           keyExtractor={(p) => p.anime.id}
+          columnWrapperStyle={lib.continueWatching.length ? { gap: 12 } : undefined}
           contentContainerStyle={styles.list}
           ListEmptyComponent={
-            <EmptyState icon="history" title="Nothing in progress" text="Start watching any anime and you can pick it up again here." action="Browse anime" onAction={() => router.push('/browse')} />
+            <EmptyState icon="history" title="Nothing in progress" text="Start watching any anime and you can pick it up again here." action="Browse anime" onAction={() => nav.push('/browse')} />
           }
           renderItem={({ item, index }) => (
             <Animated.View exiting={FadeOut} layout={LinearTransition.springify()} style={{ marginBottom: 18 }}>
-              <ContinueCard item={item} index={index} width={width - 32} />
-              <PressableScale onPress={() => lib.clearProgress(item.anime.id)} style={styles.removeChip} hitSlop={8} accessibilityLabel="Remove from Continue Watching">
-                <Icon name="x" size={16} color="#fff" />
+              <ContinueCard item={item} index={index} width={contW} compact />
+              <PressableScale onPress={() => lib.clearProgress(item.anime.id)} style={styles.removeChip} hitSlop={10} accessibilityLabel="Remove from Continue Watching">
+                <Icon name="x" size={13} color="#fff" />
               </PressableScale>
             </Animated.View>
           )}
@@ -92,7 +98,7 @@ export default function LibraryScreen() {
           keyExtractor={(l) => l.anime.id}
           columnWrapperStyle={lib.list.length ? { gap: 12 } : undefined}
           contentContainerStyle={[styles.list, { gap: 20 }]}
-          ListEmptyComponent={<EmptyState icon="bookmark" title="Your list is empty" text="Tap the bookmark on any anime to save it here." action="Find something" onAction={() => router.push('/browse')} />}
+          ListEmptyComponent={<EmptyState icon="bookmark" title="Your list is empty" text="Tap the bookmark on any anime to save it here." action="Find something" onAction={() => nav.push('/browse')} />}
           renderItem={({ item, index }) => <PosterCard anime={item.anime as Anime} index={index % 12} width={cardW} showFacts />}
         />
       )}
@@ -113,7 +119,7 @@ export default function LibraryScreen() {
           ListEmptyComponent={<EmptyState icon="history" title="No history yet" text="Anime you watch will show up here." />}
           renderItem={({ item, index }) => (
             <Animated.View entering={FadeInDown.delay(Math.min(index, 10) * 30)} exiting={FadeOut} layout={LinearTransition.springify()}>
-              <PressableScale onPress={() => router.push(`/anime/${item.anime.id}`)} style={styles.historyRow}>
+              <PressableScale onPress={() => nav.push(`/anime/${item.anime.id}`)} style={styles.historyRow}>
                 <HistThumb anime={item.anime as Anime} />
                 <View style={{ flex: 1 }}>
                   <Text style={styles.histTitle} numberOfLines={2}>
@@ -154,7 +160,7 @@ const styles = StyleSheet.create({
   count: { color: colors.accent, fontFamily: fonts.black, fontSize: 12 },
   underline: { position: 'absolute', bottom: -1, left: 0, height: 3, borderRadius: 2, backgroundColor: colors.accent },
   list: { padding: 16, paddingBottom: 120 },
-  removeChip: { position: 'absolute', top: 8, right: 8, width: 30, height: 30, borderRadius: 15, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' },
+  removeChip: { position: 'absolute', top: 6, right: 6, width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' },
   clear: { flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-end', marginBottom: 12 },
   clearText: { color: colors.muted, fontFamily: fonts.black, fontSize: 12, letterSpacing: 0.5, textTransform: 'uppercase' },
   historyRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },

@@ -1,9 +1,9 @@
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router } from 'expo-router';
+import { nav } from '@/lib/nav';
 import { useEffect } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import Animated, { Easing, FadeInRight, useAnimatedStyle, useReducedMotion, useSharedValue, withDelay, withTiming } from 'react-native-reanimated';
+import Animated, { Easing, FadeInDown, FadeInRight, useAnimatedStyle, useReducedMotion, useSharedValue, withDelay, withTiming } from 'react-native-reanimated';
 import { Icon } from './Icon';
 import { PressableScale } from './PressableScale';
 import type { Progress } from '@/lib/library';
@@ -16,11 +16,14 @@ export const CONTINUE_CARD_W = 286;
 
 // Landscape card for "Continue Watching": the show's banner, which episode is
 // next, and a progress bar that fills in as the row appears.
-export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W }: { item: Progress; index?: number; width?: number }) {
+// compact: the smaller grid card (My List → Continue, two per row): the title
+// sits under the picture instead of over it.
+export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W, compact = false }: { item: Progress; index?: number; width?: number; compact?: boolean }) {
   const a = item.anime;
-  const { art: tmdb } = useArt(a as Anime, true);
+  const { art: tmdb, settled } = useArt(a as Anime, true);
   const title = useTitle(a);
-  const art = backdropOf(a as Anime, tmdb);
+  // Waits for TMDB's banner instead of showing the AniList one first.
+  const art = settled ? backdropOf(a as Anime, tmdb) : undefined;
   const isCompleted = Boolean(item.completed);
   const done = Boolean(item.total && item.episode >= item.total && isCompleted);
   // If completed, prompt next episode; if paused/stopped halfway, continue THIS episode!
@@ -45,9 +48,9 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W }: { ite
   const fillStyle = useAnimatedStyle(() => ({ transform: [{ scaleX: Math.max(0.02, fill.value) }] }));
 
   return (
-    <Animated.View entering={reduce ? undefined : FadeInRight.delay(Math.min(index, 5) * 70).duration(420)} style={{ width }}>
+    <Animated.View entering={reduce ? undefined : compact ? FadeInDown.delay(Math.min(index, 7) * 50).duration(340) : FadeInRight.delay(Math.min(index, 5) * 70).duration(420)} style={{ width }}>
       <PressableScale
-        onPress={() => router.push(`/watch/${a.id}?ep=${targetEp}` as any)}
+        onPress={() => nav.push(`/watch/${a.id}?ep=${targetEp}` as any)}
         scaleTo={0.97}
         accessibilityLabel={`Continue ${title}, episode ${targetEp}`}
       >
@@ -62,11 +65,12 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W }: { ite
           </View>
 
           <View style={styles.playWrap} pointerEvents="none">
-            <View style={styles.play}>
-              <Icon name="play" size={18} color="#fff" />
+            <View style={[styles.play, compact && styles.playSmall]}>
+              <Icon name="play" size={compact ? 14 : 18} color="#fff" />
             </View>
           </View>
 
+          {compact ? null : (
           <View style={styles.bottom}>
             <Text style={styles.title} numberOfLines={1}>
               {title}
@@ -76,11 +80,23 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W }: { ite
               {left ? <Text style={styles.metaDim}>{`  ·  ${left} left`}</Text> : null}
             </Text>
           </View>
+          )}
 
           <View style={styles.track}>
             <Animated.View style={[styles.fill, fillStyle]} />
           </View>
         </View>
+        {compact ? (
+          <View style={styles.below}>
+            <Text style={styles.belowTitle} numberOfLines={1}>
+              {title}
+            </Text>
+            <Text style={styles.belowMeta} numberOfLines={1}>
+              {done ? 'All watched' : `Episode ${targetEp}`}
+              {left ? <Text style={styles.metaDim}>{`  ·  ${left} left`}</Text> : null}
+            </Text>
+          </View>
+        ) : null}
       </PressableScale>
     </Animated.View>
   );
@@ -102,7 +118,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingLeft: 3, // optical centre for the play triangle
   },
+  playSmall: { width: 34, height: 34, borderRadius: 17, paddingLeft: 2 },
   bottom: { position: 'absolute', left: 12, right: 12, bottom: 14 },
+  below: { marginTop: 8, paddingHorizontal: 2 },
+  belowTitle: { color: '#fff', fontFamily: fonts.bold, fontSize: 13.5 },
+  belowMeta: { marginTop: 2, color: colors.accent, fontFamily: fonts.medium, fontSize: 12 },
   title: { color: '#fff', fontFamily: fonts.black, fontSize: 15.5 },
   meta: { marginTop: 2, color: colors.accent, fontFamily: fonts.bold, fontSize: 12.5 },
   metaDim: { color: 'rgba(255,255,255,0.7)', fontFamily: fonts.regular },

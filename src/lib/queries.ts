@@ -1,10 +1,12 @@
 // One hook per kind of data, each with its own refresh rule: data that changes
 // often is re-checked sooner, data that never changes is kept for days.
 import { useQueries, useQuery } from '@tanstack/react-query';
+import { useMemo } from 'react';
+import { fetchTmdbSeason, fetchTmdbShow, seriesTitle, tmdbPosition, type TmdbEpisode, type TmdbShow } from './artwork';
 import { api } from './api';
 import { fetchEpisodeGuide, fetchSeasons } from './episodeGuide';
 import { fetchScheduleForDate } from './scheduleByDate';
-import type { AnimeDetail } from './types';
+import type { Anime, AnimeDetail } from './types';
 import { fetchDetail, fetchExtras, fetchGenres, fetchHome, fetchSchedule } from '@/services/anilistClient';
 
 const MIN = 60 * 1000;
@@ -12,8 +14,8 @@ const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 
 // Home: trending and this season move during the day.
-export function useHome() {
-  return useQuery({
+// Also used by the splash, which loads Home before the first screen appears.
+export const homeQuery = {
     queryKey: ['home'],
     queryFn: async () => {
       const home = await fetchHome();
@@ -24,7 +26,9 @@ export function useHome() {
       return home;
     },
     staleTime: 30 * MIN,
-  });
+};
+export function useHome() {
+  return useQuery(homeQuery);
 }
 
 // Anime page: an airing show's next episode changes; a finished show doesn't.
@@ -113,4 +117,48 @@ export const scheduleDateOptions = (key: string, isPast: boolean) => ({
 
 export function useScheduleDate(key: string, isPast: boolean) {
   return useQuery(scheduleDateOptions(key, isPast));
+}
+
+// ---- TMDB episode stills for the anime page ----
+// The show's TMDB match and season sizes (one lookup per series, saved).
+export function useTmdbShow(anime: Anime | null) {
+  const key = anime ? seriesTitle(anime.title).toLowerCase() : '';
+  return useQuery({
+    queryKey: ['tmdbShow', key],
+    queryFn: () => fetchTmdbShow(anime!),
+    enabled: !!anime && !!key,
+    staleTime: 7 * DAY,
+  });
+}
+
+type StillMap = Map<string, TmdbEpisode>; // "season:episode" → episode
+const toStillMap = (results: { data?: { season: number; eps: TmdbEpisode[] }; isPending: boolean }[]) => {
+  const map: StillMap = new Map();
+  for (const r of results) if (r.data) for (const e of r.data.eps) map.set(`${r.data.season}:${e.number}`, e);
+  return { map, pending: results.some((r) => r.isPending) };
+};
+
+// Stills and names for absolute episodes from..to: only the TMDB seasons those
+// episodes fall in are fetched (one request per season, saved on the phone).
+export function useTmdbStills(show: TmdbShow | null | undefined, from: number, to: number, airing: boolean) {
+  const seasons = useMemo(() => {
+    if (!show || to < from) return [] as number[];
+    const set = new Set<number>();
+    for (const n of [from, to]) {
+      const p = tmdbPosition(show, n);
+      if (p) set.add(p.season);
+    }
+    // Every season between the first and last needed one.
+    const list = [...set].sort((a, b) => a - b);
+    if (list.length === 2) for (let s = list[0] + 1; s < list[1]; s++) if (show.seasons.some((x) => x.season === s)) list.push(s);
+    return list;
+  }, [show, from, to]);
+  return useQueries({
+    queries: seasons.map((season) => ({
+      queryKey: ['tmdbSeason', show?.id, season],
+      queryFn: async () => ({ season, eps: await fetchTmdbSeason(show!.id, season) }),
+      staleTime: airing ? DAY : 7 * DAY,
+    })),
+    combine: toStillMap,
+  });
 }

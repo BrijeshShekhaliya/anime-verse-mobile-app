@@ -1,6 +1,6 @@
 import { Image } from 'expo-image';
-import { router } from 'expo-router';
-import { memo } from 'react';
+import { nav } from '@/lib/nav';
+import { memo, useRef } from 'react';
 import { PixelRatio, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { LangBadges, Pill, Score } from './Badges';
@@ -23,21 +23,30 @@ export const PosterCard = memo(function PosterCard({
   index = 0,
   rank,
   showFacts = false,
+  animate = true,
 }: {
   anime: Anime;
   width?: number;
   index?: number;
   rank?: number;
   showFacts?: boolean;
+  animate?: boolean; // off in Home's rows: the whole row fades in instead
 }) {
   const { art, settled } = useArt(anime);
   const title = useTitle(anime);
-  const uri = settled ? posterOf(anime, art, HI_DPI) : undefined;
+  // Once a card shows a picture it keeps it: a better picture arriving later
+  // is used the next time the card is drawn, never swapped in while you look.
+  const shown = useRef<{ id: string; uri: string } | null>(null);
+  let uri = settled ? posterOf(anime, art, HI_DPI) : undefined;
+  if (uri) {
+    if (shown.current?.id === anime.id) uri = shown.current.uri;
+    else shown.current = { id: anime.id, uri };
+  }
   return (
     // Only the first screenful animates in; later cards (scrolling, next pages)
     // just appear, which keeps long lists smooth on slower phones.
-    <Animated.View entering={index < 9 ? FadeInDown.delay(index * 40).duration(340) : undefined} style={{ width }}>
-      <PressableScale onPressIn={() => wantArt([anime], true)} onPress={() => { api.seedDetail(anime); router.push(`/anime/${anime.id}`); }} accessibilityRole="button" accessibilityLabel={title}>
+    <Animated.View entering={animate && index < 9 ? FadeInDown.delay(index * 40).duration(340) : undefined} style={{ width }}>
+      <PressableScale onPressIn={() => wantArt([anime], true)} onPress={() => { api.seedDetail(anime); nav.push(`/anime/${anime.id}`); }} accessibilityRole="button" accessibilityLabel={title}>
         <View style={[styles.poster, { width, height: width * 1.5 }]}>
           {uri ? (
             <Image source={{ uri }} style={StyleSheet.absoluteFill} contentFit="cover" transition={220} cachePolicy="memory-disk" recyclingKey={anime.id} />

@@ -1,5 +1,7 @@
 import { Image } from 'expo-image';
 import { StyleSheet, View } from 'react-native';
+import Animated, { interpolate, useAnimatedStyle } from 'react-native-reanimated';
+import { splashStage } from '@/lib/splash';
 import { GradientText } from './GradientText';
 import { fonts } from '@/lib/theme';
 
@@ -11,14 +13,29 @@ export const BRAND_FIRE = ['#FFC15E', '#FF640A', '#FF3B2F'] as const;
 
 // The AnimeVerse lockup: the logo and the wide geometric wordmark, used
 // wherever the brand appears so it always looks the same.
-export function Brand({ size = 40, showName = true, showLogo = true }: { size?: number; showName?: boolean; showLogo?: boolean }) {
+// fromSplash: this is where the launch animation's logo lands (Home's header):
+// the logo appears the moment it lands, then the wordmark slides out of it.
+export function Brand({ size = 40, showName = true, showLogo = true, fromSplash = false }: { size?: number; showName?: boolean; showLogo?: boolean; fromSplash?: boolean }) {
+  const logoIn = useAnimatedStyle(() => (fromSplash ? { opacity: splashStage.value >= 1 ? 1 : 0 } : {}));
+  const wordIn = useAnimatedStyle(() =>
+    fromSplash
+      ? {
+          opacity: interpolate(splashStage.value, [1, 2], [0, 1], 'clamp'),
+          transform: [{ translateX: interpolate(splashStage.value, [1, 2], [-14, 0], 'clamp') }],
+        }
+      : {}
+  );
   const font = Math.round(size * 0.38);
   const text = { fontFamily: fonts.brand, fontSize: font, lineHeight: Math.round(font * 1.25), letterSpacing: font * 0.08 };
   return (
     <View style={styles.row} accessibilityRole="header" accessibilityLabel="AnimeVerse">
-      {showLogo ? <Image source={LOGO} style={{ width: size, height: size }} contentFit="contain" cachePolicy="memory" /> : null}
+      {showLogo ? (
+        <Animated.View style={logoIn}>
+          <Image source={LOGO} style={{ width: size, height: size }} contentFit="contain" cachePolicy="memory" />
+        </Animated.View>
+      ) : null}
       {showName ? (
-        <View style={styles.word}>
+        <Animated.View style={[styles.word, wordIn]}>
           <GradientText colors={BRAND_SILVER} horizontal={false} style={text}>
             ANIME
           </GradientText>
@@ -26,7 +43,7 @@ export function Brand({ size = 40, showName = true, showLogo = true }: { size?: 
           <GradientText colors={BRAND_FIRE} style={text}>
             VERSE
           </GradientText>
-        </View>
+        </Animated.View>
       ) : null}
     </View>
   );

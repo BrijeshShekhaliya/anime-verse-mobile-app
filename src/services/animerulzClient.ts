@@ -30,9 +30,22 @@ const STORAGE_ACTIVE_DOMAIN_KEY = '@animeverse:animerulz_active_domain';
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-let _pinnedDomain: string | null = null;
+let _pinnedDomain: string = ANIMERULZ_DOMAINS[0];
 let _hasVerifiedThisSession = false;
 let _verificationPromise: Promise<string> | null = null;
+
+// Eagerly hydrate last working domain from storage in the background without blocking execution
+if (AsyncStorage) {
+  try {
+    AsyncStorage.getItem(STORAGE_ACTIVE_DOMAIN_KEY)
+      .then((saved: string | null) => {
+        if (saved && ANIMERULZ_DOMAINS.includes(saved)) {
+          _pinnedDomain = saved;
+        }
+      })
+      .catch(() => {});
+  } catch {}
+}
 
 // In-memory stream cache and AniList ID lookup cache
 const _streamCache = new Map<string, { ts: number; data: StreamData }>();
@@ -265,16 +278,36 @@ export function unpackDeanEdwards(packedJs: string): string {
 }
 
 /**
- * Startup Verification & Domain Pinning:
- * 1. Test last saved domain first. If healthy (200 OK), pin it and STOP immediately.
- * 2. If blocked or down, test remaining mirrors in the array.
- * 3. Runs strictly once per app session (never in a loop).
+ * Fast Domain Resolution & Background Health Check:
+ * 1. Optimistic return: immediately returns pinned domain (defaulting to primary domain)
+ *    so stream requests are never stalled behind a 3.5s health ping.
+ * 2. Asynchronously verifies the domain in the background once per session.
+ * 3. On force=true or hard failure, probes mirrors and updates the pinned domain.
  */
-export async function getOrVerifyActiveDomain(force = false): Promise<string> {
-  if (!force && _pinnedDomain && _hasVerifiedThisSession) {
-    return _pinnedDomain;
+async function checkDomainHealth(domain: string): Promise<boolean> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 3500);
+  try {
+    const res = await fetch(`${domain}/api/reanime/filter_count`, {
+      method: 'GET',
+      headers: {
+        'User-Agent': USER_AGENT,
+        Accept: 'application/json',
+        Origin: domain,
+        Referer: `${domain}/`,
+        'Sec-Fetch-Site': 'same-origin',
+      },
+      signal: ctrl.signal,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
   }
+}
 
+async function verifyActiveDomainInBackground(): Promise<string> {
   if (_verificationPromise) {
     return _verificationPromise;
   }
@@ -287,44 +320,20 @@ export async function getOrVerifyActiveDomain(force = false): Promise<string> {
       }
     } catch {}
 
-    const checkDomain = async (domain: string): Promise<boolean> => {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 3500);
-      try {
-        const res = await fetch(`${domain}/api/reanime/filter_count`, {
-          method: 'GET',
-          headers: {
-            'User-Agent': USER_AGENT,
-            Accept: 'application/json',
-            Origin: domain,
-            Referer: `${domain}/`,
-            'Sec-Fetch-Site': 'same-origin',
-          },
-          signal: ctrl.signal,
-        });
-        return res.ok;
-      } catch {
-        return false;
-      } finally {
-        clearTimeout(timer);
-      }
-    };
-
-    // 1. Test last saved domain first
-    if (saved && ANIMERULZ_DOMAINS.includes(saved)) {
-      const ok = await checkDomain(saved);
-      if (ok) {
-        _pinnedDomain = saved;
-        _hasVerifiedThisSession = true;
-        return saved;
-      }
+    // 1. Test current pinned domain or saved domain first
+    const primary = saved && ANIMERULZ_DOMAINS.includes(saved) ? saved : _pinnedDomain;
+    const ok = await checkDomainHealth(primary);
+    if (ok) {
+      _pinnedDomain = primary;
+      _hasVerifiedThisSession = true;
+      return primary;
     }
 
     // 2. Fall back to testing all known mirrors
     for (const domain of ANIMERULZ_DOMAINS) {
-      if (domain === saved) continue; // already tested
-      const ok = await checkDomain(domain);
-      if (ok) {
+      if (domain === primary) continue;
+      const mirrorOk = await checkDomainHealth(domain);
+      if (mirrorOk) {
         _pinnedDomain = domain;
         _hasVerifiedThisSession = true;
         try {
@@ -346,6 +355,19 @@ export async function getOrVerifyActiveDomain(force = false): Promise<string> {
   });
 
   return _verificationPromise;
+}
+
+export async function getOrVerifyActiveDomain(force = false): Promise<string> {
+  if (force) {
+    return verifyActiveDomainInBackground();
+  }
+
+  // Optimistic fast path: return pinned domain immediately without blocking
+  const domain = _pinnedDomain || ANIMERULZ_DOMAINS[0];
+  if (!_hasVerifiedThisSession && !_verificationPromise) {
+    verifyActiveDomainInBackground().catch(() => {});
+  }
+  return domain;
 }
 
 /**
@@ -371,7 +393,7 @@ export async function resolveAnimeRulzDirect(
       if (params.id.startsWith('al')) {
         const parsed = parseInt(params.id.slice(2), 10);
         if (!isNaN(parsed) && parsed > 0) anilistId = parsed;
-      } else if (/^\\d+$/.test(params.id)) {
+      } else if (/^\d+$/.test(params.id)) {
         const parsed = parseInt(params.id, 10);
         if (!isNaN(parsed) && parsed > 0) anilistId = parsed;
       }
@@ -525,53 +547,49 @@ export async function resolveAnimeRulzDirect(
     throw new Error('Could not extract master.m3u8 from AnimeRulz server');
   }
 
-  let audioTracks: StreamAudioTrack[] = [];
-  try {
-    const manCtrl = new AbortController();
-    const manTimer = setTimeout(() => manCtrl.abort(), 1200); // 1.2s ultra-fast manifest inspection
-    const manifestText = await fetch(masterM3u8, {
-      headers: { 'User-Agent': USER_AGENT, Referer: referer },
-      signal: manCtrl.signal,
-    })
-      .then((r) => r.text())
-      .finally(() => clearTimeout(manTimer));
+  // Construct audio tracks based on server metadata without blocking JS-level manifest fetch.
+  // ExoPlayer parses all in-band audio renditions dynamically at 60 FPS on the native thread.
+  const isMultiAudio =
+    dataLink.includes('ravok.buzz') ||
+    multiServer?.dataType === 'indian' ||
+    String(multiServer?.serverName || '').toLowerCase().includes('multi') ||
+    String(multiServer?.serverName || '').toLowerCase().includes('hindi');
 
-    audioTracks = parseHlsAudioTracks(manifestText, masterM3u8);
-  } catch {
-    // Non-fatal if manifest inspection times out; native ExoPlayer parses all renditions dynamically
-  }
-
-  // Fallback: If manifest fetch timed out or returned empty, but server is Multi-Audio or Ravok,
-  // seed standard multi-audio tracks so downstream checks never falsely reject Hindi!
-  if (
-    audioTracks.length === 0 &&
-    (dataLink.includes('ravok.buzz') ||
-      multiServer?.dataType === 'indian' ||
-      String(multiServer?.serverName || '').toLowerCase().includes('multi'))
-  ) {
-    audioTracks = [
-      {
-        id: 'hls-audio-0',
-        name: 'Japanese',
-        language: 'jpn',
-        groupId: 'audio',
-        uri: null,
-        isDefault: false,
-        isAutoselect: true,
-        channels: null,
-      },
-      {
-        id: 'hls-audio-1',
-        name: 'Hindi',
-        language: 'hin',
-        groupId: 'audio',
-        uri: null,
-        isDefault: true,
-        isAutoselect: true,
-        channels: null,
-      },
-    ];
-  }
+  const audioTracks: StreamAudioTrack[] = isMultiAudio
+    ? [
+        {
+          id: 'hls-audio-0',
+          name: 'Japanese',
+          language: 'jpn',
+          groupId: 'audio',
+          uri: null,
+          isDefault: false,
+          isAutoselect: true,
+          channels: null,
+        },
+        {
+          id: 'hls-audio-1',
+          name: 'Hindi',
+          language: 'hin',
+          groupId: 'audio',
+          uri: null,
+          isDefault: true,
+          isAutoselect: true,
+          channels: null,
+        },
+      ]
+    : [
+        {
+          id: 'hls-audio-0',
+          name: 'Default',
+          language: 'und',
+          groupId: 'audio',
+          uri: null,
+          isDefault: true,
+          isAutoselect: true,
+          channels: null,
+        },
+      ];
 
   const result: StreamData = {
     success: true,

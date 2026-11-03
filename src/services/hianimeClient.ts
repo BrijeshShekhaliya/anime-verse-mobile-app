@@ -264,16 +264,18 @@ export async function resolveHiAnimeDirect(
     params.romaji,
   ].filter(Boolean) as string[];
 
-  // 2. Find show matching candidate title
+  // 2. Find show matching candidate title (parallel search across candidates)
   let show: { id: string; title: string; jname?: string | null } | null = null;
-  for (const candidate of searchCandidates) {
-    try {
-      const results = await hianimeSearch(candidate);
-      if (results.length > 0) {
-        show = results[0];
+  if (searchCandidates.length > 0) {
+    const searchResults = await Promise.allSettled(
+      searchCandidates.map((candidate) => hianimeSearch(candidate)),
+    );
+    for (const res of searchResults) {
+      if (res.status === 'fulfilled' && res.value && res.value.length > 0) {
+        show = res.value[0];
         break;
       }
-    } catch {}
+    }
   }
 
   if (!show) {
@@ -359,14 +361,20 @@ export async function resolveHiAnimeDirect(
       default: Boolean(s.default),
     }));
 
-  // 9. Fetch master manifest directly to extract ALL audio tracks (Hindi, English, etc.)
-  let audioTracks: StreamAudioTrack[] = [];
-  try {
-    const masterManifest = await fetchWithTimeout(masterUrl, referer, 7000);
-    audioTracks = parseHlsAudioTracks(masterManifest, masterUrl);
-  } catch (err: any) {
-    console.warn('[hianimeClient] Could not parse in-manifest audio tracks:', err?.message);
-  }
+  // 9. Assign stream audio track metadata immediately without blocking JS-level manifest fetch.
+  // ExoPlayer parses all in-band audio renditions dynamically at 60 FPS on the native thread.
+  const audioTracks: StreamAudioTrack[] = [
+    {
+      id: 'hls-audio-0',
+      name: params.mode === 'dub' ? 'English' : 'Japanese',
+      language: params.mode === 'dub' ? 'eng' : 'jpn',
+      groupId: 'audio',
+      uri: null,
+      isDefault: true,
+      isAutoselect: true,
+      channels: null,
+    },
+  ];
 
   const result: StreamData = {
     success: true,

@@ -1,16 +1,18 @@
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router, useLocalSearchParams, useNavigation } from 'expo-router';
+import { useLocalSearchParams, useNavigation } from 'expo-router';
+import { nav } from '@/lib/nav';
 import * as WebBrowser from 'expo-web-browser';
-import { memo, useEffect, useRef, useState } from 'react';
-import { Linking, Platform, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Linking, Platform, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
 import Animated, {
   Easing,
   Extrapolation,
   FadeIn,
   FadeInDown,
   interpolate,
+  runOnJS,
   useAnimatedScrollHandler,
   useAnimatedStyle,
   useReducedMotion,
@@ -27,10 +29,10 @@ import { PosterCard } from '@/components/PosterCard';
 import { PressableScale } from '@/components/PressableScale';
 import { Skeleton } from '@/components/Skeleton';
 import { ErrorState } from '@/components/States';
-import { posterOf, useArt } from '@/lib/artwork';
+import { posterOf, tmdbPosition, useArt, type TmdbEpisode } from '@/lib/artwork';
 import { fmtNum } from '@/lib/format';
 import { useLibrary } from '@/lib/library';
-import { useDetail, useEpisodeGuide, useExtras, useSeasons } from '@/lib/queries';
+import { useDetail, useEpisodeGuide, useExtras, useSeasons, useTmdbShow, useTmdbStills } from '@/lib/queries';
 import { anilistIdOf, type GuideEpisode } from '@/lib/episodeGuide';
 import { displayTitle, useSettings } from '@/lib/settings';
 import { colors, fonts, radius, springs } from '@/lib/theme';
@@ -47,8 +49,10 @@ const openLink = (url: string) => {
   else WebBrowser.openBrowserAsync(url).catch(() => Linking.openURL(url));
 };
 
-const goBack = () => (router.canGoBack() ? router.back() : router.replace('/'));
+const goBack = () => nav.back();
 const BOTTOM_BAR = 76;
+// Episodes drawn per step (long seasons grow as you scroll).
+const EP_PAGE = 30;
 
 type Tab = 'episodes' | 'more';
 
@@ -66,7 +70,7 @@ export default function DetailScreen() {
   useEffect(() => {
     const done = () => setOpened2(true);
     const unsub = navigation.addListener('transitionEnd' as never, done);
-    const t = setTimeout(done, 350); // in case the event never comes
+    const t = setTimeout(done, 700); // in case the event never comes
     return () => {
       unsub();
       clearTimeout(t);
@@ -98,16 +102,67 @@ export default function DetailScreen() {
   // Fixed when the page opens: the poster the card already showed (instant,
   // from cache) is the first layer of the key art.
   const opened = useRef<{ id: string; poster?: string; logoKnown: boolean } | null>(null);
-  if (a && opened.current?.id !== a.id) opened.current = { id: a.id, poster: posterOf(a, tmdb), logoKnown: artKnown };
+  // Only a TMDB answer counts (never an AniList cover shown first, then swapped).
+  if (a && opened.current?.id !== a.id) opened.current = { id: a.id, poster: tmdb ? posterOf(a, tmdb) : undefined, logoKnown: artKnown };
 
   const [tab, setTab] = useState<Tab>('episodes');
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [seasonOpen, setSeasonOpen] = useState(false);
 
+  // Long seasons (One Piece has 1,100+ episodes) are drawn 30 at a time as you
+  // scroll near the end, so the page never builds hundreds of rows and images at
+  // once: it opens, scrolls and closes as lightly as a short show.
+  const [epLimit, setEpLimit] = useState(EP_PAGE);
+  useEffect(() => setEpLimit(EP_PAGE), [seasonId]);
+  const epCount = guide.data?.length ?? 0;
+  const epTotal = useRef(0);
+  epTotal.current = epCount;
+  const loadMore = useCallback(() => setEpLimit((l) => (l < epTotal.current ? l + EP_PAGE : l)), []);
+
+  // Episode stills and names from TMDB (AniList only has them for some shows).
+  // TMDB is asked only when an episode on screen is missing its picture or real
+  // name in AniList's list, so one thing is never fetched from both sources.
+  // Episodes are matched by absolute number: this season's episodes come after
+  // all the earlier seasons' ones. Only the TMDB seasons on screen are fetched.
+  const tmdbShow = useTmdbShow(a);
+  const offset = useMemo(() => {
+    if (!seasonsQ.isSuccess) return null;
+    const idx = seasonList.findIndex((x) => x.anilistId === seasonId);
+    let sum = 0;
+    for (let i = 0; i < idx; i++) {
+      const n = seasonList[i].episodes;
+      if (!n) return null; // an earlier season's length is unknown: can't place episodes
+      sum += n;
+    }
+    return sum;
+  }, [seasonsQ.isSuccess, seasonList, seasonId]);
+  const shown = Math.min(epLimit, epCount);
+  const stills = useTmdbStills(offset == null ? null : tmdbShow.data, (offset ?? 0) + 1, (offset ?? 0) + shown, !!a?.airing);
+  // TMDB has answered for the episodes on screen (or can't place them): only
+  // then may an episode without a TMDB still use AniList's picture.
+  const stillsDone = !tmdbShow.isPending && (!tmdbShow.data || (!seasonsQ.isPending && (offset == null || !stills.pending)));
+  const tmdbFor = useCallback(
+    (n: number): TmdbEpisode | undefined => {
+      if (offset == null || !tmdbShow.data) return undefined;
+      const p = tmdbPosition(tmdbShow.data, offset + n);
+      return p ? stills.map.get(`${p.season}:${p.episode}`) : undefined;
+    },
+    [offset, tmdbShow.data, stills]
+  );
+
   // ---- Motion ----
   const scrollY = useSharedValue(0);
+  const lastMore = useSharedValue(0);
   const onScroll = useAnimatedScrollHandler((e) => {
     scrollY.value = e.contentOffset.y;
+    // Near the bottom: draw the next episodes (at most every 300 ms).
+    if (e.contentOffset.y + e.layoutMeasurement.height > e.contentSize.height - 1400) {
+      const t = Date.now();
+      if (t - lastMore.value > 300) {
+        lastMore.value = t;
+        runOnJS(loadMore)();
+      }
+    }
   });
   // Key art settles in (slow zoom-out), moves at half speed while scrolling,
   // stretches when pulled down.
@@ -142,7 +197,7 @@ export default function DetailScreen() {
   const name = displayTitle(a, titleLang);
   const cardPoster = opened.current?.poster;
   // Tall key art: the TMDB poster at a size fit for the full screen width.
-  const keyArt = artSettled && tmdb?.poster ? tmdb.poster.replace('/w342/', '/w780/') : undefined;
+  const keyArt = !artSettled ? undefined : tmdb?.poster ? tmdb.poster.replace('/w342/', '/w780/') : a ? posterOf(a, tmdb) : undefined;
   // Title logo: shown if known when the page opened, or as soon as the lookup
   // lands (its space is reserved, so nothing shifts). Otherwise a display-font title.
   const logo = tmdb?.logo || null;
@@ -257,10 +312,12 @@ export default function DetailScreen() {
 
             <View style={styles.epList}>
               {episodes.length ? (
-                episodes.map((ep, i) => (
+                episodes.slice(0, epLimit).map((ep, i) => (
                   <EpisodeRow
                     key={`${seasonId}-${ep.number}`}
                     ep={ep}
+                    tmdb={tmdbFor(ep.number)}
+                    tmdbDone={stillsDone}
                     index={i}
                     watchId={watchId}
                     seasonNumber={current?.seasonNumber || 1}
@@ -275,6 +332,14 @@ export default function DetailScreen() {
               ) : (
                 <Text style={styles.empty}>Episodes aren't listed for this season yet.</Text>
               )}
+              {epCount > epLimit ? (
+                <View style={styles.moreEps}>
+                  <ActivityIndicator size="small" color={colors.accent} />
+                  <Text style={styles.moreEpsText}>
+                    Showing {epLimit} of {epCount} episodes
+                  </Text>
+                </View>
+              ) : null}
             </View>
           </Animated.View>
         ) : (
@@ -320,7 +385,7 @@ export default function DetailScreen() {
                   key={g}
                   onPress={() => {
                     setDetailsOpen(false);
-                    router.push(`/browse?genre=${encodeURIComponent(g)}`);
+                    nav.push(`/browse?genre=${encodeURIComponent(g)}`);
                   }}
                   style={styles.genreChip}
                 >
@@ -444,7 +509,7 @@ function BottomBar({ anime, currentSeason = 1, bottom }: { anime: AnimeDetail; c
   return (
     <View style={[styles.bottomBar, { paddingBottom: bottom + 10 }]} pointerEvents="box-none">
       <LinearGradient colors={['transparent', 'rgba(0,0,0,0.92)', '#000']} locations={[0, 0.45, 1]} style={StyleSheet.absoluteFill} pointerEvents="none" />
-      <PressableScale haptic style={styles.primaryBtn} scaleTo={0.97} onPress={() => router.push(`/watch/${anime.id}?season=${currentSeason}&ep=${targetEp}` as any)}>
+      <PressableScale haptic style={styles.primaryBtn} scaleTo={0.97} onPress={() => nav.push(`/watch/${anime.id}?season=${currentSeason}&ep=${targetEp}` as any)}>
         <Icon name="play" size={20} color="#000" />
         <Text style={styles.primaryText} numberOfLines={1}>
           {watchedEp > 0 ? (isDoneAll ? 'Replay E1' : `Continue E${targetEp}`) : 'Start Watching E1'}
@@ -478,6 +543,7 @@ function InfoLine({ label, value }: { label: string; value?: string | null }) {
 }
 
 // Tabs with an underline that slides between them.
+const LINE_W = 100;
 function Tabs({ value, tabs, onChange }: { value: Tab; tabs: { key: Tab; label: string }[]; onChange: (t: Tab) => void }) {
   const [layouts, setLayouts] = useState<Record<string, { x: number; w: number }>>({});
   const x = useSharedValue(0);
@@ -490,7 +556,8 @@ function Tabs({ value, tabs, onChange }: { value: Tab; tabs: { key: Tab; label: 
     x.value = first ? l.x : withTiming(l.x, ease);
     w.value = first ? l.w : withTiming(l.w, ease);
   }, [value, layouts, x, w]);
-  const line = useAnimatedStyle(() => ({ width: w.value, transform: [{ translateX: x.value }] }));
+  // Moved and stretched with transforms (no re-layout while it slides).
+  const line = useAnimatedStyle(() => ({ transform: [{ translateX: x.value }, { scaleX: w.value / LINE_W }] }));
   return (
     <View style={styles.tabs}>
       {tabs.map((t) => (
@@ -524,8 +591,12 @@ const EpisodeRow = memo(function EpisodeRow({
   fallback,
   thumbW,
   reduce,
+  tmdb,
+  tmdbDone,
 }: {
   ep: GuideEpisode;
+  tmdb?: TmdbEpisode;
+  tmdbDone: boolean;
   index: number;
   watchId: string;
   seasonNumber?: number;
@@ -534,13 +605,16 @@ const EpisodeRow = memo(function EpisodeRow({
   thumbW: number;
   reduce: boolean;
 }) {
-  const thumb = ep.thumb || fallback;
+  // TMDB's still; AniList's picture only once TMDB has none for this episode.
+  const thumb = tmdb?.still || (tmdbDone ? ep.thumb || fallback : undefined);
+  // AniList's name, or TMDB's when AniList only has "Episode 4".
+  const name = ep.title === `Episode ${ep.number}` && tmdb?.name ? tmdb.name : ep.title;
   const date = ep.airingAt ? new Date(ep.airingAt * 1000) : null;
   const upcoming = !!date && date.getTime() > Date.now();
   return (
     <Animated.View entering={reduce || index > 7 ? undefined : FadeInDown.delay(index * 45).duration(320)}>
       <PressableScale
-        onPress={() => router.push(`/watch/${watchId}?season=${seasonNumber}&ep=${ep.number}` as any)}
+        onPress={() => nav.push(`/watch/${watchId}?season=${seasonNumber}&ep=${ep.number}` as any)}
         style={styles.epRow}
         scaleTo={0.98}
         accessibilityLabel={`Episode ${ep.number}, ${ep.title}`}
@@ -559,7 +633,7 @@ const EpisodeRow = memo(function EpisodeRow({
         <View style={{ flex: 1, paddingTop: 2 }}>
           <Text style={styles.epTitle} numberOfLines={3}>
             {/* "4. The Door to Hell"; just "Episode 4" when AniList has no name for it. */}
-            {ep.title === `Episode ${ep.number}` ? ep.title : `${ep.number}. ${ep.title}`}
+            {name === `Episode ${ep.number}` ? name : `${ep.number}. ${name}`}
           </Text>
           {date ? (
             <Text style={[styles.epMeta, upcoming && { color: colors.accent }]}>
@@ -673,7 +747,7 @@ const styles = StyleSheet.create({
   tab: { paddingVertical: 14 },
   tabText: { color: colors.muted, fontFamily: fonts.black, fontSize: 15 },
   tabTextOn: { color: '#fff' },
-  tabLine: { position: 'absolute', left: 0, bottom: -1, height: 3, backgroundColor: colors.accent },
+  tabLine: { position: 'absolute', left: 0, bottom: -1, width: LINE_W, height: 3, transformOrigin: 'left', backgroundColor: colors.accent },
   seasonRow: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 16, paddingVertical: 18, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.12)' },
   seasonText: { flex: 1, color: '#fff', fontFamily: fonts.black, fontSize: 18 },
   seasonCount: { color: colors.muted, fontFamily: fonts.bold, fontSize: 12.5 },
@@ -686,6 +760,8 @@ const styles = StyleSheet.create({
   epDurationText: { color: '#fff', fontFamily: fonts.regular, fontSize: 12 },
   epTitle: { color: '#fff', fontFamily: fonts.regular, fontSize: 15.5, lineHeight: 21 },
   epMeta: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12.5, marginTop: 6 },
+  moreEps: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingVertical: 18 },
+  moreEpsText: { color: colors.muted, fontFamily: fonts.medium, fontSize: 12.5 },
   empty: { color: colors.muted, fontFamily: fonts.regular, fontSize: 14, paddingVertical: 12 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', columnGap: 12, rowGap: 18, paddingHorizontal: 16, paddingTop: 18 },
   topBar: { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10 },

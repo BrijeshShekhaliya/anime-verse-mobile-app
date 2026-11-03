@@ -1,7 +1,8 @@
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router, useFocusEffect } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
+import { nav } from '@/lib/nav';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Platform, StyleSheet, Text, View, useWindowDimensions, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import Animated, {
@@ -90,7 +91,7 @@ function Slide({ anime, index, width, height, scrollX, active }: { anime: Anime;
         </View>
         {anime.genres?.length ? <Text style={styles.genres}>{anime.genres.slice(0, 3).join(' • ')}</Text> : null}
         <View style={styles.actions}>
-          <PressableScale haptic style={styles.primary} onPress={() => { api.seedDetail(anime); router.push(`/anime/${anime.id}`); }}>
+          <PressableScale haptic style={styles.primary} onPress={() => { api.seedDetail(anime); nav.push(`/anime/${anime.id}`); }}>
             <Icon name="info" size={18} color="#000" />
             <Text style={styles.primaryText}>Details</Text>
           </PressableScale>
@@ -118,7 +119,8 @@ function Dot({ on, progress }: { on: boolean; progress: SharedValue<number> }) {
     w.value = withTiming(on ? 26 : 7, { duration: 260, easing: Easing.out(Easing.cubic) });
   }, [on, w]);
   const box = useAnimatedStyle(() => ({ width: w.value }));
-  const fill = useAnimatedStyle(() => ({ width: on ? `${progress.value * 100}%` : '0%' }));
+  // Fills every frame while the slide plays: a transform, so nothing re-lays out.
+  const fill = useAnimatedStyle(() => ({ transform: [{ scaleX: on ? progress.value : 0 }] }));
   return (
     <Animated.View style={[styles.dot, box]}>
       <Animated.View style={[styles.dotFill, fill]} />
@@ -239,5 +241,5 @@ const styles = StyleSheet.create({
   ghost: { width: 46, height: 46, borderRadius: radius.md, borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.35)', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.35)' },
   dots: { position: 'absolute', bottom: 18, left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', gap: 6 },
   dot: { height: 7, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.3)', overflow: 'hidden' },
-  dotFill: { height: '100%', backgroundColor: colors.accent },
+  dotFill: { width: '100%', height: '100%', transformOrigin: 'left', backgroundColor: colors.accent },
 });

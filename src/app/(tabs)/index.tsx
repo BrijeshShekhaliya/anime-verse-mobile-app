@@ -1,5 +1,6 @@
-import { router } from 'expo-router';
-import { useMemo, useRef, useState } from 'react';
+import { nav } from '@/lib/nav';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { whenIdle } from '@/lib/idle';
 import { FlatList, RefreshControl, View } from 'react-native';
 import Animated, { useAnimatedScrollHandler, useSharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -40,6 +41,18 @@ export default function HomeScreen() {
   const spotlightRef = useRef(data?.spotlight);
   if (!spotlightRef.current?.length && data?.spotlight?.length) spotlightRef.current = data.spotlight;
   const spotlight = spotlightRef.current || [];
+
+  // The rows below the fold are added one per idle moment instead of all in the
+  // first frame, so Home appears (and the launch animation lands) without a hitch.
+  const [rowsShown, setRowsShown] = useState(2);
+  useEffect(() => {
+    if (!data || rowsShown >= 7) return;
+    let live = true;
+    whenIdle(() => live && setRowsShown((n) => n + 1), 300);
+    return () => {
+      live = false;
+    };
+  }, [data, rowsShown]);
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
       <TopBar scrollY={scrollY} solidAfter={260} />
@@ -84,7 +97,7 @@ export default function HomeScreen() {
                 <View style={{ marginBottom: SECTION_GAP }}>
                   <SectionHeader
                     title="Continue Watching"
-                    onMore={() => router.push('/library')}
+                    onMore={() => nav.push('/library')}
                   />
                   <FlatList
                     horizontal
@@ -106,11 +119,11 @@ export default function HomeScreen() {
                 items={data.seasonNow}
                 more="/browse?status=airing"
               />
-              <Row title="Dubbed in English" items={dubbed} more="/browse?dub=1" />
-              <Row title="Highest Rated of All Time" items={data.topRated} more="/browse?order=score" />
-              <Row title="Most Popular" items={data.popular} more="/browse?order=popularity" />
-              <Row title="Coming Next Season" items={data.upcoming} more="/browse?status=upcoming" />
-              <Row title="Top Anime Movies" items={data.movies} more="/browse?type=movie&order=score" />
+              {rowsShown > 2 ? <Row title="Dubbed in English" items={dubbed} more="/browse?dub=1" /> : null}
+              {rowsShown > 3 ? <Row title="Highest Rated of All Time" items={data.topRated} more="/browse?order=score" /> : null}
+              {rowsShown > 4 ? <Row title="Most Popular" items={data.popular} more="/browse?order=popularity" /> : null}
+              {rowsShown > 5 ? <Row title="Coming Next Season" items={data.upcoming} more="/browse?status=upcoming" /> : null}
+              {rowsShown > 6 ? <Row title="Top Anime Movies" items={data.movies} more="/browse?type=movie&order=score" /> : null}
             </View>
           </>
         ) : null}

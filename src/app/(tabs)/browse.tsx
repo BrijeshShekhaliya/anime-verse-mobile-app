@@ -7,6 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BottomSheet } from '@/components/BottomSheet';
 import { Icon, type IconName } from '@/components/Icon';
 import { PosterCard } from '@/components/PosterCard';
+import { wantArt } from '@/lib/artwork';
 import { PressableScale } from '@/components/PressableScale';
 import { Skeleton } from '@/components/Skeleton';
 import { EmptyState, ErrorState } from '@/components/States';
@@ -73,20 +74,30 @@ export default function BrowseScreen() {
   const [query, setQuery] = useState(params.q || ''); // debounced
   const [focused, setFocused] = useState(false);
   // Opened from Home's search button: the search bar starts as that round
-  // button (same spot, top-right) and flies down while stretching to full width,
+  // button (same spot, top-right) and flies down while growing to full width,
   // so the button visibly becomes the search bar.
+  // Transform-only, so it runs on the UI thread without re-laying out a frame:
+  // the bar is always full width and clips a full-width pill that slides in from
+  // the right (its left edge sweeps left, both ends stay perfectly round).
   const arrive = useSharedValue(searchFocusPending() ? 0 : 1);
   const barY = useSharedValue(insets.top + 60); // search bar's top, measured below
   const fullW = width - 32;
   const startY = insets.top + (SEARCH_BUTTON.barHeight - BAR_H) / 2; // where Home's button sits
   const startScale = SEARCH_BUTTON.size / BAR_H;
-  const arriveStyle = useAnimatedStyle(() => ({
-    width: interpolate(arrive.value, [0, 1], [BAR_H, fullW]),
-    borderRadius: interpolate(arrive.value, [0, 1], [BAR_H / 2, radius.lg]),
+  const flyStyle = useAnimatedStyle(() => ({
     transform: [
       { translateY: interpolate(arrive.value, [0, 1], [startY - barY.value, 0]) },
       { scale: interpolate(arrive.value, [0, 1], [startScale, 1]) },
     ],
+  }));
+  const pillStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: interpolate(arrive.value, [0, 1], [fullW - BAR_H, 0]) }],
+  }));
+  // The button's own icon while it is still a button, then the bar's contents.
+  const ghostStyle = useAnimatedStyle(() => ({ opacity: interpolate(arrive.value, [0, 0.35], [1, 0], 'clamp') }));
+  const contentStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(arrive.value, [0.55, 1], [0, 1], 'clamp'),
+    transform: [{ translateX: interpolate(arrive.value, [0.55, 1], [18, 0], 'clamp') }],
   }));
 
   // Only act while Browse is the screen on show: a hidden (frozen) Browse must
@@ -157,6 +168,9 @@ export default function BrowseScreen() {
     }
     return out;
   }, [results.data, query]);
+  // Look up the pictures for the whole page as soon as it arrives, not when each
+  // card scrolls into view, so cards appear with their final picture.
+  useEffect(() => wantArt(items), [items]);
   const loading = results.isPending;
   const switching = results.isPlaceholderData; // new search/filter on its way
   const error = results.error ? results.error.message || 'Something went wrong' : null;
@@ -199,8 +213,13 @@ export default function BrowseScreen() {
         onLayout={(e) => {
           barY.value = e.nativeEvent.layout.y;
         }}
-        style={[styles.searchBar, focused && styles.searchFocused, arriveStyle]}
+        style={[styles.searchWrap, flyStyle]}
       >
+        <Animated.View style={[styles.searchPill, focused && styles.searchFocused, pillStyle]} />
+        <Animated.View pointerEvents="none" style={[styles.searchGhost, ghostStyle]}>
+          <Icon name="search" size={20} color="#fff" />
+        </Animated.View>
+        <Animated.View style={[styles.searchBar, contentStyle]}>
         <Icon name="search" size={18} color={focused ? colors.accent : colors.muted} />
         <TextInput
           ref={inputRef}
@@ -233,6 +252,7 @@ export default function BrowseScreen() {
             <Icon name="x" size={18} color={colors.muted} />
           </PressableScale>
         ) : null}
+        </Animated.View>
       </Animated.View>
 
       {/* Recent searches while the box is focused and empty. */}
@@ -502,7 +522,10 @@ const styles = StyleSheet.create({
   moreRetryText: { color: colors.accent, fontFamily: fonts.bold, fontSize: 13 },
   screen: { flex: 1, backgroundColor: colors.bg },
   title: { color: '#fff', fontFamily: fonts.black, fontSize: 28, paddingHorizontal: 16 },
-  searchBar: { flexDirection: 'row', alignItems: 'center', gap: 10, height: BAR_H, overflow: 'hidden', alignSelf: 'flex-end', transformOrigin: 'right', marginHorizontal: 16, marginTop: 14, paddingHorizontal: 14, borderRadius: radius.lg, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.surface3 },
+  searchWrap: { height: BAR_H, marginHorizontal: 16, marginTop: 14, borderRadius: BAR_H / 2, overflow: 'hidden', transformOrigin: 'right' },
+  searchPill: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, borderRadius: BAR_H / 2, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.surface3 },
+  searchGhost: { position: 'absolute', top: 0, bottom: 0, right: 0, width: BAR_H, alignItems: 'center', justifyContent: 'center' },
+  searchBar: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16 },
   searchFocused: { borderColor: colors.accent, backgroundColor: '#18191e' },
   searchInput: { flex: 1, color: '#fff', fontFamily: fonts.bold, fontSize: 15.5, paddingVertical: 0 },
   recentRow: { gap: 8, paddingHorizontal: 16, paddingTop: 10 },

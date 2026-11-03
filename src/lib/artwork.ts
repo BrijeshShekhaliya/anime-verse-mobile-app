@@ -1,14 +1,16 @@
-// TMDB artwork (posters, wide banners, title logos) on top of AniList data.
-// AniList stays the source for everything else; this only swaps pictures.
+// TMDB artwork (posters, wide banners, title logos, episode stills).
+// AniList stays the source for everything else; pictures come from TMDB.
 // Runs entirely on the phone: no AnimeVerse server involved.
 //
-// Never blocks a screen: a card waits at most WAIT_MS for its TMDB picture,
-// then shows the AniList one. Every lookup is saved on the phone, so the next
-// launch shows TMDB art instantly with no requests at all.
+// A picture waits for TMDB (a placeholder shows meanwhile) and never shows an
+// AniList picture first. AniList's picture is used only when TMDB has none for
+// that title, or TMDB can't be reached. Every lookup is saved on the phone, so
+// the next launch shows TMDB art instantly with no requests at all.
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import { Image } from 'expo-image';
-import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useSyncExternalStore } from 'react';
+import { whenIdle } from './idle';
 import type { Anime } from './types';
 
 export type Art = {
@@ -25,16 +27,23 @@ const TMDB_KEY: string =
 const TMDB = 'https://api.themoviedb.org/3';
 const IMG = 'https://image.tmdb.org/t/p';
 
-const KEY = 'animeverse:art:v1';
+const KEY = 'animeverse:art:v2'; // v2: season entries get TMDB season posters
+AsyncStorage.removeItem('animeverse:art:v1').catch(() => {});
 const HIT_TTL = 7 * 24 * 60 * 60 * 1000;
 const MISS_TTL = 24 * 60 * 60 * 1000; // "TMDB has nothing" is re-checked daily
 const MAX_SAVED = 1500;
 const CONCURRENCY = 6;
-const WAIT_MS = 600; // how long a picture waits for TMDB before showing AniList's
 
 const store = new Map<string, Entry>();
 const listeners = new Map<string, Set<() => void>>();
-const notify = (id: string) => listeners.get(id)?.forEach((l) => l());
+// Lists that show many titles at once (the welcome tour) listen to every change.
+const anyListeners = new Set<() => void>();
+let version = 0;
+const notify = (id: string) => {
+  version += 1;
+  listeners.get(id)?.forEach((l) => l());
+  anyListeners.forEach((l) => l());
+};
 
 // Saved artwork is loaded once at startup; lookups wait for it so nothing
 // already on the phone is fetched again.
@@ -50,10 +59,14 @@ const ready = AsyncStorage.getItem(KEY)
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 function save() {
   if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    const newest = [...store.entries()].sort((a, b) => b[1].t - a[1].t).slice(0, MAX_SAVED);
-    AsyncStorage.setItem(KEY, JSON.stringify(Object.fromEntries(newest))).catch(() => {});
-  }, 1000);
+  saveTimer = setTimeout(
+    () =>
+      whenIdle(() => {
+        const newest = [...store.entries()].sort((a, b) => b[1].t - a[1].t).slice(0, MAX_SAVED);
+        AsyncStorage.setItem(KEY, JSON.stringify(Object.fromEntries(newest))).catch(() => {});
+      }, 4000),
+    1500
+  );
 }
 
 const isMiss = (e: Entry) => !e.poster && !e.backdrop && !e.logo;
@@ -147,9 +160,92 @@ function matchFor(a: Anime) {
   return p;
 }
 
+// One TMDB details request per show, shared by everything that needs it: the
+// banner/logo lookup and the episode list's season sizes both read this reply
+// (it carries the images and the seasons), instead of asking TMDB twice.
+type TmdbDetails = {
+  backdrop_path?: string | null;
+  poster_path?: string | null;
+  images?: { backdrops?: any[]; logos?: any[] };
+  seasons?: { season_number: number; episode_count: number; poster_path?: string | null }[];
+};
+const details = new Map<string, Promise<TmdbDetails>>();
+function detailsFor(kind: 'tv' | 'movie', id: number) {
+  const key = `${kind}:${id}`;
+  let p = details.get(key);
+  if (!p) {
+    p = tmdb<TmdbDetails>(`/${kind}/${id}?append_to_response=images&include_image_language=en,ja,null`);
+    details.set(key, p);
+    p.then(
+      () => setTimeout(() => details.delete(key), 10 * 60 * 1000), // keep briefly; results are saved elsewhere
+      () => details.delete(key) // try again next time after an error
+    );
+  }
+  return p;
+}
+
+// ---- Episode stills (for the anime page's episode list) ----
+
+export type TmdbShow = { id: number; seasons: { season: number; count: number }[] };
+export type TmdbEpisode = { number: number; name: string | null; still: string | null };
+
+// The TMDB TV show for an anime (matched by its series name) and its seasons'
+// episode counts, or null when TMDB has no such show.
+export async function fetchTmdbShow(a: Anime): Promise<TmdbShow | null> {
+  if (!TMDB_KEY) return null;
+  const match = await matchFor({ ...a, type: a.type === 'Movie' ? 'TV' : a.type });
+  if (!match || match.kind !== 'tv') return null;
+  // Same request as the banner/logo lookup (shared), so this usually costs nothing.
+  const d = await detailsFor('tv', match.item.id);
+  return {
+    id: match.item.id,
+    seasons: (d.seasons || [])
+      .filter((s) => s.season_number > 0 && s.episode_count > 0)
+      .sort((x, y) => x.season_number - y.season_number)
+      .map((s) => ({ season: s.season_number, count: s.episode_count })),
+  };
+}
+
+// One TMDB season's episodes: name and still image.
+export async function fetchTmdbSeason(showId: number, season: number): Promise<TmdbEpisode[]> {
+  const d = await tmdb<{ episodes?: { episode_number: number; name?: string; still_path?: string | null }[] }>(`/tv/${showId}/season/${season}`);
+  return (d.episodes || []).map((e) => ({
+    number: e.episode_number,
+    // TMDB's placeholder names ("Episode 4") aren't real names.
+    name: e.name && !/^episode\s+\d+$/i.test(e.name.trim()) ? e.name.trim() : null,
+    still: e.still_path ? `${IMG}/w500${e.still_path}` : null,
+  }));
+}
+
+// Maps an absolute episode number (1 = the show's first episode) to a TMDB
+// season and episode, using TMDB's per-season counts.
+export function tmdbPosition(show: TmdbShow, absolute: number): { season: number; episode: number } | null {
+  let before = 0;
+  for (const s of show.seasons) {
+    if (absolute <= before + s.count) return { season: s.season, episode: absolute - before };
+    before += s.count;
+  }
+  return null;
+}
+
+// Which TMDB season a "Season 2" / "2nd Season" / "Final Season" entry is.
+function seasonOf(title: string, seasons: { season_number: number }[]): number | null {
+  const n = title.match(/season\s*(\d+)/i)?.[1] || title.match(/(\d+)(?:st|nd|rd|th)\s+season/i)?.[1];
+  if (n) return Number(n);
+  if (/final\s+season/i.test(title)) return Math.max(0, ...seasons.map((s) => s.season_number)) || null;
+  return null;
+}
+
 async function lookup(a: Anime, full: boolean): Promise<Art> {
   const match = await matchFor(a);
-  const posterPath = isSeasonEntry(a.title) ? null : match?.item.poster_path;
+  let posterPath = match?.item.poster_path;
+  // A season's own entry gets that season's TMDB poster (the show's otherwise).
+  if (match && match.kind === 'tv' && isSeasonEntry(a.title)) {
+    const d = await detailsFor('tv', match.item.id);
+    const n = seasonOf(a.title, d.seasons || []);
+    const season = n == null ? null : (d.seasons || []).find((s) => s.season_number === n);
+    posterPath = season?.poster_path || posterPath;
+  }
   const art: Art = {
     poster: posterPath ? `${IMG}/w342${posterPath}` : null,
     poster2x: posterPath ? `${IMG}/w500${posterPath}` : null,
@@ -160,9 +256,7 @@ async function lookup(a: Anime, full: boolean): Promise<Art> {
   art.logoAspect = null;
   if (!match) return art;
   // Banner and title logo: TMDB's default backdrop, its best English logo.
-  const d = await tmdb<{ backdrop_path?: string | null; images?: { backdrops?: any[]; logos?: any[] } }>(
-    `/${match.kind}/${match.item.id}?append_to_response=images&include_image_language=en,ja,null`
-  );
+  const d = await detailsFor(match.kind, match.item.id);
   const textless = (d.images?.backdrops || [])
     .filter((b) => b.iso_639_1 === null && b.width >= 1280)
     .sort((x, y) => y.vote_average - x.vote_average || y.width - x.width);
@@ -182,6 +276,7 @@ const queue: Job[] = [];
 const queued = new Set<string>();
 let running = 0;
 let offlineUntil = 0; // TMDB unreachable: stop trying for a while
+let failures = 0;
 
 export const artworkOffline = () => !TMDB_KEY || Date.now() < offlineUntil;
 
@@ -218,14 +313,22 @@ async function run({ a, full }: Job) {
     // A poster-only answer never throws away a banner we already have.
     store.set(a.id, { ...(prev?.full && !full ? prev : {}), ...art, t: Date.now(), full: full || !!prev?.full });
     save();
-    // Download the banner and logo now, so the page shows them without waiting.
-    if (full) {
-      const urls = [art.backdrop, art.logo].filter(Boolean) as string[];
-      if (urls.length) Image.prefetch(urls, 'memory-disk').catch(() => {});
-    }
+    failures = 0;
+    // Download the pictures now, so they show the moment they're needed.
+    const urls = [art.poster2x || art.poster, ...(full ? [art.backdrop, art.logo] : [])].filter(Boolean) as string[];
+    if (urls.length) Image.prefetch(urls, 'memory-disk').catch(() => {});
   } catch {
-    offlineUntil = Date.now() + 2 * 60 * 1000;
-    queue.length = 0;
+    // One failed lookup is retried; several in a row means TMDB is unreachable,
+    // and every waiting picture falls back to AniList's instead of staying blank.
+    failures += 1;
+    if (failures >= 3) {
+      offlineUntil = Date.now() + 60 * 1000;
+      queue.length = 0;
+      queued.clear();
+      [...listeners.keys()].forEach(notify);
+    } else {
+      setTimeout(() => wantArt([a], full), 1500);
+    }
   }
   notify(a.id);
 }
@@ -255,17 +358,50 @@ export function useArt(anime: Anime | null | undefined, full = false): { art: Ar
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, full]);
 
-  // Wait briefly for TMDB art, so a picture doesn't flash its AniList version first.
+  // Wait for TMDB's answer, so a picture never flashes its AniList version first.
   const known = !!entry && (!full || entry.full);
-  const [timedOut, setTimedOut] = useState(false);
-  useEffect(() => {
-    if (known) return;
-    setTimedOut(false);
-    const t = setTimeout(() => setTimedOut(true), WAIT_MS);
-    return () => clearTimeout(t);
-  }, [known, id]);
+  return { art: entry, settled: known || artworkOffline(), known };
+}
 
-  return { art: entry, settled: known || timedOut || artworkOffline(), known };
+// Posters for a whole list (undefined while a title's TMDB answer is pending).
+const subscribeAny = (cb: () => void) => {
+  anyListeners.add(cb);
+  return () => {
+    anyListeners.delete(cb);
+  };
+};
+export function usePosters(items: Anime[], hiDpi = true): (string | undefined)[] {
+  useSyncExternalStore(subscribeAny, () => version, () => version);
+  useEffect(() => wantArt(items), [items]);
+  return items.map((a) => {
+    const e = store.get(a.id);
+    return e || artworkOffline() ? posterOf(a, e, hiDpi) : undefined;
+  });
+}
+
+// Resolves once these titles' posters are known and downloaded (or after ms),
+// so a screen can appear with its pictures already there.
+export function whenPostersReady(items: Anime[], ms: number): Promise<void> {
+  wantArt(items);
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      anyListeners.delete(check);
+      clearTimeout(t);
+      resolve();
+    };
+    const t = setTimeout(finish, ms);
+    const check = () => {
+      if (!items.every((a) => store.has(a.id)) && !artworkOffline()) return;
+      anyListeners.delete(check);
+      const urls = items.map((a) => posterOf(a, store.get(a.id), true)).filter(Boolean) as string[];
+      Image.prefetch(urls, 'memory-disk').catch(() => {}).finally(finish);
+    };
+    anyListeners.add(check);
+    ready.then(check);
+  });
 }
 
 // Picks the picture to show: TMDB when known, AniList otherwise.

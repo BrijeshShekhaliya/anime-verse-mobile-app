@@ -1,6 +1,7 @@
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router, useFocusEffect } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
+import { nav } from '@/lib/nav';
 import { useQueryClient } from '@tanstack/react-query';
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { FlatList, Platform, ScrollView, StyleSheet, Text, View, type ScrollViewInstance } from 'react-native';
@@ -193,7 +194,7 @@ const Row = memo(function Row({ anime, now, first, last, showNow }: { anime: Ani
           <View style={styles.nowRule} />
         </View>
       ) : null}
-      <PressableScale onPress={() => router.push(`/anime/${anime.id}`)} style={styles.row} scaleTo={0.985} accessibilityLabel={`${title}, episode ${anime.nextEpisode?.episode ?? ''}, ${time}`}>
+      <PressableScale onPress={() => nav.push(`/anime/${anime.id}`)} style={styles.row} scaleTo={0.985} accessibilityLabel={`${title}, episode ${anime.nextEpisode?.episode ?? ''}, ${time}`}>
         <View style={styles.timeCol}>
           <Text style={[styles.time, released && styles.dim]}>{clock || '—'}</Text>
           {ampm ? <Text style={styles.ampm}>{ampm}</Text> : null}

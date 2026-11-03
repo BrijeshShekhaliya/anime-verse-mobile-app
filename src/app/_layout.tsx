@@ -2,19 +2,28 @@ import { Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_800ExtraBol
 import { Orbitron_900Black } from '@expo-google-fonts/orbitron';
 import { useFonts } from 'expo-font';
 import { Stack } from 'expo-router';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import * as SystemUI from 'expo-system-ui';
 import { useEffect, useState } from 'react';
+import { AnimatedSplash } from '@/components/AnimatedSplash';
+import { whenPostersReady } from '@/lib/artwork';
+import { homeQuery } from '@/lib/queries';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { LibraryProvider } from '@/lib/library';
-import { QueryProvider } from '@/lib/query';
+import { QueryProvider, queryClient } from '@/lib/query';
 import { colors } from '@/lib/theme';
 import { getOrVerifyActiveDomain } from '@/services/animerulzClient';
 import { SettingsProvider } from '@/lib/settings';
-import { loadOnboarded } from '@/lib/onboarding';
+import { TOUR_FIRST, loadOnboarded, onboarded, tourItems } from '@/lib/onboarding';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
+// The animated splash (same black, same logo) takes over with a quick cross-fade.
+SplashScreen.setOptions({ fade: true, duration: 200 });
+// The app is portrait-only, whatever the phone's auto-rotate setting. (Video
+// players rotate to landscape themselves for fullscreen and lock back.)
+ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
 SystemUI.setBackgroundColorAsync(colors.bg).catch(() => {});
 
 export default function RootLayout() {
@@ -28,20 +37,32 @@ export default function RootLayout() {
     const t = setTimeout(() => setRestored(true), 2000);
     return () => clearTimeout(t);
   }, []);
-  // Whether to show the welcome tour is known before the splash goes away.
+  // Whether to show the welcome tour is known before the splash goes away. On
+  // first launch the tour's first posters are downloaded while the logo plays,
+  // so the tour opens with its pictures already there (3.5s at most).
   const [tourKnown, setTourKnown] = useState(false);
+  const [tourReady, setTourReady] = useState(false);
   useEffect(() => {
-    loadOnboarded().finally(() => setTourKnown(true));
+    loadOnboarded().finally(() => {
+      setTourKnown(true);
+      if (onboarded() !== false) return setTourReady(true);
+      queryClient
+        .ensureQueryData(homeQuery)
+        .then((home) => whenPostersReady(tourItems(home).slice(0, TOUR_FIRST), 3500))
+        .catch(() => {})
+        .finally(() => setTourReady(true));
+    });
+    const t = setTimeout(() => setTourReady(true), 6000);
+    return () => clearTimeout(t);
   }, []);
-  const ready = (fontsLoaded || !!fontError) && restored && tourKnown;
-  useEffect(() => {
-    if (ready) SplashScreen.hideAsync().catch(() => {});
-  }, [ready]);
+  const ready = (fontsLoaded || !!fontError) && restored && tourKnown && tourReady;
+  // The animated splash plays over the app until it's ready, then hands off.
+  const [splashDone, setSplashDone] = useState(false);
 
   return (
     <QueryProvider onRestored={() => setRestored(true)}>
+      <SafeAreaProvider>
       {(!fontsLoaded && !fontError) || !tourKnown ? null : (
-        <SafeAreaProvider>
           <LibraryProvider>
             <SettingsProvider>
             <StatusBar style="light" />
@@ -51,23 +72,25 @@ export default function RootLayout() {
               screenOptions={{
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.bg },
-                animation: 'fade',
-                animationDuration: 200, // iOS; Android's native fade is already short
+                // The phone's own screen transition (Android's system open/close
+                // animation, iOS's slide with swipe-back): drawn natively, so it
+                // stays smooth even while the new screen is still rendering.
+                animation: 'default',
                 gestureEnabled: true,
               }}
             >
               <Stack.Screen name="(tabs)" />
               <Stack.Screen name="anime/[id]" />
-              <Stack.Screen name="watch/[id]" options={{ animation: 'fade' }} />
+              <Stack.Screen name="watch/[id]" />
               <Stack.Screen name="search" />
               <Stack.Screen name="settings" />
-              <Stack.Screen name="player-lab" options={{ animation: 'fade' }} />
               <Stack.Screen name="welcome" options={{ animation: 'fade', animationDuration: 300, gestureEnabled: false }} />
             </Stack>
             </SettingsProvider>
           </LibraryProvider>
-        </SafeAreaProvider>
       )}
+      {splashDone ? null : <AnimatedSplash ready={ready} toHeader={onboarded() !== false} onDone={() => setSplashDone(true)} />}
+      </SafeAreaProvider>
     </QueryProvider>
   );
 }

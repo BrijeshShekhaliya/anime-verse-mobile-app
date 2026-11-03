@@ -14,6 +14,7 @@ import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client
 import { useEffect, type ReactNode } from 'react';
 import { AppState, Platform } from 'react-native';
 import { chunkedStorage } from './chunkedStorage';
+import { whenIdle } from './idle';
 
 const DAY = 24 * 60 * 60 * 1000;
 const MAX_AGE = 3 * DAY; // a saved copy older than this is not shown
@@ -35,8 +36,12 @@ export const queryClient = new QueryClient({
 // always Home, Schedule and genres; of the per-title data (anime pages,
 // episode lists...) and Browse grids, only the most recently used.
 const ALWAYS = new Set(['home', 'genres', 'schedule']);
-const RECENT = new Set(['detail', 'extras', 'episodes', 'seasons', 'guide', 'browse', 'scheduleDate']);
-const RECENT_MAX = 40;
+const RECENT = new Set(['detail', 'extras', 'episodes', 'seasons', 'guide', 'browse', 'scheduleDate', 'tmdbShow', 'tmdbSeason']);
+const RECENT_MAX = 20;
+// Saving turns the whole cache into text on the same thread as scrolling, so
+// very long lists (One Piece has 1,100+ episodes) are left out: they would make
+// every save freeze the page. They reload quickly instead.
+const MAX_SAVED_ITEMS = 300;
 
 // The most recently updated queries of one kind, worked out once per save.
 let recentAt = 0;
@@ -66,16 +71,25 @@ const shouldSave = (q: Query) => {
   if (ALWAYS.has(kind)) return true;
   // Browse without a search (the default grid and filter links), not every typed search.
   if (kind === 'browse' && (q.queryKey[1] as { q?: string } | undefined)?.q) return false;
+  if (Array.isArray(q.state.data) && q.state.data.length > MAX_SAVED_ITEMS) return false;
   return RECENT.has(kind) && isRecent(q);
 };
 
 // Saved in pieces: Android can't read back one stored value over ~2 MB.
 const KEY = 'animeverse:query:v2';
-const persister = createAsyncStoragePersister({
+const base = createAsyncStoragePersister({
   storage: chunkedStorage,
   key: KEY,
-  throttleTime: 2000,
+  throttleTime: 5000, // at most one save every 5 s
 });
+// Turning the cache into text is heavy: do it only when the app is idle, never
+// in the middle of a scroll or an animation.
+const persister: typeof base = {
+  ...base,
+  persistClient: (client) => {
+    whenIdle(() => base.persistClient(client), 4000);
+  },
+};
 // Earlier builds saved everything as one value, which could grow past that
 // limit; delete it (deleting works even when reading doesn't).
 AsyncStorage.removeItem('animeverse:query:v1').catch(() => {});

@@ -155,7 +155,7 @@ export const api = {
     if (cachedEntry && isStreamUrlExpired((cachedEntry.data as StreamData)?.streamUrl)) {
       memo.delete(key);
     }
-    return cached<StreamData>(key, 30 * 60 * 1000, async () => {
+    return cached<StreamData>(key, 15 * 60 * 1000, async () => {
       const isHindiTarget = prefAudio === 'hindi' || prefAudio === 'hin' || prefAudio === 'hi';
       const memoryKey = isHindiTarget ? getProviderMemoryKey(params, 'hindi') : null;
       const rememberedProvider = memoryKey ? providerMemory.get(memoryKey) : null;
@@ -247,7 +247,59 @@ export const api = {
       }
 
       // 2. Standard flow / unremembered provider:
-      // Try AnimeRulz Multi-Audio default resolver first
+      // When Hindi is requested, dispatch both resolvers concurrently to avoid sequential 5-15s waterfalls
+      if (isHindiTarget) {
+        const rulzPromise = resolveAnimeRulzDirect(
+          {
+            id: params.id,
+            anilistId: params.anilistId,
+            title: params.title,
+            episode: params.episode,
+            season: params.season,
+            mode: params.mode,
+          },
+          options?.forceRefresh,
+        ).catch(() => null);
+
+        const hiPromise = resolveHiAnimeDirect(params, options?.forceRefresh).catch(() => null);
+
+        const [multiStream, hiStream] = await Promise.all([rulzPromise, hiPromise]);
+
+        const rulzHasHindi =
+          multiStream &&
+          multiStream.streamUrl &&
+          (hasAudioLanguage(multiStream.audioTracks, 'hindi') ||
+            multiStream.source?.toLowerCase().includes('multi') ||
+            multiStream.referer?.includes('ravok') ||
+            multiStream.streamUrl?.includes('ravok'));
+
+        const hiHasHindi =
+          hiStream && hiStream.streamUrl && hasAudioLanguage(hiStream.audioTracks, 'hindi');
+
+        // Priority 1: Provider with verified Hindi audio
+        if (rulzHasHindi) {
+          if (memoryKey) providerMemory.set(memoryKey, 'animerulz');
+          return multiStream!;
+        }
+        if (hiHasHindi) {
+          if (memoryKey) providerMemory.set(memoryKey, 'hianime');
+          return hiStream!;
+        }
+
+        // Priority 2: Fallback to fastest successful stream (Japanese/Sub) without extra network calls
+        if (multiStream && multiStream.streamUrl) {
+          if (memoryKey) providerMemory.set(memoryKey, 'animerulz');
+          return multiStream;
+        }
+        if (hiStream && hiStream.streamUrl) {
+          return hiStream;
+        }
+
+        // Priority 3: HiAnime Sub fallback
+        return resolveHiAnimeDirect({ ...params, mode: 'sub' }, options?.forceRefresh);
+      }
+
+      // Non-Hindi: AnimeRulz is the fast primary provider (typically 300-500ms)
       let multiStream: StreamData | null = null;
       try {
         multiStream = await resolveAnimeRulzDirect(
@@ -265,55 +317,6 @@ export const api = {
         // AnimeRulz failed or episode unavailable
       }
 
-      // If user specifically requested Hindi audio:
-      if (isHindiTarget) {
-        const isMultiAudioSource =
-          multiStream?.source?.toLowerCase().includes('multi') ||
-          multiStream?.referer?.includes('ravok') ||
-          multiStream?.streamUrl?.includes('ravok');
-
-        // Check if AnimeRulz actually has Hindi audio or is a Multi-Audio stream
-        if (
-          multiStream &&
-          multiStream.streamUrl &&
-          (hasAudioLanguage(multiStream.audioTracks, 'hindi') || isMultiAudioSource)
-        ) {
-          if (memoryKey) providerMemory.set(memoryKey, 'animerulz');
-          return multiStream;
-        }
-
-        // AnimeRulz does NOT have Hindi (or failed). Check if HiAnime has it!
-        let hiStream: StreamData | null = null;
-        try {
-          hiStream = await resolveHiAnimeDirect(params, options?.forceRefresh);
-          if (hiStream && hiStream.streamUrl) {
-            if (hasAudioLanguage(hiStream.audioTracks, 'hindi')) {
-              if (memoryKey) providerMemory.set(memoryKey, 'hianime');
-              return hiStream;
-            }
-          }
-        } catch {
-          // HiAnime failed
-        }
-
-        // Neither provider has Hindi for this episode!
-        // Fall back gracefully to original Japanese (Sub):
-        // 1. If AnimeRulz already returned a stream (Japanese/raw), return it immediately (0 new calls!)
-        if (multiStream && multiStream.streamUrl) {
-          if (memoryKey) providerMemory.set(memoryKey, 'animerulz');
-          return multiStream;
-        }
-
-        // 2. If HiAnime already returned a stream, return it!
-        if (hiStream && hiStream.streamUrl) {
-          return hiStream;
-        }
-
-        // 3. Otherwise resolve HiAnime in sub (Japanese) mode directly:
-        return resolveHiAnimeDirect({ ...params, mode: 'sub' }, options?.forceRefresh);
-      }
-
-      // Non-Hindi: if AnimeRulz succeeded, return immediately (sub-second fast path)
       if (multiStream && multiStream.streamUrl) {
         return multiStream;
       }
