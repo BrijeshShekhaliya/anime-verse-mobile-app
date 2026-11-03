@@ -32,7 +32,7 @@ AsyncStorage.removeItem('animeverse:art:v1').catch(() => {});
 const HIT_TTL = 7 * 24 * 60 * 60 * 1000;
 const MISS_TTL = 24 * 60 * 60 * 1000; // "TMDB has nothing" is re-checked daily
 const MAX_SAVED = 1500;
-const CONCURRENCY = 6;
+const CONCURRENCY = 10;
 
 const store = new Map<string, Entry>();
 const listeners = new Map<string, Set<() => void>>();
@@ -408,6 +408,12 @@ export function whenPostersReady(items: Anime[], ms: number): Promise<void> {
 // hiDpi: sharper poster on high-density screens (off with data saver).
 export const posterOf = (a: Anime, art: Art | undefined, hiDpi = true) =>
   (art?.poster && (hiDpi ? art.poster2x || art.poster : art.poster)) || (hiDpi && a.image2x) || a.image || undefined;
+// Small list thumbnails (schedule, history, search): a smaller TMDB file that
+// downloads several times faster and still looks sharp at that size.
+export const thumbOf = (a: Anime, art: Art | undefined) => {
+  const uri = posterOf(a, art, false);
+  return uri?.startsWith(IMG) ? uri.replace('/w342/', '/w185/') : uri;
+};
 export const backdropOf = (a: Anime, art: Art | undefined) => art?.backdrop || a.backdrop || a.banner || a.image || undefined;
 
 // Settings → Clear cached data.

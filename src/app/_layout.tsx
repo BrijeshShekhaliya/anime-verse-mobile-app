@@ -89,7 +89,7 @@ export default function RootLayout() {
             </SettingsProvider>
           </LibraryProvider>
       )}
-      {splashDone ? null : <AnimatedSplash ready={ready} toHeader={onboarded() !== false} onDone={() => setSplashDone(true)} />}
+      {splashDone ? null : <AnimatedSplash ready={ready} toHeader={onboarded() !== false} fontsReady={fontsLoaded || !!fontError} onDone={() => setSplashDone(true)} />}
       </SafeAreaProvider>
     </QueryProvider>
   );

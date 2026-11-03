@@ -1,11 +1,14 @@
 import { StyleSheet, Text, View } from 'react-native';
 import { Icon } from './Icon';
 import { colors, fonts } from '@/lib/theme';
+import { dubOf, useDubs } from '@/lib/dubs';
 import type { Anime } from '@/lib/types';
 
 // SUB / DUB chips, same colours as the website.
-export function LangBadges({ anime, size = 'sm' }: { anime: Pick<Anime, 'languages'>; size?: 'sm' | 'md' }) {
-  const l = anime.languages;
+// Dub from the MAL-Dubs list (live), so saved cards update once it loads.
+export function LangBadges({ anime, size = 'sm' }: { anime: Pick<Anime, 'languages' | 'id'> & { malId?: number | null }; size?: 'sm' | 'md' }) {
+  useDubs();
+  const l = { sub: anime.languages?.sub, dub: dubOf(anime) ?? anime.languages?.dub ?? null };
   const big = size === 'md';
   return (
     <View style={styles.row}>

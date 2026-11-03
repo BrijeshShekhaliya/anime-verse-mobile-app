@@ -26,6 +26,11 @@ const QUALITY_OPTIONS: { key: Settings['quality']; label: string; hint: string }
   { key: 'highest', label: 'Highest', hint: 'Best picture, uses more data' },
 ];
 
+const SOUND_OPTIONS: { key: 'on' | 'off'; label: string; hint: string }[] = [
+  { key: 'on', label: 'On', hint: 'Plays with the opening animation' },
+  { key: 'off', label: 'Off', hint: 'The opening animation plays silently' },
+];
+
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const s = useSettings();
@@ -48,6 +53,12 @@ export default function SettingsScreen() {
   const chooseQuality = (v: Settings['quality']) => {
     setQuality(v);
     s.update({ quality: v });
+  };
+  const [sound, setSound] = useState<'on' | 'off'>(s.launchSound ? 'on' : 'off');
+  useEffect(() => setSound(s.launchSound ? 'on' : 'off'), [s.launchSound]);
+  const chooseSound = (v: 'on' | 'off') => {
+    setSound(v);
+    s.update({ launchSound: v === 'on' });
   };
 
   return (
@@ -105,6 +116,21 @@ export default function SettingsScreen() {
           </View>
           <View style={styles.segWrap}>
             <Segmented value={quality} options={QUALITY_OPTIONS} onChange={chooseQuality} />
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.row}>
+            <GradientTile colors={['#FF640A', '#FFC15E']}>
+              <Text style={styles.glyph}>♪</Text>
+            </GradientTile>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowTitle}>Launch sound</Text>
+              <Text style={styles.rowHint} numberOfLines={1}>
+                {SOUND_OPTIONS.find((o) => o.key === sound)?.hint}
+              </Text>
+            </View>
+          </View>
+          <View style={styles.segWrap}>
+            <Segmented value={sound} options={SOUND_OPTIONS} onChange={chooseSound} />
           </View>
         </Section>
       </ScrollView>

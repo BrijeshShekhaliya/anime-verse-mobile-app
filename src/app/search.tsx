@@ -10,7 +10,7 @@ import { Icon } from '@/components/Icon';
 import { PressableScale } from '@/components/PressableScale';
 import { EmptyState } from '@/components/States';
 import { api } from '@/lib/api';
-import { posterOf, useArt } from '@/lib/artwork';
+import { thumbOf, useArt } from '@/lib/artwork';
 import { factsOf } from '@/lib/format';
 import { useLibrary } from '@/lib/library';
 import { rankByQuery } from '@/lib/searchRank';
@@ -147,7 +147,7 @@ function Highlight({ text, query }: { text: string; query?: string }) {
 // TMDB poster (placeholder while it's looked up; AniList's only when TMDB has none).
 function ResultThumb({ anime }: { anime: Anime }) {
   const { art, settled } = useArt(anime);
-  const uri = settled ? posterOf(anime, art, false) : undefined;
+  const uri = settled ? thumbOf(anime, art) : undefined;
   return uri ? <Image source={{ uri }} style={styles.thumb} contentFit="cover" transition={200} cachePolicy="memory-disk" /> : <View style={styles.thumb} />;
 }
 

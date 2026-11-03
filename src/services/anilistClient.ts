@@ -15,6 +15,7 @@ import type {
   SearchResult,
 } from '@/lib/types';
 import { anilistSeasonTitle, hianimeEpisodes, hianimeSearch } from './hianimeClient';
+import { dubbedMalIds, languagesFor } from '@/lib/dubs';
 
 const ANILIST_URL = 'https://graphql.anilist.co';
 
@@ -214,6 +215,7 @@ export function normalize(m: any): Anime {
     duration: m.duration ? `${m.duration} min per ep` : null,
     trailer: m.trailer?.site === 'youtube' ? m.trailer.id : null,
     nextEpisode: m.nextAiringEpisode ? { episode: m.nextAiringEpisode.episode, airingAt: m.nextAiringEpisode.airingAt } : null,
+    languages: languagesFor(m.idMal), // English dub from the MAL-Dubs list
     source: 'anilist',
   };
 }
@@ -424,6 +426,11 @@ export async function fetchSearch(p: SearchParams): Promise<SearchResult> {
   }
   if (p.status && statuses[p.status]) {
     args.status = { type: 'MediaStatus', value: statuses[p.status] };
+  }
+  // English dub: only titles on the MAL-Dubs list.
+  if (p.dub) {
+    const ids = await dubbedMalIds();
+    if (ids.length) args.idMal_in = { type: '[Int]', value: ids };
   }
 
   const perPage = 24;

@@ -13,7 +13,7 @@ import { useLibrary } from '@/lib/library';
 import { timeAgo } from '@/lib/format';
 import { colors, fonts, radius, springs } from '@/lib/theme';
 import type { Anime } from '@/lib/types';
-import { posterOf, useArt } from '@/lib/artwork';
+import { thumbOf, useArt } from '@/lib/artwork';
 import { displayTitle, useSettings } from '@/lib/settings';
 
 const TABS = ['Continue', 'My List', 'History'] as const;
@@ -146,7 +146,7 @@ export default function LibraryScreen() {
 // History poster: TMDB art when known, else the saved AniList cover.
 function HistThumb({ anime }: { anime: Anime }) {
   const { art, settled } = useArt(anime);
-  const uri = settled ? posterOf(anime, art, false) : undefined;
+  const uri = settled ? thumbOf(anime, art) : undefined;
   return uri ? <Image source={{ uri }} style={styles.thumb} contentFit="cover" transition={200} cachePolicy="memory-disk" /> : <View style={styles.thumb} />;
 }
 

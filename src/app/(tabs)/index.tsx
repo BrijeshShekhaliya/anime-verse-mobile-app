@@ -14,6 +14,7 @@ import { useLibrary } from '@/lib/library';
 import { cap } from '@/lib/format';
 import { colors } from '@/lib/theme';
 import { useHome } from '@/lib/queries';
+import { dubOf, useDubs } from '@/lib/dubs';
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
@@ -22,6 +23,7 @@ export default function HomeScreen() {
     scrollY.value = e.contentOffset.y;
   });
   const { data, error, isPending, refetch } = useHome();
+  const dubsVersion = useDubs();
   const loading = isPending;
   const { continueWatching } = useLibrary();
   const [refreshing, setRefreshing] = useState(false);
@@ -30,8 +32,8 @@ export default function HomeScreen() {
   const dubbed = useMemo(() => {
     if (!data) return [];
     const seen = new Set<string>();
-    return [...data.popular, ...data.topRated].filter((a) => a.languages?.dub && !seen.has(a.id) && seen.add(a.id));
-  }, [data]);
+    return [...data.popular, ...data.topRated].filter((a) => dubOf(a) && !seen.has(a.id) && seen.add(a.id));
+  }, [data, dubsVersion]);
 
   const season = data?.seasonNow?.[0];
 

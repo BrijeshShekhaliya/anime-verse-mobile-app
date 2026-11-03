@@ -11,10 +11,18 @@ export type Settings = {
   titleLang: 'english' | 'romaji'; // "Attack on Titan" or "Shingeki no Kyojin"
   audioLang: 'japanese' | 'english' | 'hindi'; // the viewer's preferred audio language
   quality: 'saver' | 'medium' | 'highest'; // preferred streaming quality
+  launchSound: boolean; // the opening animation's sound
 };
 
 const KEY = 'animeverse:settings:v1';
-export const DEFAULT_SETTINGS: Settings = { titleLang: 'english', audioLang: 'japanese', quality: 'medium' };
+export const DEFAULT_SETTINGS: Settings = { titleLang: 'english', audioLang: 'japanese', quality: 'medium', launchSound: true };
+
+// Read directly at launch (the opening animation plays before the app's
+// settings are loaded).
+export const loadLaunchSound = () =>
+  AsyncStorage.getItem(KEY)
+    .then((raw) => (raw ? (JSON.parse(raw) as Partial<Settings>).launchSound !== false : true))
+    .catch(() => true);
 
 type Ctx = Settings & { update: (patch: Partial<Settings>) => void; ready: boolean };
 const SettingsContext = createContext<Ctx>({ ...DEFAULT_SETTINGS, update: () => {}, ready: false });
@@ -34,6 +42,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
           ...(saved.audioLang ? { audioLang: saved.audioLang } : {}),
           // Older saves used other values (auto/1080p...); those fall back to the default.
           ...(saved.quality && ['saver', 'medium', 'highest'].includes(saved.quality) ? { quality: saved.quality } : {}),
+          ...(typeof saved.launchSound === 'boolean' ? { launchSound: saved.launchSound } : {}),
         }));
       })
       .catch(() => {})
