@@ -49,7 +49,8 @@
             ],
             "enableMinifyInReleaseBuilds": true,
             "enableShrinkResourcesInReleaseBuilds": true,
-            "enablePngCrunchInReleaseBuilds": true
+            "enablePngCrunchInReleaseBuilds": true,
+            "extraProguardRules": "# react-native-reanimated\n-keep class com.swmansion.reanimated.** { *; }\n-keep class com.facebook.react.turbomodule.** { *; }\n# The native Media3 video player (modules/native-media3-player) and Media3 itself\n-keep class expo.modules.nativemedia3player.** { *; }\n-keep class androidx.media3.** { *; }"
           }
         }
       ],
@@ -65,8 +66,7 @@
       "typedRoutes": true
     },
     "extra": {
-      "apiUrl": "",
-      "tmdbApiKey": "06bc3cabd1f2780a22c8e2e25d6f0f15"
+      "apiUrl": ""
     }
   }
 }

@@ -92,6 +92,8 @@ export type Episode = {
   runtime?: number | null;
   hasSub?: boolean;
   hasDub?: boolean;
+  upcoming?: boolean; // not out yet: can't be played
+  airingAt?: number | null; // when it comes out (unix seconds)
 };
 
 export type SeasonInfo = {

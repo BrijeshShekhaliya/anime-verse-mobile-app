@@ -19,6 +19,7 @@ type Props = {
   referer?: string;
   paused: boolean;
   playbackRate: number;
+  volume?: number; // 0..1, the player's own volume
   fitMode: 'contain' | 'cover' | 'fill';
   selectedQualityHeight: number;
   selectedAudioTrackId?: number | null;

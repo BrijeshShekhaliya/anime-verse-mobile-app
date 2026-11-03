@@ -373,7 +373,9 @@ export async function getOrVerifyActiveDomain(force = false): Promise<string> {
 /**
  * Resolves Multi-Audio stream for the given anime and episode.
  */
-export async function resolveAnimeRulzDirect(
+const _inflight = new Map<string, Promise<StreamData>>();
+
+export function resolveAnimeRulzDirect(
   params: {
     id?: string | number;
     anilistId?: number;
@@ -383,6 +385,19 @@ export async function resolveAnimeRulzDirect(
     mode?: 'sub' | 'dub';
   },
   forceRefresh = false,
+): Promise<StreamData> {
+  // One lookup at a time per episode: a second caller shares the first one's answer.
+  const key = `${params.anilistId || params.id || params.title}:${params.episode}:${forceRefresh ? 'f' : ''}`;
+  const running = _inflight.get(key);
+  if (running) return running;
+  const p = resolveAnimeRulzOnce(params, forceRefresh).finally(() => _inflight.delete(key));
+  _inflight.set(key, p);
+  return p;
+}
+
+async function resolveAnimeRulzOnce(
+  params: Parameters<typeof resolveAnimeRulzDirect>[0],
+  forceRefresh: boolean,
 ): Promise<StreamData> {
   const domain = await getOrVerifyActiveDomain();
   let anilistId = params.anilistId;

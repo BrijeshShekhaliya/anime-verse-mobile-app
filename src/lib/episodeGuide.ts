@@ -18,6 +18,7 @@ export type GuideEpisode = {
   title: string;
   thumb: string | null;
   airingAt: number | null;
+  upcoming?: boolean; // not out yet: shown locked, with its date
 };
 
 type Node = {
@@ -164,7 +165,7 @@ const sorted = (m: Map<number, Node>) =>
 export async function fetchEpisodeGuide(anilistId: number): Promise<GuideEpisode[]> {
   const data = await query(
     `query ($id: Int) { Media(id: $id, type: ANIME) {
-      id episodes status nextAiringEpisode { episode }
+      id episodes status nextAiringEpisode { episode airingAt }
       title { english romaji }
       streamingEpisodes { title thumbnail }
       airingSchedule(perPage: 50) { nodes { episode airingAt } }
@@ -189,11 +190,20 @@ export async function fetchEpisodeGuide(anilistId: number): Promise<GuideEpisode
   const airing = new Map<number, number>();
   for (const s of m.airingSchedule?.nodes || []) airing.set(s.episode, s.airingAt);
 
-  // Released so far: up to the next airing episode for a show still airing.
+  // Released so far, by the clock: everything before the next airing episode
+  // (and that one too once its time has passed, as saved data can be a little
+  // old). Nothing for a show that hasn't started.
+  const now = Date.now() / 1000;
+  const next = m.nextAiringEpisode as { episode: number; airingAt: number } | null;
+  const nextOut = !!next && next.airingAt <= now;
   const total =
-    m.status === 'RELEASING' && m.nextAiringEpisode?.episode
-      ? m.nextAiringEpisode.episode - 1
-      : m.episodes || (parsed.length ? Math.max(...parsed.map((p) => p.num)) : 12);
+    m.status === 'NOT_YET_RELEASED'
+      ? 0
+      : m.status === 'RELEASING' && next?.episode
+        ? (nextOut ? next.episode : next.episode - 1)
+        : m.episodes || (parsed.length ? Math.max(...parsed.map((p) => p.num)) : 12);
+  // The next episode, while it's still to come: listed locked with its date.
+  const upcoming = next && !nextOut && next.episode === total + 1 ? next : null;
 
   // Analyze parsed streamingEpisodes to avoid AniList cross-season duplicate corruption:
   const epNums = parsed.map((p) => p.num).sort((a, b) => a - b);
@@ -228,7 +238,7 @@ export async function fetchEpisodeGuide(anilistId: number): Promise<GuideEpisode
     }
   }
 
-  return Array.from({ length: Math.max(0, total) }, (_, i) => {
+  const list: GuideEpisode[] = Array.from({ length: Math.max(0, total) }, (_, i) => {
     const n = i + 1;
     const hit = episodeMap.get(n);
     return {
@@ -238,4 +248,6 @@ export async function fetchEpisodeGuide(anilistId: number): Promise<GuideEpisode
       airingAt: airing.get(n) ?? null,
     };
   });
+  if (upcoming) list.push({ number: upcoming.episode, title: `Episode ${upcoming.episode}`, thumb: null, airingAt: upcoming.airingAt, upcoming: true });
+  return list;
 }

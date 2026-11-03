@@ -3,6 +3,7 @@ import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useNavigation } from 'expo-router';
 import { nav } from '@/lib/nav';
+import { airDateLabel } from '@/lib/airDate';
 import * as WebBrowser from 'expo-web-browser';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Linking, Platform, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
@@ -610,20 +611,29 @@ const EpisodeRow = memo(function EpisodeRow({
   // AniList's name, or TMDB's when AniList only has "Episode 4".
   const name = ep.title === `Episode ${ep.number}` && tmdb?.name ? tmdb.name : ep.title;
   const date = ep.airingAt ? new Date(ep.airingAt * 1000) : null;
-  const upcoming = !!date && date.getTime() > Date.now();
+  // Not out yet: shown with a lock and its date, and can't be opened.
+  const upcoming = !!ep.upcoming || (!!date && date.getTime() > Date.now());
   return (
     <Animated.View entering={reduce || index > 7 ? undefined : FadeInDown.delay(index * 45).duration(320)}>
       <PressableScale
         onPress={() => nav.push(`/watch/${watchId}?season=${seasonNumber}&ep=${ep.number}` as any)}
-        style={styles.epRow}
+        disabled={upcoming}
+        style={[styles.epRow, upcoming && { opacity: 0.75 }]}
         scaleTo={0.98}
-        accessibilityLabel={`Episode ${ep.number}, ${ep.title}`}
+        accessibilityLabel={upcoming ? `Episode ${ep.number}, coming soon, ${airDateLabel(ep.airingAt)}` : `Episode ${ep.number}, ${ep.title}`}
       >
         <View style={[styles.epThumb, { width: thumbW, height: Math.round(thumbW * 0.5625) }]}>
           {thumb ? <Image source={{ uri: thumb }} style={StyleSheet.absoluteFill} contentFit="cover" transition={200} cachePolicy="memory-disk" /> : null}
-          <View style={styles.epPlay}>
-            <Icon name="play" size={16} color="#fff" />
-          </View>
+          {upcoming ? (
+            <View style={styles.epLocked}>
+              <Icon name="lock" size={18} color="#fff" />
+              <Text style={styles.epLockedText}>COMING SOON</Text>
+            </View>
+          ) : (
+            <View style={styles.epPlay}>
+              <Icon name="play" size={16} color="#fff" />
+            </View>
+          )}
           {runtime ? (
             <View style={styles.epDuration}>
               <Text style={styles.epDurationText}>{runtime}m</Text>
@@ -635,11 +645,10 @@ const EpisodeRow = memo(function EpisodeRow({
             {/* "4. The Door to Hell"; just "Episode 4" when AniList has no name for it. */}
             {name === `Episode ${ep.number}` ? name : `${ep.number}. ${name}`}
           </Text>
-          {date ? (
-            <Text style={[styles.epMeta, upcoming && { color: colors.accent }]}>
-              {upcoming ? 'Coming ' : ''}
-              {date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
-            </Text>
+          {upcoming ? (
+            <Text style={[styles.epMeta, { color: colors.accent }]}>Coming {airDateLabel(ep.airingAt)}</Text>
+          ) : date ? (
+            <Text style={styles.epMeta}>{date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</Text>
           ) : null}
         </View>
       </PressableScale>
@@ -762,6 +771,8 @@ const styles = StyleSheet.create({
   epMeta: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12.5, marginTop: 6 },
   moreEps: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingVertical: 18 },
   moreEpsText: { color: colors.muted, fontFamily: fonts.medium, fontSize: 12.5 },
+  epLocked: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center', gap: 4, backgroundColor: 'rgba(0,0,0,0.6)' },
+  epLockedText: { color: '#fff', fontFamily: fonts.black, fontSize: 10, letterSpacing: 1.2 },
   empty: { color: colors.muted, fontFamily: fonts.regular, fontSize: 14, paddingVertical: 12 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', columnGap: 12, rowGap: 18, paddingHorizontal: 16, paddingTop: 18 },
   topBar: { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10 },

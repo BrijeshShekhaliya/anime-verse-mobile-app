@@ -239,7 +239,9 @@ export async function hianimeEpisodes(showId: string): Promise<Array<{ epId: str
 }
 
 // ── High-Level Direct HiAnime Resolver ──────────────────────────────────────
-export async function resolveHiAnimeDirect(
+const _inflight = new Map<string, Promise<StreamData>>();
+
+export function resolveHiAnimeDirect(
   params: {
     title: string;
     romaji?: string;
@@ -248,6 +250,19 @@ export async function resolveHiAnimeDirect(
     mode: 'sub' | 'dub';
   },
   forceRefresh = false,
+): Promise<StreamData> {
+  // One lookup at a time per episode: a second caller shares the first one's answer.
+  const key = `${params.title}:${params.season}:${params.episode}:${params.mode}:${forceRefresh ? 'f' : ''}`.toLowerCase();
+  const running = _inflight.get(key);
+  if (running) return running;
+  const p = resolveHiAnimeOnce(params, forceRefresh).finally(() => _inflight.delete(key));
+  _inflight.set(key, p);
+  return p;
+}
+
+async function resolveHiAnimeOnce(
+  params: Parameters<typeof resolveHiAnimeDirect>[0],
+  forceRefresh: boolean,
 ): Promise<StreamData> {
   const cacheKey = `${params.title}:${params.season}:${params.episode}:${params.mode}`.toLowerCase();
   if (!forceRefresh) {

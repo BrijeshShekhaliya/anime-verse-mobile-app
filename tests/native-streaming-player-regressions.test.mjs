@@ -9,13 +9,12 @@ const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url
 const appConfig = JSON.parse(await readFile(new URL('../app.json', import.meta.url), 'utf8'));
 
 describe('Native and fallback streaming player regressions', () => {
-  test('HiAnime route uses the platform-dispatched player and keeps WebView only for VidRift', () => {
+  test('Watch route always uses the platform-dispatched native player (no web player)', () => {
     assert.match(route, /import NativeHlsPlayer/);
-    assert.match(route, /server === 'hianime' ?/);
     assert.match(route, /<NativeHlsPlayer/);
     assert.match(nativePlayer, /Platform\.OS !== 'android'/);
     assert.match(nativePlayer, /<AndroidMedia3Player/);
-    assert.match(route, /source=\{\{ uri: vidriftEmbedUrl \}\}/);
+    assert.doesNotMatch(route, /vidrift|WebView/i);
     assert.doesNotMatch(route, /new Hls\(/);
     assert.doesNotMatch(route, /const hianimeHtml/);
   });
@@ -61,7 +60,7 @@ describe('Native and fallback streaming player regressions', () => {
   test('HLS headers and buffering configuration are preserved in the Expo Video fallback', () => {
     assert.match(player, /contentType: 'hls'/);
     assert.match(player, /headers: \{ Referer: referer, referer \}/);
-    assert.match(player, /preferredForwardBufferDuration: 60/);
+    assert.match(player, /preferredForwardBufferDuration: 30/);
     assert.match(player, /surfaceType="textureView"/);
     assert.match(player, /maxBufferBytes: 128 \* 1024 \* 1024/);
     assert.doesNotMatch(player, /player\.videoTrack\s*=/);

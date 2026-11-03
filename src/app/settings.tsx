@@ -133,6 +133,25 @@ export default function SettingsScreen() {
             <Segmented value={sound} options={SOUND_OPTIONS} onChange={chooseSound} />
           </View>
         </Section>
+
+        <Section title="PLAYER LABS (TESTING)">
+          <PressableScale
+            onPress={() => nav.push('/kuro-test')}
+            style={styles.labsRow}
+            scaleTo={0.98}
+          >
+            <GradientTile colors={['#8B5CF6', '#EC4899']}>
+              <Icon name="spark" size={19} color="#fff" />
+            </GradientTile>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowTitle}>Test Kuro Player UI</Text>
+              <Text style={styles.rowHint} numberOfLines={2}>
+                Preview the clean open-source Kuro video player interface in an isolated test environment
+              </Text>
+            </View>
+            <Icon name="right" size={20} color={colors.muted} />
+          </PressableScale>
+        </Section>
       </ScrollView>
     </View>
   );
@@ -202,4 +221,5 @@ const styles = StyleSheet.create({
   segBtn: { flex: 1, height: 38, alignItems: 'center', justifyContent: 'center' },
   segText: { color: colors.text2, fontFamily: fonts.bold, fontSize: 14 },
   segTextOn: { color: '#000' },
+  labsRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 14, paddingVertical: 14 },
 });

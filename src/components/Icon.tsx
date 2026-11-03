@@ -7,7 +7,7 @@ export type IconName =
   | 'bookmark' | 'bookmarkOn' | 'clock' | 'x' | 'check' | 'mic' | 'cc' | 'ext' | 'shield' | 'plus'
   | 'minus' | 'trash' | 'spark' | 'history' | 'list' | 'share'
   | 'settings' | 'fullscreen' | 'exitFullscreen' | 'pause' | 'skip' | 'cast' | 'thumbUp' | 'thumbDown' | 'download' | 'more'
-  | 'rewind10' | 'forward10' | 'fastForward' | 'aspectRatio';
+  | 'rewind10' | 'forward10' | 'fastForward' | 'aspectRatio' | 'lock';
 
 type Props = { name: IconName; size?: number; color?: string; strokeWidth?: number };
 
@@ -234,6 +234,14 @@ export function Icon({ name, size = 22, color = '#fff', strokeWidth = 2 }: Props
         <>
           <Rect {...s} x="3" y="5" width="18" height="14" rx="2" strokeWidth={1.8} />
           <Path {...s} strokeWidth={1.8} d="M7 9l3 3M17 15l-3-3" />
+        </>
+      );
+      break;
+    case 'lock':
+      body = (
+        <>
+          <Rect x="5" y="11" width="14" height="10" rx="2.5" fill={color} />
+          <Path {...s} d="M8 11V8a4 4 0 0 1 8 0v3" />
         </>
       );
       break;

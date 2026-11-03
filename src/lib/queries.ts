@@ -96,7 +96,7 @@ export function useSeasons(anilistId: number | null) {
 export function useEpisodeGuide(anilistId: number | null, airing: boolean) {
   return useQuery({
     // v2: avoids duplicate cross-season S1 episode titles
-    queryKey: ['guide', anilistId, 'v2'],
+    queryKey: ['guide', anilistId, 'v3'],
     queryFn: () => fetchEpisodeGuide(anilistId!),
     staleTime: airing ? HOUR : 7 * DAY,
     enabled: !!anilistId,

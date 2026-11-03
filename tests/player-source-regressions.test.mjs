@@ -12,8 +12,7 @@ describe('Player source-level regressions', () => {
     assert.match(route, /<NativeHlsPlayer/);
     assert.match(nativePlayer, /Platform\.OS !== 'android'/);
     assert.match(nativePlayer, /<AndroidMedia3Player/);
-    assert.match(route, /server === 'hianime' \?/);
-    assert.match(route, /source=\{\{ uri: vidriftEmbedUrl \}\}/);
+    assert.doesNotMatch(route, /vidrift|WebView/i);
     assert.doesNotMatch(route, /new Hls\(/);
     assert.doesNotMatch(route, /const hianimeHtml/);
     assert.equal((player.match(/<VideoView\b/g) || []).length, 1);
@@ -27,8 +26,8 @@ describe('Player source-level regressions', () => {
     assert.match(route, /nativeVideoRef\.current\?\.seek\?\.\(pending\.time\)/);
   });
 
-  test('Fullscreen presentation follows measured landscape geometry', () => {
-    assert.match(route, /const isFullscreenView = isPhysicalLandscape;/);
+  test('Fullscreen presentation follows the measured screen shape', () => {
+    assert.match(route, /const isFullscreenView = screen\.w > screen\.h;/);
     assert.match(route, /const enterFullscreen = useCallback\(\(\) => \{/);
     assert.match(route, /ScreenOrientation\.lockAsync\(ScreenOrientation\.OrientationLock\.LANDSCAPE\)/);
   });
@@ -43,7 +42,7 @@ describe('Player source-level regressions', () => {
     assert.equal((player.match(/<VideoView\b/g) || []).length, 1);
     assert.match(player, /player\.replaceAsync\(source\)/);
     assert.match(player, /contentType: 'hls'/);
-    assert.match(player, /preferredForwardBufferDuration: 60/);
+    assert.match(player, /preferredForwardBufferDuration: 30/);
     assert.match(player, /player\.maxResolution/);
     assert.match(player, /maxBufferBytes: 128 \* 1024 \* 1024/);
     assert.doesNotMatch(player, /player\.videoTrack\s*=/);

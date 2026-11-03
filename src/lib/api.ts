@@ -299,30 +299,40 @@ export const api = {
         return resolveHiAnimeDirect({ ...params, mode: 'sub' }, options?.forceRefresh);
       }
 
-      // Non-Hindi: AnimeRulz is the fast primary provider (typically 300-500ms)
-      let multiStream: StreamData | null = null;
-      try {
-        multiStream = await resolveAnimeRulzDirect(
-          {
-            id: params.id,
-            anilistId: params.anilistId,
-            title: params.title,
-            episode: params.episode,
-            season: params.season,
-            mode: params.mode,
-          },
-          options?.forceRefresh,
-        );
-      } catch {
-        // AnimeRulz failed or episode unavailable
-      }
-
-      if (multiStream && multiStream.streamUrl) {
-        return multiStream;
-      }
-
-      // AnimeRulz failed; fall back to HiAnime
-      return resolveHiAnimeDirect(params, options?.forceRefresh);
+      // Everything else: the multi-audio source comes first, because it carries
+      // every language the episode has (Japanese, English, Hindi, Tamil,
+      // Telugu...), so the player can offer them all. The single-language
+      // backup only starts if the multi-audio source hasn't answered within
+      // 1.5 s (no extra requests when it's quick, which is almost always), and
+      // is used only if the multi-audio source fails or takes over 6 s.
+      const multiPromise = resolveAnimeRulzDirect(
+        {
+          id: params.id,
+          anilistId: params.anilistId,
+          title: params.title,
+          episode: params.episode,
+          season: params.season,
+          mode: params.mode,
+        },
+        options?.forceRefresh,
+      )
+        .then((s) => (s && s.streamUrl ? s : null))
+        .catch(() => null);
+      let backupPromise: Promise<StreamData | null> | null = null;
+      const startBackup = () =>
+        (backupPromise ??= resolveHiAnimeDirect(params, options?.forceRefresh).catch(() =>
+          params.mode === 'dub' ? resolveHiAnimeDirect({ ...params, mode: 'sub' }, options?.forceRefresh).catch(() => null) : null,
+        ));
+      const hedge = setTimeout(startBackup, 1500);
+      const multiStream = await Promise.race([multiPromise, new Promise<null>((r) => setTimeout(() => r(null), 6000))]);
+      clearTimeout(hedge);
+      if (multiStream) return multiStream;
+      const backup = await startBackup();
+      if (backup && backup.streamUrl) return backup;
+      // The multi-audio source may still answer after the 6 s mark.
+      const late = await multiPromise;
+      if (late) return late;
+      throw new Error('This episode is not available right now');
     });
   },
 

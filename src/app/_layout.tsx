@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react';
 import { AnimatedSplash } from '@/components/AnimatedSplash';
 import { whenPostersReady } from '@/lib/artwork';
 import { homeQuery } from '@/lib/queries';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { LibraryProvider } from '@/lib/library';
 import { QueryProvider, queryClient } from '@/lib/query';
@@ -60,6 +61,8 @@ export default function RootLayout() {
   const [splashDone, setSplashDone] = useState(false);
 
   return (
+    // Gesture root: the player's taps, double-taps and drags need it.
+    <GestureHandlerRootView style={{ flex: 1 }}>
     <QueryProvider onRestored={() => setRestored(true)}>
       <SafeAreaProvider>
       {(!fontsLoaded && !fontError) || !tourKnown ? null : (
@@ -84,6 +87,7 @@ export default function RootLayout() {
               <Stack.Screen name="watch/[id]" />
               <Stack.Screen name="search" />
               <Stack.Screen name="settings" />
+              <Stack.Screen name="kuro-test" />
               <Stack.Screen name="welcome" options={{ animation: 'fade', animationDuration: 300, gestureEnabled: false }} />
             </Stack>
             </SettingsProvider>
@@ -92,5 +96,6 @@ export default function RootLayout() {
       {splashDone ? null : <AnimatedSplash ready={ready} toHeader={onboarded() !== false} fontsReady={fontsLoaded || !!fontError} onDone={() => setSplashDone(true)} />}
       </SafeAreaProvider>
     </QueryProvider>
+    </GestureHandlerRootView>
   );
 }

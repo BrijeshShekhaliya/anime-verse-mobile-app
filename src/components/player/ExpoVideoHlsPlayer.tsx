@@ -26,6 +26,7 @@ type Props = {
   referer?: string;
   paused: boolean;
   playbackRate: number;
+  volume?: number; // 0..1, the player's own volume
   fitMode: 'contain' | 'cover' | 'fill';
   selectedQualityHeight: number;
   selectedAudioTrackId?: number | null;
@@ -34,7 +35,7 @@ type Props = {
   subtitles: NativeSubtitle[];
   subtitlesEnabled: boolean;
   onLoad: (duration: number) => void;
-  onProgress: (time: number, duration: number, buffered: number) => void;
+  onProgress: (time: number, duration: number, buffered: number, videoWidth?: number, videoHeight?: number) => void;
   onBuffer: (buffering: boolean) => void;
   onAudioTracks: (tracks: NativePlayerTrack[]) => void;
   onTextTracks: (tracks: NativePlayerTrack[]) => void;
@@ -51,7 +52,7 @@ const BUFFER_OPTIONS = {
   // brief mobile-network dips do not immediately stall playback. The byte
   // budget must be large enough for a minute of high-bitrate 1080p HLS.
   minBufferForPlayback: 1.5,
-  preferredForwardBufferDuration: 60,
+  preferredForwardBufferDuration: 30,
   maxBufferBytes: 128 * 1024 * 1024,
   prioritizeTimeOverSizeThreshold: true,
 };
@@ -143,6 +144,7 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
   referer,
   paused,
   playbackRate,
+  volume = 1,
   fitMode,
   selectedQualityHeight,
   selectedAudioTrackId = null,
@@ -210,6 +212,10 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
   useEffect(() => {
     player.playbackRate = playbackRate;
   }, [player, playbackRate]);
+
+  useEffect(() => {
+    player.volume = Math.min(1, Math.max(0, volume));
+  }, [player, volume]);
 
     const syncAudioTrack = useCallback(() => {
     const available = player.availableAudioTracks;
@@ -325,7 +331,8 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
       player.addListener('timeUpdate', (event) => {
         const time = Math.max(0, event.currentTime || 0);
         setPlaybackTime(time);
-        onProgress(time, Math.max(0, player.duration || 0), Math.max(0, event.bufferedPosition || 0));
+        const playing = player.videoTrack as unknown as { size?: { width?: number; height?: number } } | null;
+        onProgress(time, Math.max(0, player.duration || 0), Math.max(0, event.bufferedPosition || 0), playing?.size?.width, playing?.size?.height);
       }),
       player.addListener('statusChange', (event) => {
         if (event.status === 'loading') onBuffer(true);

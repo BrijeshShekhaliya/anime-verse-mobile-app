@@ -578,42 +578,21 @@ export async function fetchEpisodes(id: string, season = 1, animeDetail?: AnimeD
     episode_count: anime.episodes || 12,
   };
 
-  // 1. Scrape live released episodes directly from HiAnime
-  let hiAnimeCount = 0;
-  try {
-    const candidateTitles = [
-      currentSeasonInfo.title,
-      season > 1 ? (await anilistSeasonTitle(anime.title, season)).title : null,
-      anime.title,
-      anime.titleRomaji,
-    ].filter(Boolean) as string[];
-
-    for (const candidate of candidateTitles) {
-      const results = await hianimeSearch(candidate);
-      if (results.length > 0) {
-        const epList = await hianimeEpisodes(results[0].id);
-        if (epList.length > 0) {
-          hiAnimeCount = epList.length;
-          break;
-        }
-      }
-    }
-  } catch (err: any) {
-    console.warn('[episodes] HiAnime episodes lookup fallback:', err?.message);
-  }
-
-  // 2. AniList episode count fallback
+  // Released episodes, from AniList and the clock: everything before the next
+  // airing episode (and that one too once its time has passed). The next one
+  // is listed too, locked with its date, so it can be seen but not played.
+  const now = Date.now() / 1000;
+  const next = anime.nextEpisode?.episode ? { episode: Number(anime.nextEpisode.episode), airingAt: Number(anime.nextEpisode.airingAt) || 0 } : null;
+  const nextOut = !!next && next.airingAt > 0 && next.airingAt <= now;
   let totalEp = currentSeasonInfo.episode_count || anime.episodes || 12;
   if (anime.airing || anime.status === 'Currently Airing' || anime.status === 'Releasing') {
-    const nextEp = anime.nextEpisode?.episode ? Number(anime.nextEpisode.episode) : 0;
-    if (nextEp > 1) {
-      totalEp = Math.min(totalEp, nextEp - 1);
-    }
+    if (next && next.episode > 1) totalEp = Math.min(totalEp, nextOut ? next.episode : next.episode - 1);
   } else if (anime.status === 'Not yet aired' || anime.status === 'NOT_YET_RELEASED') {
     totalEp = 0;
   }
+  const upcoming = next && !nextOut && next.episode === totalEp + 1 ? next : null;
 
-  const count = Math.max(hiAnimeCount, totalEp, 1);
+  const count = Math.max(totalEp, upcoming ? 0 : 1);
   const episodeList: Episode[] = [];
   for (let i = 1; i <= count; i++) {
     episodeList.push({
@@ -626,6 +605,18 @@ export async function fetchEpisodes(id: string, season = 1, animeDetail?: AnimeD
       runtime: anime.duration ? parseInt(anime.duration, 10) : 24,
       hasSub: true,
       hasDub: true,
+    });
+  }
+  if (upcoming) {
+    episodeList.push({
+      episode_number: upcoming.episode,
+      season_number: season,
+      name: `Episode ${upcoming.episode}`,
+      still_path: anime.banner || anime.image || null,
+      air_date: new Date(upcoming.airingAt * 1000).toISOString(),
+      runtime: anime.duration ? parseInt(anime.duration, 10) : 24,
+      upcoming: true,
+      airingAt: upcoming.airingAt,
     });
   }
 

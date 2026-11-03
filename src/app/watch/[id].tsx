@@ -23,10 +23,12 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { WebView, type WebViewProps } from 'react-native-webview';
+import { PlayerOverlay, type QuickChip } from '@/components/player/PlayerOverlay';
+import { PlayerSettingsSheet, type SheetSection } from '@/components/player/PlayerSettingsSheet';
 import NativeHlsPlayer, { type NativePlayerTrack, type NativeVideoLevel } from '@/components/player/NativeHlsPlayer';
 import { isAudioLanguageMatch, hasAudioLanguage } from '@/components/player/ExpoVideoHlsPlayer';
 import { isStreamUrlExpired } from '@/services/animerulzClient';
+import { airDateLabel } from '@/lib/airDate';
 import { EpisodeBadges } from '@/components/Badges';
 import { Icon } from '@/components/Icon';
 import { PressableScale } from '@/components/PressableScale';
@@ -37,13 +39,9 @@ import { colors, fonts, radius } from '@/lib/theme';
 import type { Episode, EpisodesData, StreamData } from '@/lib/types';
 import { useFetch } from '@/lib/useFetch';
 
-const MobileWebView = WebView as unknown as React.ComponentType<WebViewProps & { ref?: any }>;
 
-const SERVER_STORAGE_KEY = 'animeverse:preferred_server';
 const AUTOPLAY_STORAGE_KEY = 'animeverse:autoplay';
-type ServerType = 'vidrift' | 'hianime';
 type FitMode = 'contain' | 'cover' | 'fill';
-type SettingsSubView = 'main' | 'audio' | 'subtitles' | 'quality' | 'speed';
 
 interface AudioTrackInfo {
   id: number;
@@ -84,34 +82,26 @@ export default function WatchScreen() {
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
 
-  // Authoritative fullscreen state
-  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
 
-  // Live container layout measurements (avoids pre-rotation Dimensions stale reads)
-  const [layoutDimensions, setLayoutDimensions] = useState<{ width: number; height: number }>({
-    width: width,
-    height: height,
-  });
-
-  // Keep layoutDimensions synchronized with window dimension changes
-  useEffect(() => {
-    setLayoutDimensions({ width, height });
-  }, [width, height]);
-
+  // The layout follows the screen's real shape, measured from this screen's own
+  // root view, and nothing else. The window size from useWindowDimensions is not
+  // trustworthy here: on this app it isn't updated when the screen turns (the
+  // activity handles rotation itself), so it kept saying "portrait" in landscape
+  // and "landscape" back in portrait. That stale size is what showed the
+  // portrait player on a landscape screen, and the fullscreen player with black
+  // bars on a portrait one. The root view's measured size is what is actually
+  // on screen, so the layout switches the moment the turn lands, both ways.
+  const [screen, setScreen] = useState({ w: width, h: height });
   const onRootLayout = useCallback((e: LayoutChangeEvent) => {
     const { width: w, height: h } = e.nativeEvent.layout;
-    if (w > 0 && h > 0) {
-      setLayoutDimensions({ width: Math.round(w), height: Math.round(h) });
-    }
+    if (w > 0 && h > 0) setScreen((p) => (p.w === Math.round(w) && p.h === Math.round(h) ? p : { w: Math.round(w), h: Math.round(h) }));
   }, []);
-
-  const activeWidth = layoutDimensions.width || width;
-  const activeHeight = layoutDimensions.height || height;
-  const isPhysicalLandscape = isFullscreen || width > height || activeWidth > activeHeight;
-  // Fullscreen presentation follows authoritative user intent or physical landscape geometry
-  const isFullscreenView = isPhysicalLandscape;
-  const portraitPlayerWidth = Math.min(width, height);
-  const portraitPlayerHeight = Math.floor((portraitPlayerWidth * 9) / 16);
+  // Only that measured size decides fullscreen. Layout events arrive in order
+  // and always describe the frame on screen, so nothing can overwrite them with
+  // an older answer. (Asking the phone for its orientation is asynchronous: the
+  // answer to a question asked just before a turn could arrive after the turn's
+  // own event and undo it, which made fullscreen work only some of the time.)
+  const isFullscreenView = screen.w > screen.h;
   const topInset = Platform.OS === 'android' ? Math.max(insets.top, RNStatusBar.currentHeight || 0) : insets.top;
 
   const { titleLang, audioLang, quality: userQuality } = useSettings();
@@ -135,7 +125,7 @@ export default function WatchScreen() {
 
   const [currentSeason, setCurrentSeason] = useState<number>(Math.max(1, parseInt(paramSeason || '1', 10) || 1));
   const [currentEp, setCurrentEp] = useState<number>(Math.max(1, parseInt(paramEp || '1', 10) || 1));
-  const [server, setServer] = useState<ServerType>('hianime');
+  const [retryNonce, setRetryNonce] = useState(0); // bumped by "Try again"
   const [subtitlesEnabled, setSubtitlesEnabled] = useState<boolean>(true);
   const [fitMode, setFitMode] = useState<FitMode>('contain'); // Default: contain (100% video visible, no crop)
   const [badgeText, setBadgeText] = useState<string | null>(null);
@@ -171,7 +161,8 @@ export default function WatchScreen() {
 
   // Settings
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
-  const [settingsSubView, setSettingsSubView] = useState<SettingsSubView>('main');
+  const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined);
+  const [volume, setVolume] = useState<number>(1); // the player's own volume (drag up / down on the right)
 
   // Likes / Interactions
   const [liked, setLiked] = useState<boolean>(false);
@@ -179,10 +170,10 @@ export default function WatchScreen() {
   const [likeCount, setLikeCount] = useState<number>(2940);
   const [dislikeCount, setDislikeCount] = useState<number>(18);
 
-  const webViewRef = useRef<any>(null);
   const nativeVideoRef = useRef<any>(null);
   const nativePlayerTimeRef = useRef(0);
   const nativeSeekTargetRef = useRef<number | null>(null);
+  const seekStartedAtRef = useRef(0);
   const nativeSourceKeyRef = useRef<string | null>(null);
   const [nativeAudioTrackId, setNativeAudioTrackId] = useState<number | null>(null);
   const [nativeTextTrackId, setNativeTextTrackId] = useState<number | null>(null);
@@ -190,7 +181,6 @@ export default function WatchScreen() {
   const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const advisoryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastTapRef = useRef<{ time: number; x: number }>({ time: 0, x: 0 });
   const initialPinchDistRef = useRef<number | null>(null);
   const { setProgress } = useLibrary();
   const recordedEpRef = useRef<string | null>(null);
@@ -211,6 +201,7 @@ export default function WatchScreen() {
   const currentLangRef = useRef<'sub' | 'dub'>('sub');
   const preferredAudioNameRef = useRef<string | null>(null);
   const lastLoggedResolutionRef = useRef<string>('');
+  const [playingHeight, setPlayingHeight] = useState(0); // the resolution actually on screen
   const streamCacheRef = useRef<Map<string, { data: StreamData; expiresAt: number }>>(new Map());
   const inflightResolutionsRef = useRef<Map<string, Promise<StreamData>>>(new Map());
   const playerRetryCountRef = useRef<Record<string, number>>({});
@@ -233,15 +224,9 @@ export default function WatchScreen() {
     setSelectedQualityHeight(initialHeight);
     selectedQualityRef.current = initialHeight;
 
-    // 3. Server and Autoplay from device storage
-    Promise.all([
-      AsyncStorage.getItem(SERVER_STORAGE_KEY).catch(() => null),
-      AsyncStorage.getItem(AUTOPLAY_STORAGE_KEY).catch(() => null),
-    ]).then(([savedServer, savedAutoplay]) => {
+    // 3. Autoplay from device storage
+    AsyncStorage.getItem(AUTOPLAY_STORAGE_KEY).catch(() => null).then((savedAutoplay) => {
       if (!active) return;
-      if (savedServer === 'hianime' || savedServer === 'vidrift') {
-        setServer(savedServer as ServerType);
-      }
       if (savedAutoplay !== null) setAutoplay(savedAutoplay === '1');
       setPlayerPreferencesLoaded(true);
     });
@@ -251,12 +236,6 @@ export default function WatchScreen() {
     };
   }, [audioLang, defaultQualityHeight]);
 
-  // Unlock orientation sensor on unmount
-  useEffect(() => {
-    return () => {
-      ScreenOrientation.unlockAsync().catch(() => {});
-    };
-  }, []);
 
   // Stale callback protection across episode/stream switches
   const currentEpisodeKeyRef = useRef<string>(`${currentSeason}:${currentEp}`);
@@ -269,31 +248,33 @@ export default function WatchScreen() {
     ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch(() => {});
   }, []);
 
+  // The app is portrait-only: leaving fullscreen locks portrait again (never
+  // "unlock", which would let the whole app rotate and, with the phone held
+  // sideways, bounce straight back into fullscreen).
   const restoreOrientation = useCallback(() => {
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP)
-      .then(() => {
-        setTimeout(() => {
-          ScreenOrientation.unlockAsync().catch(() => {});
-        }, 350);
-      })
-      .catch(() => {
-        ScreenOrientation.unlockAsync().catch(() => {});
-      });
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+  }, []);
+
+  // Status and navigation bars switch the moment the button is tapped (not
+  // after the screen has re-rendered, which can take most of a second).
+  const setSystemBarsHidden = useCallback((hidden: boolean) => {
+    RNStatusBar.setHidden(hidden, 'none');
+    if (Platform.OS === 'android') NavigationBar.setVisibilityAsync(hidden ? 'hidden' : 'visible').catch(() => {});
   }, []);
 
   const enterFullscreen = useCallback(() => {
-    // Request rotation; the visual layout waits for measured landscape geometry.
+    // Bars go now; the layout follows the turn natively.
+    setSystemBarsHidden(true);
     setControlsVisible(false);
-    setIsFullscreen(true);
     enterLandscape();
-  }, [enterLandscape]);
+  }, [enterLandscape, setSystemBarsHidden]);
 
   const exitFullscreen = useCallback(() => {
-    // The view and status bar return to portrait when the measured bounds do.
+    // Same in reverse.
+    setSystemBarsHidden(false);
     setControlsVisible(false);
-    setIsFullscreen(false);
     restoreOrientation();
-  }, [restoreOrientation]);
+  }, [restoreOrientation, setSystemBarsHidden]);
 
   const toggleFullscreen = useCallback(() => {
     if (isFullscreenView) {
@@ -303,19 +284,10 @@ export default function WatchScreen() {
     }
   }, [isFullscreenView, enterFullscreen, exitFullscreen]);
 
-  // Listen to physical device orientation changes
+  // Controls hide while the screen turns (they reappear on the next tap).
   useEffect(() => {
-    const sub = ScreenOrientation.addOrientationChangeListener((evt) => {
-      const orientation = evt.orientationInfo.orientation;
-      const isLand =
-        orientation === ScreenOrientation.Orientation.LANDSCAPE_LEFT ||
-        orientation === ScreenOrientation.Orientation.LANDSCAPE_RIGHT;
+    const sub = ScreenOrientation.addOrientationChangeListener(() => {
       setControlsVisible(false);
-      if (isLand) {
-        setIsFullscreen(true);
-      } else {
-        setIsFullscreen(false);
-      }
     });
     return () => {
       ScreenOrientation.removeOrientationChangeListener(sub);
@@ -341,24 +313,20 @@ export default function WatchScreen() {
     return () => sub.remove();
   }, [isFullscreenView, settingsOpen, exitFullscreen]);
 
-  // Clean status bar handling for Android
+  // Keeps the bars matching the screen if it turned some other way (the
+  // buttons already switched them at the tap; this repeats the same value).
   useEffect(() => {
-    RNStatusBar.setHidden(isFullscreenView, 'fade');
-    if (Platform.OS === 'android') {
-      NavigationBar.setVisibilityAsync(isFullscreenView ? 'hidden' : 'visible').catch(() => {});
-    }
-  }, [isFullscreenView]);
+    setSystemBarsHidden(isFullscreenView);
+  }, [isFullscreenView, setSystemBarsHidden]);
 
-  // Restore screen orientation on unmount
+  // Leaving the player: system bars back, and back to the app's portrait lock.
   useEffect(() => {
     return () => {
       RNStatusBar.setHidden(false, 'none');
       if (Platform.OS === 'android') {
         NavigationBar.setVisibilityAsync('visible').catch(() => {});
       }
-      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP)
-        .catch(() => {})
-        .then(() => ScreenOrientation.unlockAsync().catch(() => {}));
+      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
     };
   }, []);
 
@@ -371,17 +339,10 @@ export default function WatchScreen() {
     }, 1500);
   }, []);
 
-  // Update video fit mode in CSS WITHOUT reloading HTML/WebView!
+  // Fit / zoom / stretch for the video, with a short confirmation.
   const changeFitMode = useCallback(
     (newMode: FitMode) => {
       setFitMode(newMode);
-      webViewRef.current?.injectJavaScript(`
-        (function() {
-          var v = document.getElementById('player');
-          if (v) { v.className = '${newMode}'; }
-        })();
-        true;
-      `);
       if (newMode === 'contain') showBadge('Fit to screen');
       else if (newMode === 'cover') showBadge('Zoomed to fill');
       else showBadge('Stretch to screen');
@@ -431,6 +392,9 @@ export default function WatchScreen() {
     () => episodes.find((e) => e.episode_number === currentEp + 1) || null,
     [episodes, currentEp],
   );
+  // Episodes that aren't out yet are listed (locked, with their date) but never played.
+  const currentEpLocked = !!currentEpisodeObj?.upcoming;
+  const nextEpLocked = !!nextEpisodeObj?.upcoming;
 
   // Check whether the active episode has English Dub available
   const currentEpHasDub = useMemo(() => {
@@ -525,7 +489,8 @@ export default function WatchScreen() {
 
   // Resolve stream URL for current episode/season
   useEffect(() => {
-    if (!playerPreferencesLoaded || server !== 'hianime' || (!anime?.title && !initialAnime?.title && !initialAnilistId)) return;
+    if (currentEpLocked) return; // not out yet: nothing to load
+    if (!playerPreferencesLoaded || (!anime?.title && !initialAnime?.title && !initialAnilistId)) return;
     // If the saved preference is Dub and anime-level metadata does not say
     // whether Dub exists, wait for episode metadata instead of resolving Sub
     // first and immediately issuing a second resolver request for Dub.
@@ -589,6 +554,7 @@ export default function WatchScreen() {
       currentEp,
       targetMode,
       seasonAnilistId,
+      retryNonce > 0,
     )
       .then((res) => {
         if (cancelled || reqSeq !== episodeRequestSeqRef.current || currentEpisodeKeyRef.current !== `${currentSeason}:${currentEp}`) return;
@@ -610,12 +576,12 @@ export default function WatchScreen() {
             showBadge('Hindi dub unavailable — Playing in Japanese');
           }
         } else {
-          setHlsError('Stream currently unavailable. Tap to retry or switch server.');
+          setHlsError('This episode could not load. Check your connection and try again.');
         }
       })
       .catch((err) => {
         if (cancelled || reqSeq !== episodeRequestSeqRef.current || currentEpisodeKeyRef.current !== `${currentSeason}:${currentEp}`) return;
-        setHlsError('Stream currently unavailable. Tap to retry or switch server.');
+        setHlsError('This episode could not load. Check your connection and try again.');
       })
       .finally(() => {
         if (!cancelled && reqSeq === episodeRequestSeqRef.current && currentEpisodeKeyRef.current === `${currentSeason}:${currentEp}`) {
@@ -626,7 +592,35 @@ export default function WatchScreen() {
     return () => {
       cancelled = true;
     };
-  }, [playerPreferencesLoaded, server, anime?.title, anime?.titleRomaji, anime?.languages?.dub, epData, currentSeason, currentEp, currentEpHasDub, resolveStreamWithCache]);
+  }, [currentEpLocked, retryNonce, playerPreferencesLoaded, anime?.title, anime?.titleRomaji, anime?.languages?.dub, epData, currentSeason, currentEp, currentEpHasDub, resolveStreamWithCache]);
+
+  // Preload the next episode's stream 20 s into this one.
+  const preloadedRef = useRef<string | null>(null);
+  const nextPreloadReady = currentTime > 20 && !!nextEpisodeObj && !nextEpLocked && !!mountedStream?.streamUrl;
+  useEffect(() => {
+    if (!nextPreloadReady || !nextEpisodeObj) return;
+    const key = `${currentSeason}:${nextEpisodeObj.episode_number}`;
+    if (preloadedRef.current === key) return;
+    preloadedRef.current = key;
+    const seasonObj = epData?.seasons?.find((s) => s.season_number === currentSeason);
+    const seasonAnilistId =
+      seasonObj?.anilistId ||
+      (seasonObj?.id && !isNaN(Number(seasonObj.id)) ? Number(seasonObj.id) : undefined) ||
+      anime?.anilistId ||
+      initialAnilistId ||
+      undefined;
+    const title =
+      (seasonObj?.title && !/^Season\s+\d+$/i.test(seasonObj.title.trim()) ? seasonObj.title : null) || anime?.title || initialAnime?.title || '';
+    resolveStreamWithCache(
+      title,
+      anime?.titleRomaji || initialAnime?.titleRomaji || undefined,
+      currentSeason,
+      nextEpisodeObj.episode_number,
+      currentLangRef.current,
+      seasonAnilistId,
+    ).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nextPreloadReady, nextEpisodeObj?.episode_number, currentSeason]);
 
   // Alternate Sub/Dub streams are resolved on demand instead of during cold
   // start. Eager prefetch ran before HLS reported in-band audio tracks, creating
@@ -675,13 +669,10 @@ export default function WatchScreen() {
     };
   }, [resetHideTimer]);
 
-  // JavaScript injection is only used for the VidRift iframe fallback.
-  const sendPlayerCommand = useCallback((code: string) => {
-    if (server === 'vidrift') webViewRef.current?.injectJavaScript(`(function(){ ${code} })(); true;`);
-  }, [server]);
   const seekNativePlayer = useCallback((time: number) => {
     const target = Math.max(0, time);
     nativeSeekTargetRef.current = target;
+    seekStartedAtRef.current = Date.now();
     nativeVideoRef.current?.seek?.(target);
     nativePlayerTimeRef.current = target;
     currentTimeRef.current = target;
@@ -689,48 +680,45 @@ export default function WatchScreen() {
 
   // Controls Actions
   const handleTogglePlay = useCallback(() => {
-    if (server === 'vidrift') {
-      sendPlayerCommand("var v=document.querySelector('video');if(v){if(v.paused)v.play();else v.pause();}");
-    }
     setIsPlaying((prev) => { isPlayingRef.current = !prev; return !prev; });
     resetHideTimer();
-  }, [server, sendPlayerCommand, resetHideTimer]);
+  }, [resetHideTimer]);
 
   const handleRewind10 = useCallback(() => {
     const next = Math.max(0, nativePlayerTimeRef.current - 10);
-    if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.currentTime=${next};`); else seekNativePlayer(next);
+    seekNativePlayer(next);
     setCurrentTime(next); resetHideTimer();
-  }, [server, sendPlayerCommand, seekNativePlayer, resetHideTimer]);
+  }, [seekNativePlayer, resetHideTimer]);
 
   const handleForward10 = useCallback(() => {
     const next = Math.min(duration || Number.MAX_SAFE_INTEGER, nativePlayerTimeRef.current + 10);
-    if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.currentTime=${next};`); else seekNativePlayer(next);
+    seekNativePlayer(next);
     setCurrentTime(next); resetHideTimer();
-  }, [duration, server, sendPlayerCommand, seekNativePlayer, resetHideTimer]);
+  }, [duration, seekNativePlayer, resetHideTimer]);
+
+  const handleSeekBy = useCallback(
+    (delta: number) => {
+      const next = Math.max(0, Math.min(duration || Number.MAX_SAFE_INTEGER, nativePlayerTimeRef.current + delta));
+      seekNativePlayer(next);
+      setCurrentTime(next);
+    },
+    [duration, seekNativePlayer],
+  );
 
   const handleSeek = useCallback(
     (targetSec: number) => {
       const clamped = Math.max(0, Math.min(duration, targetSec));
       setCurrentTime(clamped);
-      if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.currentTime=${clamped};`); else seekNativePlayer(clamped);
+      seekNativePlayer(clamped);
       resetHideTimer();
     },
-    [duration, server, sendPlayerCommand, seekNativePlayer, resetHideTimer],
+    [duration, seekNativePlayer, resetHideTimer],
   );
 
   const handleSetSpeed = useCallback((speed: number) => {
     setPlaybackSpeed(speed); playbackSpeedRef.current = speed;
-    if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v)v.playbackRate=${speed};`);
-  }, [server, sendPlayerCommand]);
+  }, []);
 
-  // The separate-stream in-place switch is retained only for VidRift. HiAnime
-  // source changes are delegated to the native Video source prop.
-  const applyStreamInPlace = useCallback((stream: StreamData, episodeKey: string, resumeTime = 0, shouldPlay = true, speed = playbackSpeedRef.current, quality = selectedQualityRef.current) => {
-    if (server !== 'vidrift' || !stream?.streamUrl) return false;
-    const subtitles = JSON.stringify((stream.subtitles || []).map((sub, idx) => ({label:sub.label || sub.lang || 'English',lang:sub.lang || 'en',src:toFullUrl(sub.src),default:sub.default || idx === 0})));
-    sendPlayerCommand(`if(window.switchStream)window.switchStream(${JSON.stringify(toFullUrl(stream.streamUrl))},${subtitles},${resumeTime},${shouldPlay},${speed},${quality},${JSON.stringify(episodeKey)});`);
-    return true;
-  }, [server, sendPlayerCommand]);
 
   // Switch Audio Track
   // Path A: in-place Hls.js audioTrack switch when real alternate tracks exist in manifest
@@ -743,7 +731,6 @@ export default function WatchScreen() {
         setIsSwitchingAudio(false);
         setCurrentAudioTrackId(selection.trackId);
         setNativeAudioTrackId(selection.trackId);
-        if (server === 'vidrift') sendPlayerCommand(`if(window._hls)window._hls.audioTrack=${selection.trackId};`);
         const track = availableAudioTracks.find((t) => t.id === selection.trackId);
         if (track) {
           showBadge(`Audio: ${track.name || track.lang}`);
@@ -790,20 +777,15 @@ export default function WatchScreen() {
         }
 
         const capturedTime = nativePlayerTimeRef.current || currentTimeRef.current;
-        if (server === 'vidrift') {
-          const dispatched = applyStreamInPlace(resolved, requestedEpisodeKey, capturedTime, isPlayingRef.current, playbackSpeedRef.current, selectedQualityRef.current);
-          if (!dispatched) throw new Error('Player is still preparing. Please try again.');
-        } else {
-          const switchKey = `${requestedEpisodeKey}:${targetMode}:${resolved.streamUrl}`;
-          setResumeAfterSourceChange({ key: switchKey, time: capturedTime, shouldPlay: isPlayingRef.current });
-          mountedStreamEpisodeKeyRef.current = requestedEpisodeKey;
-          // Keep the existing player surface and custom controls mounted while
-          // ExoPlayer replaces the source. The resolver spinner is only for the
-          // initial URL lookup; actual media loading is shown by isBuffering.
-          setResolvingHls(false);
-          setIsBuffering(true);
-          setMountedStream(resolved);
-        }
+        const switchKey = `${requestedEpisodeKey}:${targetMode}:${resolved.streamUrl}`;
+        setResumeAfterSourceChange({ key: switchKey, time: capturedTime, shouldPlay: isPlayingRef.current });
+        mountedStreamEpisodeKeyRef.current = requestedEpisodeKey;
+        // Keep the existing player surface and custom controls mounted while
+        // ExoPlayer replaces the source. The resolver spinner is only for the
+        // initial URL lookup; actual media loading is shown by isBuffering.
+        setResolvingHls(false);
+        setIsBuffering(true);
+        setMountedStream(resolved);
 
         setCurrentLang(targetMode);
         currentLangRef.current = targetMode;
@@ -828,9 +810,7 @@ export default function WatchScreen() {
       currentSeason,
       currentEp,
       resolveStreamWithCache,
-      sendPlayerCommand,
       showBadge,
-      applyStreamInPlace,
     ],
   );
 
@@ -839,24 +819,27 @@ export default function WatchScreen() {
     selectedQualityRef.current = targetHeight;
     sessionQualityOverrideRef.current = targetHeight;
     console.log(`[Player Quality] User switched quality to: ${targetHeight === -1 ? 'Auto' : `${targetHeight}p`}`);
-    if (server === 'vidrift') sendPlayerCommand(`if(window._hls)window._hls.currentLevel=${targetHeight};`);
     // Native HLS uses resolution-based track selection; the native engine chooses
     // the closest available resolution when exact variants differ.
     showBadge(targetHeight === -1 ? 'Quality: Auto' : `Quality: ${targetHeight}p`);
-  }, [server, sendPlayerCommand, showBadge]);
+  }, [showBadge]);
 
   const handleToggleSubtitles = useCallback(
     (enable: boolean) => {
       setSubtitlesEnabled(enable);
       subtitlesEnabledRef.current = enable;
-      if (server === 'vidrift') sendPlayerCommand(`var v=document.querySelector('video');if(v&&v.textTracks)for(var i=0;i<v.textTracks.length;i++)v.textTracks[i].mode='${enable ? 'showing' : 'hidden'}';`);
       showBadge(enable ? 'Subtitles On' : 'Subtitles Off');
     },
-    [server, sendPlayerCommand, showBadge],
+    [showBadge],
   );
 
   const handleNextEpisode = useCallback(() => {
     if (episodes.length === 0) return;
+    const upcomingNext = episodes.find((e) => e.episode_number === currentEp + 1);
+    if (upcomingNext?.upcoming) {
+      showBadge(`Episode ${upcomingNext.episode_number} comes out ${airDateLabel(upcomingNext.airingAt)}`);
+      return;
+    }
     const maxEp = episodes[episodes.length - 1].episode_number;
     if (currentEp < maxEp) {
       if (anime) {
@@ -865,6 +848,8 @@ export default function WatchScreen() {
         setProgress(anime, currentEp, total, { completed: true });
       }
       const nextEp = currentEp + 1;
+      setPlayingHeight(0);
+      lastLoggedResolutionRef.current = '';
       currentEpisodeKeyRef.current = `${currentSeason}:${nextEp}`;
       mountedStreamEpisodeKeyRef.current = null;
       setMountedStream(null);
@@ -888,59 +873,7 @@ export default function WatchScreen() {
       setIsPlaying(true);
       resetHideTimer();
     }
-  }, [currentEp, currentSeason, episodes, resetHideTimer]);
-
-  // Scrubber layout measurement reference for 100% accurate pageX drag calculation
-  const scrubberAreaRef = useRef<any>(null);
-  const scrubberLayoutRef = useRef<{ pageX: number; width: number }>({ pageX: 0, width: 1 });
-
-  // Instant Double-tap & Tap handler (YouTube / MX Player style with 0ms latency)
-  const handlePlayerAreaPress = useCallback(
-    (e: GestureResponderEvent) => {
-      const now = Date.now();
-      const touchX = e.nativeEvent.locationX;
-      const barW = progressBarWidthRef.current || width;
-
-      // When controls are already visible, ANY single tap anywhere hides controls IMMEDIATELY (0ms!)
-      if (controlsVisible) {
-        setControlsVisible(false);
-        if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
-        lastTapRef.current = { time: 0, x: 0 };
-        return;
-      }
-
-      // When controls are hidden:
-      // Center zone (28% to 72% width) reveals controls INSTANTLY (0ms!) without any double-tap delay
-      const isLeftWing = touchX < barW * 0.28;
-      const isRightWing = touchX > barW * 0.72;
-
-      if (!isLeftWing && !isRightWing) {
-        resetHideTimer();
-        lastTapRef.current = { time: 0, x: 0 };
-        return;
-      }
-
-      // On left/right wings: check for double tap
-      if (now - lastTapRef.current.time < 300) {
-        if (isLeftWing) {
-          handleRewind10();
-          showBadge('-10s');
-        } else if (isRightWing) {
-          handleForward10();
-          showBadge('+10s');
-        }
-        lastTapRef.current = { time: 0, x: 0 };
-      } else {
-        lastTapRef.current = { time: now, x: touchX };
-        setTimeout(() => {
-          if (lastTapRef.current.time === now) {
-            resetHideTimer();
-          }
-        }, 220);
-      }
-    },
-    [controlsVisible, width, handleRewind10, handleForward10, resetHideTimer, showBadge],
-  );
+  }, [currentEp, currentSeason, episodes, resetHideTimer, showBadge]);
 
   // Two-Finger Pinch-to-Zoom Gesture (Dynamic Fit / Fill like MX Player & YouTube)
   const handleTouchStart = useCallback((e: GestureResponderEvent) => {
@@ -972,68 +905,6 @@ export default function WatchScreen() {
     initialPinchDistRef.current = null;
   }, []);
 
-  // Rock-solid 60 FPS Scrubber with pageX absolute geometry and time preview bubble
-  const updateScrubberFromPageX = useCallback(
-    (pageX: number, commit = false) => {
-      const { pageX: startX, width: barW } = scrubberLayoutRef.current;
-      const effectiveW = Math.max(1, barW);
-      const relativeX = pageX - startX;
-      const ratio = Math.max(0, Math.min(1, relativeX / effectiveW));
-      const targetTime = ratio * duration;
-      if (commit) {
-        setScrubbingTime(null);
-        handleSeek(targetTime);
-      } else {
-        setScrubbingTime(targetTime);
-        resetHideTimer();
-      }
-    },
-    [duration, handleSeek, resetHideTimer],
-  );
-
-  const handleScrubberGrant = useCallback(
-    (e: GestureResponderEvent) => {
-      updateScrubberFromPageX(e.nativeEvent.pageX, false);
-    },
-    [updateScrubberFromPageX],
-  );
-
-  const handleScrubberMove = useCallback(
-    (e: GestureResponderEvent) => {
-      updateScrubberFromPageX(e.nativeEvent.pageX, false);
-    },
-    [updateScrubberFromPageX],
-  );
-
-  const handleScrubberRelease = useCallback(
-    (e: GestureResponderEvent) => {
-      updateScrubberFromPageX(e.nativeEvent.pageX, true);
-    },
-    [updateScrubberFromPageX],
-  );
-
-  const handleScrubberTerminate = useCallback(() => {
-    setScrubbingTime(null);
-  }, []);
-
-  // Build VidRift embed URL (fallback server)
-  const vidriftEmbedUrl = useMemo(() => {
-    const tmdbId = epData?.tmdbId;
-    const params = new URLSearchParams({
-      brand: 'AnimeVerse',
-      brandColor: 'ff640a',
-      brandLogo: 'https://api.iconify.design/ri/moon-clear-fill.svg?color=%23ff640a',
-      watermark: '1',
-      font: 'Inter',
-      controlBg: 'solid',
-      hide: 'episodes,next,server,cast',
-      fs: 'parent',
-    });
-
-    return tmdbId
-      ? `https://embed.vidrift.net/embed/tv/${tmdbId}/${currentSeason}/${currentEp}?${params.toString()}`
-      : `https://embed.vidrift.net/embed/anilist/${id}/${currentEp}?${params.toString()}`;
-  }, [epData?.tmdbId, currentSeason, currentEp, id]);
 
   // HiAnime streams go directly to ExoPlayer. The native source key uses the
   // episode key attached to the resolved stream, not the currently selected
@@ -1050,7 +921,7 @@ export default function WatchScreen() {
   })), [mountedStream?.subtitles]);
 
   useEffect(() => {
-    if (server !== 'hianime' || !mountedStream?.streamUrl || !nativeStreamKey) return;
+    if (!mountedStream?.streamUrl || !nativeStreamKey) return;
     if (nativeSourceKeyRef.current === nativeStreamKey) return;
     nativeSourceKeyRef.current = nativeStreamKey;
 
@@ -1113,7 +984,6 @@ export default function WatchScreen() {
     setIsBuffering(true);
     setHlsError(null);
   }, [
-    server,
     mountedStream?.streamUrl,
     mountedStream?.audioTracks,
     mountedStream?.videoLevels,
@@ -1141,14 +1011,21 @@ export default function WatchScreen() {
 
   const onNativePlayerProgress = useCallback(
     (time: number, loadedDuration: number, playable: number, videoWidth?: number, videoHeight?: number) => {
-      nativePlayerTimeRef.current = time;
-      currentTimeRef.current = time;
-      setCurrentTime(time);
       const seekTarget = nativeSeekTargetRef.current;
       if (seekTarget !== null && Math.abs(time - seekTarget) <= 1.5) {
         nativeSeekTargetRef.current = null;
         setIsBuffering(false);
+      } else if (seekTarget !== null && Date.now() - seekStartedAtRef.current < 4000) {
+        // Still seeking: the old position isn't news. Keep the target.
+        if (loadedDuration > 0) setDuration(loadedDuration);
+        setBufferedTime(playable);
+        return;
+      } else if (seekTarget !== null) {
+        nativeSeekTargetRef.current = null;
       }
+      nativePlayerTimeRef.current = time;
+      currentTimeRef.current = time;
+      setCurrentTime(time);
       if (loadedDuration > 0) setDuration(loadedDuration);
       setBufferedTime(playable);
 
@@ -1156,6 +1033,7 @@ export default function WatchScreen() {
         const resKey = `${videoWidth || 0}x${videoHeight}`;
         if (resKey !== lastLoggedResolutionRef.current) {
           lastLoggedResolutionRef.current = resKey;
+          setPlayingHeight(videoHeight);
           console.log(`[Native Media3 Stream] Active rendering resolution: ${resKey} (${videoHeight}p)`);
         }
       }
@@ -1226,8 +1104,7 @@ export default function WatchScreen() {
       mountedStream?.source?.toLowerCase().includes('fast stream') ||
       mountedStream?.referer?.toLowerCase().includes('megacloud') ||
       mountedStream?.referer?.toLowerCase().includes('hianime') ||
-      mountedStream?.source?.toLowerCase().includes('hianime') ||
-      server === 'hianime'
+      mountedStream?.source?.toLowerCase().includes('hianime')
     )
   );
 
@@ -1377,11 +1254,11 @@ export default function WatchScreen() {
             setMountedStream(res);
             setHlsError(null);
           } else {
-            setHlsError('Stream currently unavailable. Tap to retry or switch server.');
+            setHlsError('This episode could not load. Check your connection and try again.');
           }
         })
         .catch(() => {
-          setHlsError('Stream currently unavailable. Tap to retry or switch server.');
+          setHlsError('This episode could not load. Check your connection and try again.');
         })
         .finally(() => {
           setResolvingHls(false);
@@ -1394,29 +1271,6 @@ export default function WatchScreen() {
     setResolvingHls(false);
   }, [currentSeason, currentEp, id, anime, epData, resolveStreamWithCache]);
 
-  const handleVidRiftMessage = useCallback((e: { nativeEvent: { data: string } }) => {
-    try {
-      const data = JSON.parse(e.nativeEvent.data);
-      if (data.type === 'play') {
-        setIsPlaying(true);
-        isPlayingRef.current = true;
-      } else if (data.type === 'pause') {
-        setIsPlaying(false);
-        isPlayingRef.current = false;
-      } else if (data.type === 'timeupdate') {
-        if (typeof data.currentTime === 'number') {
-          currentTimeRef.current = data.currentTime;
-          nativePlayerTimeRef.current = data.currentTime;
-          setCurrentTime(data.currentTime);
-        }
-        if (typeof data.duration === 'number' && data.duration > 0) setDuration(data.duration);
-      } else if (data.type === 'buffered' && typeof data.buffered === 'number') {
-        setBufferedTime(data.buffered);
-      } else if (data.type === 'vidrift:ended' || data.type === 'vidrift:nextup-play' || data.type === 'ended') {
-        if (autoplay) handleNextEpisode();
-      }
-    } catch {}
-  }, [autoplay, handleNextEpisode]);
 
   // Interactive like / dislike toggles
   const handleToggleLike = useCallback(() => {
@@ -1447,9 +1301,6 @@ export default function WatchScreen() {
     }
   }, [disliked, liked]);
 
-  const displayTime = scrubbingTime !== null ? scrubbingTime : currentTime;
-  const progressRatio = duration > 0 ? Math.min(1, Math.max(0, displayTime / duration)) : 0;
-  const bufferedRatio = duration > 0 ? Math.min(1, Math.max(0, bufferedTime / duration)) : 0;
 
   // Active audio track name
   const currentAudioName = useMemo(() => {
@@ -1469,21 +1320,143 @@ export default function WatchScreen() {
     return 'On';
   }, [subtitlesEnabled, availableTextTracks, nativeTextTrackId]);
 
+  // Everything the settings sheet offers, with the current choice of each.
+  const openSettings = useCallback((section?: string) => {
+    setSettingsSection(section);
+    setSettingsOpen(true);
+    setControlsVisible(false);
+  }, []);
+  const settingsSections = useMemo<SheetSection[]>(() => {
+    const qualityLevels = availableLevels
+      .map((l) => l.height)
+      .filter((v, i, a) => a.indexOf(v) === i)
+      .sort((a, b) => b - a);
+    return [
+      {
+        key: 'audio',
+        title: 'Audio language',
+        icon: 'mic',
+        value: currentAudioName,
+        options: hasInBandAlternateAudio
+          ? availableAudioTracks.map((t) => ({
+              key: String(t.id),
+              label: t.name || t.lang,
+              selected: currentAudioTrackId === t.id,
+              onSelect: () => handleSelectAudio({ type: 'in-band', trackId: t.id }),
+            }))
+          : [
+              { key: 'sub', label: 'Japanese', hint: 'Original audio with subtitles', selected: currentLang === 'sub', disabled: isSwitchingAudio, onSelect: () => handleSelectAudio({ type: 'separate', mode: 'sub' }) },
+              {
+                key: 'dub',
+                label: 'English',
+                hint: currentEpHasDub ? 'English dub' : 'Not dubbed for this episode',
+                selected: currentLang === 'dub',
+                disabled: !currentEpHasDub || isSwitchingAudio,
+                onSelect: () => handleSelectAudio({ type: 'separate', mode: 'dub' }),
+              },
+            ],
+      },
+      {
+        key: 'subtitles',
+        title: 'Subtitles',
+        icon: 'cc',
+        value: currentSubtitleName,
+        emptyText: 'This video has no separate subtitles (they may be part of the picture).',
+        options: [
+          { key: 'off', label: 'Off', selected: !subtitlesEnabled, onSelect: () => handleToggleSubtitles(false) },
+          ...availableTextTracks.map((t) => ({
+            key: String(t.id),
+            label: t.name || t.lang,
+            selected: subtitlesEnabled && (nativeTextTrackId === t.id || (nativeTextTrackId === null && t.id === 0)),
+            onSelect: () => {
+              setSubtitlesEnabled(true);
+              setNativeTextTrackId(t.id);
+              subtitlesEnabledRef.current = true;
+              showBadge(`Subtitles: ${t.name || t.lang}`);
+            },
+          })),
+        ],
+      },
+      {
+        key: 'quality',
+        title: 'Quality',
+        icon: 'spark',
+        value:
+          (selectedQualityHeight === -1 ? 'Auto' : `${selectedQualityHeight}p`) +
+          (playingHeight && playingHeight !== selectedQualityHeight ? ` · now ${playingHeight}p` : ''),
+        emptyText: 'Reading the qualities this video has…',
+        options: [
+          { key: 'auto', label: 'Auto', hint: 'Adjusts to your connection', selected: selectedQualityHeight === -1, onSelect: () => handleSelectQuality(-1) },
+          ...qualityLevels.map((h) => ({ key: String(h), label: `${h}p`, hint: h >= 1080 ? 'Full HD' : h >= 720 ? 'HD' : undefined, selected: selectedQualityHeight === h, onSelect: () => handleSelectQuality(h) })),
+        ],
+      },
+      {
+        key: 'speed',
+        title: 'Playback speed',
+        icon: 'fastForward',
+        value: playbackSpeed === 1 ? 'Normal' : `${playbackSpeed}x`,
+        options: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((v) => ({ key: String(v), label: v === 1 ? 'Normal' : `${v}x`, selected: playbackSpeed === v, onSelect: () => handleSetSpeed(v) })),
+      },
+      {
+        key: 'fit',
+        title: 'Screen fit',
+        icon: 'aspectRatio',
+        value: fitMode === 'contain' ? 'Fit' : fitMode === 'cover' ? 'Zoom' : 'Stretch',
+        options: [
+          { key: 'contain', label: 'Fit', hint: 'Whole picture, black bars if needed', selected: fitMode === 'contain', onSelect: () => changeFitMode('contain') },
+          { key: 'cover', label: 'Zoom', hint: 'Fills the screen, edges may be cut', selected: fitMode === 'cover', onSelect: () => changeFitMode('cover') },
+          { key: 'fill', label: 'Stretch', hint: 'Fills the screen, picture stretched', selected: fitMode === 'fill', onSelect: () => changeFitMode('fill') },
+        ],
+      },
+      {
+        key: 'autoplay',
+        title: 'Autoplay next episode',
+        icon: 'skip',
+        value: autoplay ? 'On' : 'Off',
+        toggle: {
+          value: autoplay,
+          onChange: (v: boolean) => {
+            setAutoplay(v);
+            AsyncStorage.setItem(AUTOPLAY_STORAGE_KEY, v ? '1' : '0').catch(() => {});
+          },
+        },
+      },
+    ];
+  }, [
+    availableLevels, currentAudioName, hasInBandAlternateAudio, availableAudioTracks, currentAudioTrackId, handleSelectAudio, currentLang, isSwitchingAudio,
+    currentEpHasDub, currentSubtitleName, subtitlesEnabled, handleToggleSubtitles, availableTextTracks, nativeTextTrackId, showBadge, selectedQualityHeight,
+    handleSelectQuality, playbackSpeed, handleSetSpeed, fitMode, changeFitMode, autoplay, playingHeight,
+  ]);
+  const quickChips = useMemo<QuickChip[]>(
+    () => [
+      { key: 'audio', icon: 'mic', label: currentAudioName },
+      { key: 'subtitles', icon: 'cc', label: currentSubtitleName },
+      { key: 'speed', icon: 'fastForward', label: playbackSpeed === 1 ? '1x' : `${playbackSpeed}x` },
+      // The quality really on screen once known (e.g. "1080p"), else the choice.
+      { key: 'quality', icon: 'spark', label: playingHeight ? `${playingHeight}p` : selectedQualityHeight === -1 ? 'Auto' : `${selectedQualityHeight}p` },
+    ],
+    [currentAudioName, currentSubtitleName, playbackSpeed, selectedQualityHeight, playingHeight],
+  );
+
   return (
     <View
-      style={[styles.container, isFullscreenView ? styles.containerFullscreen : { paddingTop: topInset }]}
+      style={styles.container}
       onLayout={onRootLayout}
     >
-      <StatusBar hidden={isFullscreenView} style="light" />
-
-      {/* Video Player Container (Integer math prevents Android YUV chroma green line decoder glitch) */}
+      <StatusBar style="light" />
+      {/* Video player. Its size is worked out natively, in the same frame the
+          screen turns, with no JavaScript in between: full width at 16:9, but
+          never taller than the screen. In portrait that's the usual player
+          under the status bar; in landscape it's capped at the screen's height,
+          so it fills the screen and the details below get no room at all.
+          (Switching sizes from JavaScript only after the turn is what left a
+          second of wrong layout every time.) */}
+      {/* The gap under the status bar, also sized natively: in portrait it's
+          the status bar's height; in landscape the player needs the whole
+          height, so this gives way and shrinks to nothing, in the same frame. */}
+      <View style={[styles.statusGap, { height: topInset }]} />
       <View
-        style={[
-          styles.playerContainer,
-          isFullscreenView
-            ? styles.playerContainerLandscape
-            : [styles.playerContainerPortrait, { height: portraitPlayerHeight }],
-        ]}
+        style={[styles.playerContainer, styles.playerFrame]}
         onLayout={(e) => {
           progressBarWidthRef.current = e.nativeEvent.layout.width;
         }}
@@ -1491,14 +1464,14 @@ export default function WatchScreen() {
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
       >
-        {server === 'hianime' ? (
-          mountedStream?.streamUrl ? (
+        {mountedStream?.streamUrl ? (
             <NativeHlsPlayer
               ref={nativeVideoRef}
               uri={mountedStream.rawMasterUrl || toFullUrl(mountedStream.streamUrl)}
               referer={mountedStream.referer}
               paused={!isPlaying || resolvingHls}
               playbackRate={playbackSpeed}
+              volume={volume}
               fitMode={fitMode}
               selectedQualityHeight={selectedQualityHeight}
               selectedAudioTrackId={nativeAudioTrackId}
@@ -1522,57 +1495,44 @@ export default function WatchScreen() {
               }}
               onError={onNativePlayerError}
             />
-          ) : null
-        ) : (
-          <MobileWebView
-            ref={webViewRef}
-            source={{ uri: vidriftEmbedUrl }}
-            style={styles.webView}
-            containerStyle={{ backgroundColor: '#000000' }}
-            javaScriptEnabled
-            domStorageEnabled
-            allowsFullscreenVideo
-            allowsInlineMediaPlayback
-            mediaPlaybackRequiresUserAction={false}
-            setSupportMultipleWindows
-            originWhitelist={['*']}
-            onMessage={handleVidRiftMessage}
-            startInLoadingState={false}
-            renderToHardwareTextureAndroid
-            overScrollMode="never"
-            scrollEnabled={false}
-            scalesPageToFit={false}
-            showsHorizontalScrollIndicator={false}
-            showsVerticalScrollIndicator={false}
-          />
-        )}
+          ) : null}
 
-        {/* Loading Overlay (Non-destructive to WebView) */}
-        {server === 'hianime' && resolvingHls && (
+        {/* Not out yet: a lock and the date instead of a player. */}
+        {currentEpLocked ? (
+          <View style={[StyleSheet.absoluteFill, styles.playerPlaceholder]}>
+            <Icon name="lock" size={30} color={colors.accent} />
+            <Text style={styles.placeholderError}>Episode {currentEp} is coming soon</Text>
+            <Text style={[styles.placeholderError, { opacity: 0.7, marginTop: 2 }]}>{airDateLabel(currentEpisodeObj?.airingAt)}</Text>
+          </View>
+        ) : null}
+
+        {/* Loading */}
+        {resolvingHls && !currentEpLocked && (
           <View style={[StyleSheet.absoluteFill, styles.playerPlaceholder]} pointerEvents="none">
             <ActivityIndicator size="large" color={colors.accent} />
 
           </View>
         )}
 
-        {/* Error Overlay (Non-destructive to WebView) */}
-        {server === 'hianime' && !resolvingHls && hlsError && (
+        {/* Couldn't load: say so, with a retry */}
+        {!resolvingHls && hlsError && !currentEpLocked && (
           <View style={[StyleSheet.absoluteFill, styles.playerPlaceholder]}>
             <Icon name="info" size={32} color={colors.accent} />
             <Text style={styles.placeholderError}>{hlsError}</Text>
             <PressableScale
               style={styles.switchServerBtn}
               onPress={() => {
-                setServer('vidrift');
-                AsyncStorage.setItem(SERVER_STORAGE_KEY, 'vidrift').catch(() => {});
+                mountedStreamEpisodeKeyRef.current = null;
+                setHlsError(null);
+                setRetryNonce((n) => n + 1);
               }}
             >
-              <Text style={styles.switchServerText}>Play with VidRift</Text>
+              <Text style={styles.switchServerText}>Try again</Text>
             </PressableScale>
           </View>
         )}
 
-        {server === 'hianime' && isBuffering && isPlaying && !resolvingHls && !hlsError && (
+        {isBuffering && isPlaying && !resolvingHls && !hlsError && (
           <View style={[StyleSheet.absoluteFill, { alignItems: 'center', justifyContent: 'center' }]} pointerEvents="none">
             <ActivityIndicator size="large" color={colors.accent} />
           </View>
@@ -1597,579 +1557,41 @@ export default function WatchScreen() {
           </View>
         )}
 
-        {/* Touch Handler Surface (Single tap: toggle controls, Double tap: +/- 10s or play/pause) */}
-        {!settingsOpen && <Pressable style={StyleSheet.absoluteFill} onPress={handlePlayerAreaPress} />}
+        {/* Controls and gestures (tap, double-tap, brightness / volume drag, seek bar). */}
+        {/* Stays mounted while settings are open: it holds the brightness set by
+            dragging (unmounting it gave the screen back the phone's brightness). */}
+        <PlayerOverlay
+          visible={controlsVisible && !settingsOpen}
+          fullscreen={isFullscreenView}
+          title={displayTitle(anime, titleLang) || anime?.title || 'AnimeVerse'}
+          subtitle={`E${currentEp} · ${currentEpisodeObj?.name || `Episode ${currentEp}`}`}
+          isPlaying={isPlaying}
+          isBuffering={isBuffering || resolvingHls}
+          time={currentTime}
+          duration={duration}
+          buffered={bufferedTime}
+          volume={volume}
+          insets={insets}
+          chips={quickChips}
+          hasNext={!!nextEpisodeObj && !nextEpLocked}
+          onToggleControls={toggleControls}
+          onKeepAlive={resetHideTimer}
+          onTogglePlay={handleTogglePlay}
+          onSeek={handleSeek}
+          onSeekBy={handleSeekBy}
+          onVolume={setVolume}
+          onBack={isFullscreenView ? exitFullscreen : () => (router.canGoBack() ? router.back() : router.replace('/'))}
+          onToggleFullscreen={toggleFullscreen}
+          onCycleFit={cycleFitMode}
+          onOpenSettings={openSettings}
+          onNext={handleNextEpisode}
+        />
 
-        {/* 100% Integrated Crunchyroll Video Player UI */}
-        {controlsVisible && !settingsOpen && (
-          <View style={styles.controlsOverlay} pointerEvents="box-none">
-            {/* Top Bar with subtle vignette gradient */}
-            <LinearGradient
-              colors={['rgba(0,0,0,0.85)', 'rgba(0,0,0,0.3)', 'transparent']}
-              style={[
-                styles.playerTopBar,
-                isFullscreenView && {
-                  paddingTop: Math.max(insets.top, 10),
-                  paddingHorizontal: Math.max(insets.left, 16),
-                },
-              ]}
-              pointerEvents="box-none"
-            >
-              {isFullscreenView ? (
-                // Landscape Top-Left: Back Arrow to Exit Fullscreen + Series Title + Episode Title
-                <View style={styles.landscapeTitleWrap}>
-                  <PressableScale
-                    onPress={exitFullscreen}
-                    style={styles.landscapeBackBtn}
-                    accessibilityLabel="Exit Fullscreen"
-                  >
-                    <Icon name="left" size={24} color="#fff" />
-                  </PressableScale>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.landscapeSeriesTitle} numberOfLines={1}>
-                      {displayTitle(anime, titleLang) || anime?.title || 'AnimeVerse'}
-                    </Text>
-                    <Text style={styles.landscapeEpTitle} numberOfLines={1}>
-                      E{currentEp} – {currentEpisodeObj?.name || `Episode ${currentEp}`}
-                    </Text>
-                  </View>
-                </View>
-              ) : (
-                // Portrait Top-Left: Back Arrow
-                <PressableScale
-                  onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
-                  style={styles.iconCircleBtn}
-                  accessibilityLabel="Back"
-                >
-                  <Icon name="left" size={24} color="#fff" />
-                </PressableScale>
-              )}
-
-              {/* Top-Right Control Icons: [Fit/Zoom Mode] [Next] [Cast] [Settings] [Fullscreen/Exit] */}
-              <View style={styles.playerTopRightIcons}>
-                {/* Dynamic Aspect Ratio / Fit Toggle */}
-                <PressableScale
-                  onPress={cycleFitMode}
-                  style={styles.iconCircleBtn}
-                  accessibilityLabel="Toggle Screen Fit Mode"
-                >
-                  <Icon name="aspectRatio" size={22} color={fitMode !== 'contain' ? colors.accent : '#fff'} />
-                </PressableScale>
-
-                {nextEpisodeObj && (
-                  <PressableScale
-                    onPress={handleNextEpisode}
-                    style={styles.iconCircleBtn}
-                    accessibilityLabel="Next Episode"
-                  >
-                    <Icon name="skip" size={22} color="#fff" />
-                  </PressableScale>
-                )}
-                <PressableScale
-                  onPress={() =>
-                    Alert.alert('Cast to Screen', 'Scanning local network for Google Cast & AirPlay devices...')
-                  }
-                  style={styles.iconCircleBtn}
-                  accessibilityLabel="Cast"
-                >
-                  <Icon name="cast" size={22} color="#fff" />
-                </PressableScale>
-                <PressableScale
-                  onPress={() => {
-                    setSettingsSubView('main');
-                    setSettingsOpen(true);
-                  }}
-                  style={styles.iconCircleBtn}
-                  accessibilityLabel="Playback Settings"
-                >
-                  <Icon name="settings" size={22} color="#fff" />
-                </PressableScale>
-                <PressableScale
-                  onPress={toggleFullscreen}
-                  style={styles.iconCircleBtn}
-                  accessibilityLabel={isFullscreenView ? 'Exit Fullscreen' : 'Fullscreen'}
-                >
-                  <Icon name={isFullscreenView ? 'exitFullscreen' : 'fullscreen'} size={22} color="#fff" />
-                </PressableScale>
-              </View>
-            </LinearGradient>
-
-            {/* Center Controls: [↺ 10]  [▶ / ⏸]  [↻ 10] (Crystal-clear background) */}
-            <View style={styles.centerControlsRow} pointerEvents="box-none">
-              <PressableScale
-                onPress={handleRewind10}
-                style={styles.centerIconBtn}
-                accessibilityLabel="Rewind 10 seconds"
-              >
-                <Icon name="rewind10" size={isFullscreenView ? 44 : 38} color="#fff" />
-              </PressableScale>
-
-              <PressableScale
-                onPress={handleTogglePlay}
-                style={[styles.centerPlayBtn, isFullscreenView && styles.centerPlayBtnLandscape]}
-                accessibilityLabel={isPlaying ? 'Pause' : 'Play'}
-              >
-                <Icon name={isPlaying ? 'pause' : 'play'} size={isFullscreenView ? 48 : 42} color="#fff" />
-              </PressableScale>
-
-              <PressableScale
-                onPress={handleForward10}
-                style={styles.centerIconBtn}
-                accessibilityLabel="Forward 10 seconds"
-              >
-                <Icon name="forward10" size={isFullscreenView ? 44 : 38} color="#fff" />
-              </PressableScale>
-            </View>
-
-            {/* Bottom Bar: Timecodes + Preload + Orange Scrubber Bar with subtle gradient */}
-            <LinearGradient
-              colors={['transparent', 'rgba(0,0,0,0.35)', 'rgba(0,0,0,0.88)']}
-              style={[
-                styles.playerBottomBar,
-                isFullscreenView && {
-                  paddingHorizontal: Math.max(insets.left, 16),
-                  paddingBottom: Math.max(insets.bottom, 10),
-                },
-              ]}
-              pointerEvents="box-none"
-            >
-              <View style={styles.timecodeRow}>
-                <Text style={styles.timecodeText}>{formatDuration(displayTime)}</Text>
-                <Text style={styles.timecodeText}>{formatDuration(duration)}</Text>
-              </View>
-
-              {/* Scrubber Touch & Drag Area with Preload / Buffer Bar */}
-              <View
-                ref={scrubberAreaRef}
-                style={styles.scrubberTouchArea}
-                onLayout={(e: LayoutChangeEvent) => {
-                  const w = e.nativeEvent.layout.width;
-                  if (w > 0) scrubberLayoutRef.current.width = w;
-                  scrubberAreaRef.current?.measure((_x: number, _y: number, measuredWidth: number, _h: number, pageX: number) => {
-                    if (measuredWidth > 0) {
-                      scrubberLayoutRef.current = { pageX, width: measuredWidth };
-                    }
-                  });
-                }}
-                onStartShouldSetResponder={() => true}
-                onMoveShouldSetResponder={() => true}
-                onResponderGrant={handleScrubberGrant}
-                onResponderMove={handleScrubberMove}
-                onResponderRelease={handleScrubberRelease}
-                onResponderTerminate={handleScrubberTerminate}
-              >
-                {/* Floating Preview Time Bubble when Scrubbing */}
-                {scrubbingTime !== null && (
-                  <View
-                    pointerEvents="none"
-                    style={[
-                      styles.scrubBubble,
-                      {
-                        left: `${Math.max(0, Math.min(1, scrubbingTime / Math.max(1, duration))) * 100}%`,
-                      },
-                    ]}
-                  >
-                    <Text style={styles.scrubBubbleText}>{formatDuration(scrubbingTime)}</Text>
-                  </View>
-                )}
-
-                <View style={styles.scrubberTrack} pointerEvents="none">
-                  {/* Preloaded / Buffered Bar */}
-                  <View style={[styles.scrubberBuffered, { width: `${bufferedRatio * 100}%` }]} pointerEvents="none" />
-                  {/* Played Progress Bar */}
-                  <View style={[styles.scrubberProgress, { width: `${progressRatio * 100}%` }]} pointerEvents="none" />
-                </View>
-                {/* Thumb Indicator */}
-                <View
-                  pointerEvents="none"
-                  style={[
-                    styles.scrubberThumb,
-                    scrubbingTime !== null && styles.scrubberThumbActive,
-                    {
-                      left: `${progressRatio * 100}%`,
-                    },
-                  ]}
-                />
-              </View>
-            </LinearGradient>
-          </View>
-        )}
-
-        {/* Crunchyroll In-Place Playback Settings Screen Overlay (Matches Screenshots 3 & 4) */}
-        {settingsOpen && (
-          <View
-            style={[
-              styles.settingsScreenOverlay,
-              isFullscreenView
-                ? {
-                    paddingTop: Math.max(insets.top, 10),
-                    paddingHorizontal: Math.max(insets.left, 24),
-                    paddingBottom: Math.max(insets.bottom, 12),
-                  }
-                : { paddingTop: 12, paddingHorizontal: 18 },
-            ]}
-          >
-            {/* Main Settings Menu */}
-            {settingsSubView === 'main' && (
-              <>
-                <View style={styles.settingsHeader}>
-                  <PressableScale onPress={() => setSettingsOpen(false)} style={styles.settingsBackBtn}>
-                    <Icon name="left" size={22} color="#fff" />
-                  </PressableScale>
-                  <Text style={styles.settingsHeaderTitle}>Playback Settings</Text>
-                </View>
-
-                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 20 }}>
-                  {/* Autoplay Row */}
-                  <View style={styles.settingsRow}>
-                    <Text style={styles.settingsLabel}>Autoplay</Text>
-                    <Switch
-                      value={autoplay}
-                      onValueChange={(val) => {
-                        setAutoplay(val);
-                        AsyncStorage.setItem(AUTOPLAY_STORAGE_KEY, val ? '1' : '0').catch(() => {});
-                      }}
-                      trackColor={{ false: '#333', true: '#26a69a' }}
-                      thumbColor="#fff"
-                    />
-                  </View>
-
-                  {/* Audio Row (Dynamic multi-track audio!) */}
-                  <PressableScale onPress={() => setSettingsSubView('audio')} style={styles.settingsRow}>
-                    <Text style={styles.settingsLabel}>Audio</Text>
-                    <View style={styles.settingsValueWrap}>
-                      <Text style={styles.settingsValueText}>{currentAudioName}</Text>
-                      <Icon name="right" size={16} color={colors.muted} />
-                    </View>
-                  </PressableScale>
-
-                  {/* Subtitles/CC Row */}
-                  <PressableScale onPress={() => setSettingsSubView('subtitles')} style={styles.settingsRow}>
-                    <Text style={styles.settingsLabel}>Subtitles/CC</Text>
-                    <View style={styles.settingsValueWrap}>
-                      <Text style={styles.settingsValueText}>{currentSubtitleName}</Text>
-                      <Icon name="right" size={16} color={colors.muted} />
-                    </View>
-                  </PressableScale>
-
-                  {/* Quality Row (Dynamic 1080p, 720p, 480p, Auto) */}
-                  <PressableScale onPress={() => setSettingsSubView('quality')} style={styles.settingsRow}>
-                    <Text style={styles.settingsLabel}>Quality</Text>
-                    <View style={styles.settingsValueWrap}>
-                      <Text style={styles.settingsValueText}>
-                        {selectedQualityHeight === -1 ? 'Auto' : `${selectedQualityHeight}p`}
-                      </Text>
-                      <Icon name="right" size={16} color={colors.muted} />
-                    </View>
-                  </PressableScale>
-
-                  {/* Screen Fit Mode */}
-                  <PressableScale
-                    onPress={() => {
-                      cycleFitMode();
-                    }}
-                    style={styles.settingsRow}
-                  >
-                    <Text style={styles.settingsLabel}>Screen Scaling</Text>
-                    <View style={styles.settingsValueWrap}>
-                      <Text style={[styles.settingsValueText, { color: colors.accent }]}>
-                        {fitMode === 'contain' ? 'Fit to Screen' : fitMode === 'cover' ? 'Zoom to Fill' : 'Stretch'}
-                      </Text>
-                      <Icon name="right" size={16} color={colors.muted} />
-                    </View>
-                  </PressableScale>
-
-                  {/* Server Source */}
-                  <PressableScale
-                    onPress={() => {
-                      const next = server === 'vidrift' ? 'hianime' : 'vidrift';
-                      setServer(next);
-                      AsyncStorage.setItem(SERVER_STORAGE_KEY, next).catch(() => {});
-                    }}
-                    style={styles.settingsRow}
-                  >
-                    <Text style={styles.settingsLabel}>Server Source</Text>
-                    <View style={styles.settingsValueWrap}>
-                      <Text style={[styles.settingsValueText, { color: colors.accent }]}>
-                        {server === 'vidrift' ? 'VidRift (Web)' : 'Native Player (Direct)'}
-                      </Text>
-                      <Icon name="right" size={16} color={colors.muted} />
-                    </View>
-                  </PressableScale>
-
-                  {/* Playback Speed Row */}
-                  <PressableScale onPress={() => setSettingsSubView('speed')} style={styles.settingsRow}>
-                    <Text style={styles.settingsLabel}>Playback Speed</Text>
-                    <View style={styles.settingsValueWrap}>
-                      <Text style={styles.settingsValueText}>{playbackSpeed.toFixed(1)}x</Text>
-                      <Icon name="right" size={16} color={colors.muted} />
-                    </View>
-                  </PressableScale>
-
-                  {/* Report a Problem */}
-                  <PressableScale
-                    onPress={() => {
-                      Alert.alert('Report a Problem', 'Playback issue reported. Switch server to restore stream?', [
-                        {
-                          text: 'Switch to ' + (server === 'vidrift' ? 'Native Player' : 'VidRift'),
-                          onPress: () => {
-                            const next = server === 'vidrift' ? 'hianime' : 'vidrift';
-                            setServer(next);
-                            AsyncStorage.setItem(SERVER_STORAGE_KEY, next).catch(() => {});
-                          },
-                        },
-                        { text: 'Cancel', style: 'cancel' },
-                      ]);
-                    }}
-                    style={styles.settingsRow}
-                  >
-                    <Text style={styles.settingsLabel}>Report a Problem</Text>
-                    <Icon name="right" size={16} color={colors.muted} />
-                  </PressableScale>
-                </ScrollView>
-              </>
-            )}
-
-            {/* Audio Sub-View */}
-            {settingsSubView === 'audio' && (
-              <>
-                <View style={styles.settingsHeader}>
-                  <PressableScale onPress={() => setSettingsSubView('main')} style={styles.settingsBackBtn}>
-                    <Icon name="left" size={22} color="#fff" />
-                  </PressableScale>
-                  <Text style={styles.settingsHeaderTitle}>Audio Channels</Text>
-                </View>
-
-                <ScrollView showsVerticalScrollIndicator={false}>
-                  {hasInBandAlternateAudio ? (
-                    // In-band alternate audio tracks
-                    availableAudioTracks.map((track) => {
-                      const isSel = currentAudioTrackId === track.id;
-                      return (
-                        <PressableScale
-                          key={track.id}
-                          onPress={() => {
-                            handleSelectAudio({ type: 'in-band', trackId: track.id });
-                            setSettingsSubView('main');
-                          }}
-                          style={styles.settingsRow}
-                        >
-                          <Text style={[styles.settingsLabel, isSel && { color: colors.accent }]}>
-                            {track.name || track.lang}
-                          </Text>
-                          {isSel && <Icon name="check" size={20} color={colors.accent} />}
-                        </PressableScale>
-                      );
-                    })
-                  ) : (
-                    // Separate Sub / Dub stream options
-                    <>
-                      {/* Japanese (Sub) */}
-                      <PressableScale
-                        onPress={() => {
-                          if (currentLang !== 'sub') {
-                            handleSelectAudio({ type: 'separate', mode: 'sub' });
-                          }
-                          setSettingsSubView('main');
-                        }}
-                        style={styles.settingsRow}
-                        disabled={isSwitchingAudio}
-                      >
-                        <View style={{ flex: 1 }}>
-                          <Text style={[styles.settingsLabel, currentLang === 'sub' && { color: colors.accent }]}>
-                            Japanese (Sub)
-                          </Text>
-                          <Text style={styles.settingsSubLabel}>Original Japanese audio with English subtitles</Text>
-                        </View>
-                        {currentLang === 'sub' && <Icon name="check" size={20} color={colors.accent} />}
-                      </PressableScale>
-
-                      {/* English (Dub) */}
-                      <PressableScale
-                        onPress={() => {
-                          if (!currentEpHasDub) return;
-                          if (currentLang !== 'dub') {
-                            handleSelectAudio({ type: 'separate', mode: 'dub' });
-                          }
-                          setSettingsSubView('main');
-                        }}
-                        style={[styles.settingsRow, !currentEpHasDub && { opacity: 0.45 }]}
-                        disabled={!currentEpHasDub || isSwitchingAudio}
-                      >
-                        <View style={{ flex: 1 }}>
-                          <Text style={[styles.settingsLabel, currentLang === 'dub' && { color: colors.accent }]}>
-                            English (Dub)
-                          </Text>
-                          <Text style={styles.settingsSubLabel}>
-                            {currentEpHasDub
-                              ? 'English dubbed voice track'
-                              : 'Japanese Audio (Sub) only for this episode'}
-                          </Text>
-                        </View>
-                        {currentLang === 'dub' && <Icon name="check" size={20} color={colors.accent} />}
-                        {!currentEpHasDub && (
-                          <Text style={{ color: colors.muted, fontSize: 12 }}>Unavailable</Text>
-                        )}
-                      </PressableScale>
-                    </>
-                  )}
-                </ScrollView>
-              </>
-            )}
-
-            {/* Subtitles Sub-View */}
-            {settingsSubView === 'subtitles' && (
-              <>
-                <View style={styles.settingsHeader}>
-                  <PressableScale onPress={() => setSettingsSubView('main')} style={styles.settingsBackBtn}>
-                    <Icon name="left" size={22} color="#fff" />
-                  </PressableScale>
-                  <Text style={styles.settingsHeaderTitle}>Subtitles/CC</Text>
-                </View>
-
-                <ScrollView showsVerticalScrollIndicator={false}>
-                  <PressableScale
-                    onPress={() => {
-                      handleToggleSubtitles(false);
-                      setSettingsSubView('main');
-                    }}
-                    style={styles.settingsRow}
-                  >
-                    <Text style={[styles.settingsLabel, !subtitlesEnabled && { color: colors.accent }]}>Off</Text>
-                    {!subtitlesEnabled && <Icon name="check" size={20} color={colors.accent} />}
-                  </PressableScale>
-
-                  {availableTextTracks.length > 0 ? (
-                    availableTextTracks.map((track) => {
-                      const isSel =
-                        subtitlesEnabled &&
-                        (nativeTextTrackId === track.id || (nativeTextTrackId === null && track.id === 0));
-                      return (
-                        <PressableScale
-                          key={track.id}
-                          onPress={() => {
-                            setSubtitlesEnabled(true);
-                            setNativeTextTrackId(track.id);
-                            subtitlesEnabledRef.current = true;
-                            showBadge(`Subtitles: ${track.name || track.lang}`);
-                            setSettingsSubView('main');
-                          }}
-                          style={styles.settingsRow}
-                        >
-                          <Text style={[styles.settingsLabel, isSel && { color: colors.accent }]}>
-                            {track.name || track.lang}
-                          </Text>
-                          {isSel && <Icon name="check" size={20} color={colors.accent} />}
-                        </PressableScale>
-                      );
-                    })
-                  ) : (
-                    <View style={{ padding: 16 }}>
-                      <Text style={{ color: colors.muted, fontFamily: fonts.regular, fontSize: 13 }}>
-                        No soft subtitles in this stream (video is hardsubbed or multi-audio dubbed)
-                      </Text>
-                    </View>
-                  )}
-                </ScrollView>
-              </>
-            )}
-
-            {/* Quality Sub-View (Dynamically switches stream quality!) */}
-            {settingsSubView === 'quality' && (
-              <>
-                <View style={styles.settingsHeader}>
-                  <PressableScale onPress={() => setSettingsSubView('main')} style={styles.settingsBackBtn}>
-                    <Icon name="left" size={22} color="#fff" />
-                  </PressableScale>
-                  <Text style={styles.settingsHeaderTitle}>Quality</Text>
-                </View>
-
-                <ScrollView showsVerticalScrollIndicator={false}>
-                  {/* Auto Option */}
-                  <PressableScale
-                    onPress={() => {
-                      handleSelectQuality(-1);
-                      setSettingsSubView('main');
-                    }}
-                    style={styles.settingsRow}
-                  >
-                    <Text style={[styles.settingsLabel, selectedQualityHeight === -1 && { color: colors.accent }]}>
-                      Auto (Adaptive)
-                    </Text>
-                    {selectedQualityHeight === -1 && <Icon name="check" size={20} color={colors.accent} />}
-                  </PressableScale>
-
-                  {/* Available stream resolutions */}
-                  {availableLevels.length > 0 ? (
-                    availableLevels
-                      .map((l) => l.height)
-                      .filter((v, i, a) => a.indexOf(v) === i)
-                      .sort((a, b) => b - a)
-                      .map((h) => {
-                        const isSel = selectedQualityHeight === h;
-                        return (
-                          <PressableScale
-                            key={h}
-                            onPress={() => {
-                              handleSelectQuality(h);
-                              setSettingsSubView('main');
-                            }}
-                            style={styles.settingsRow}
-                          >
-                            <Text style={[styles.settingsLabel, isSel && { color: colors.accent }]}>{h}p</Text>
-                            {isSel && <Icon name="check" size={20} color={colors.accent} />}
-                          </PressableScale>
-                        );
-                      })
-                  ) : (
-                    <View style={{ padding: 16 }}>
-                      <Text style={{ color: colors.muted, fontFamily: fonts.regular, fontSize: 13 }}>
-                        Detecting stream resolutions...
-                      </Text>
-                    </View>
-                  )}
-                </ScrollView>
-              </>
-            )}
-
-            {/* Speed Sub-View */}
-            {settingsSubView === 'speed' && (
-              <>
-                <View style={styles.settingsHeader}>
-                  <PressableScale onPress={() => setSettingsSubView('main')} style={styles.settingsBackBtn}>
-                    <Icon name="left" size={22} color="#fff" />
-                  </PressableScale>
-                  <Text style={styles.settingsHeaderTitle}>Playback Speed</Text>
-                </View>
-
-                <ScrollView showsVerticalScrollIndicator={false}>
-                  {[0.75, 1.0, 1.25, 1.5, 2.0].map((spd) => {
-                    const isSel = playbackSpeed === spd;
-                    return (
-                      <PressableScale
-                        key={spd}
-                        onPress={() => {
-                          handleSetSpeed(spd);
-                          setSettingsSubView('main');
-                        }}
-                        style={styles.settingsRow}
-                      >
-                        <Text style={[styles.settingsLabel, isSel && { color: colors.accent }]}>
-                          {spd === 1.0 ? '1.0x (Normal)' : `${spd.toFixed(2)}x`}
-                        </Text>
-                        {isSel && <Icon name="check" size={20} color={colors.accent} />}
-                      </PressableScale>
-                    );
-                  })}
-                </ScrollView>
-              </>
-            )}
-          </View>
-        )}
       </View>
 
-      {/* Under-Player Content Area (Crunchyroll Layout in Portrait) */}
-      {!isFullscreenView && (
+      {/* Under-Player Content Area (Crunchyroll Layout in Portrait). Always
+          mounted: in fullscreen it simply has no room (rebuilding it on every
+          exit from fullscreen was another source of the delay). */}
         <ScrollView
           style={styles.detailsScroll}
           contentContainerStyle={[styles.detailsContent, { paddingBottom: insets.bottom + 30 }]}
@@ -2191,8 +1613,7 @@ export default function WatchScreen() {
             <Text style={styles.metaDot}>•</Text>
             <PressableScale
               onPress={() => {
-                setSettingsSubView('audio');
-                setSettingsOpen(true);
+                openSettings('audio');
               }}
               style={styles.audioModesBadge}
             >
@@ -2291,8 +1712,7 @@ export default function WatchScreen() {
 
               <PressableScale
                 onPress={() => {
-                  setSettingsSubView('main');
-                  setSettingsOpen(true);
+                  openSettings();
                 }}
                 style={styles.actionIconOnlyBtn}
               >
@@ -2329,7 +1749,7 @@ export default function WatchScreen() {
                 </Text>
               </View>
 
-              <PressableScale onPress={handleNextEpisode} style={styles.nextEpCard} scaleTo={0.98} haptic>
+              <PressableScale onPress={handleNextEpisode} style={[styles.nextEpCard, nextEpLocked && { opacity: 0.8 }]} scaleTo={0.98} haptic>
                 <View style={styles.nextEpThumbWrap}>
                   <Image
                     source={{
@@ -2342,7 +1762,7 @@ export default function WatchScreen() {
                   />
                   <LinearGradient colors={['transparent', 'rgba(0,0,0,0.65)']} style={StyleSheet.absoluteFill} />
                   <View style={styles.nextEpPlayIcon}>
-                    <Icon name="play" size={13} color="#fff" />
+                    <Icon name={nextEpLocked ? 'lock' : 'play'} size={13} color="#fff" />
                   </View>
                   <View style={styles.nextEpDurationBadge}>
                     <Text style={styles.nextEpDurationText}>{nextEpisodeObj.runtime || 24}m</Text>
@@ -2350,12 +1770,15 @@ export default function WatchScreen() {
                 </View>
 
                 <View style={styles.nextEpInfo}>
-                  <Text style={styles.nextEpNumLabel}>EPISODE {nextEpisodeObj.episode_number}</Text>
+                  <Text style={styles.nextEpNumLabel}>
+                    EPISODE {nextEpisodeObj.episode_number}
+                    {nextEpLocked ? ` · COMING ${airDateLabel(nextEpisodeObj.airingAt).toUpperCase()}` : ''}
+                  </Text>
                   <Text style={styles.nextEpTitle} numberOfLines={2}>
                     {nextEpisodeObj.name || `Episode ${nextEpisodeObj.episode_number}`}
                   </Text>
                   <View style={styles.nextEpMetaRow}>
-                    <EpisodeBadges hasSub={nextEpisodeObj.hasSub !== false} hasDub={nextEpisodeObj.hasDub !== false} />
+                    {nextEpLocked ? null : <EpisodeBadges hasSub={nextEpisodeObj.hasSub !== false} hasDub={nextEpisodeObj.hasDub !== false} />}
                   </View>
                 </View>
 
@@ -2378,7 +1801,15 @@ export default function WatchScreen() {
             <Icon name="right" size={14} color="rgba(255,255,255,0.4)" />
           </PressableScale>
         </ScrollView>
-      )}
+
+      <PlayerSettingsSheet
+        open={settingsOpen}
+        initialSection={settingsSection}
+        sections={settingsSections}
+        fullscreen={isFullscreenView}
+        insets={insets}
+        onClose={() => setSettingsOpen(false)}
+      />
     </View>
   );
 }
@@ -2388,37 +1819,21 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000',
   },
-  containerFullscreen: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: '#000',
-    zIndex: 9999,
-  },
   playerContainer: {
     backgroundColor: '#000',
     overflow: 'hidden',
     position: 'relative',
   },
-  playerContainerPortrait: {
+  playerFrame: {
     width: '100%',
+    minWidth: '100%', // stays full width when the height is capped (no narrowed "75%" player)
+    aspectRatio: 16 / 9,
+    maxHeight: '100%',
+    flexShrink: 0, // never squeezed: the status gap and the details give way instead
   },
-  playerContainerLandscape: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    width: '100%',
-    height: '100%',
-    zIndex: 9999,
-    backgroundColor: '#000',
-  },
-  webView: {
-    flex: 1,
-    backgroundColor: '#000000',
+  statusGap: {
+    flexShrink: 1,
+    minHeight: 0,
   },
   playerPlaceholder: {
     flex: 1,
