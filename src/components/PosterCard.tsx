@@ -1,7 +1,7 @@
 import { Image } from 'expo-image';
 import { nav } from '@/lib/nav';
-import { memo, useRef } from 'react';
-import { PixelRatio, StyleSheet, Text, View } from 'react-native';
+import { memo } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { LangBadges, Pill, Score } from './Badges';
 import { PressableScale } from './PressableScale';
@@ -12,11 +12,8 @@ import { api } from '@/lib/api';
 import { posterOf, useArt, wantArt } from '@/lib/artwork';
 import { useTitle } from '@/lib/settings';
 
-const HI_DPI = PixelRatio.get() >= 2;
-
-// Poster card used in every row and grid. Picks the sharper image on high-DPI
-// screens (the API sends a 1x and a 2x poster), fades the image in, and
-// slides in with a small stagger the first time it appears.
+// Poster card used in every row and grid. Fades the image in, and slides in
+// with a small stagger the first time it appears.
 export const PosterCard = memo(function PosterCard({
   anime,
   width = 124,
@@ -34,14 +31,9 @@ export const PosterCard = memo(function PosterCard({
 }) {
   const { art, settled } = useArt(anime);
   const title = useTitle(anime);
-  // Once a card shows a picture it keeps it: a better picture arriving later
-  // is used the next time the card is drawn, never swapped in while you look.
-  const shown = useRef<{ id: string; uri: string } | null>(null);
-  let uri = settled ? posterOf(anime, art, HI_DPI) : undefined;
-  if (uri) {
-    if (shown.current?.id === anime.id) uri = shown.current.uri;
-    else shown.current = { id: anime.id, uri };
-  }
+  // Waits for TMDB's answer. AniList's picture only if TMDB has none or can't be
+  // reached, replaced as soon as TMDB's is known, so every screen shows the same.
+  const uri = settled ? posterOf(anime, art, false) : undefined;
   return (
     // Only the first screenful animates in; later cards (scrolling, next pages)
     // just appear, which keeps long lists smooth on slower phones.

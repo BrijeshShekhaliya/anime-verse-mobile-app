@@ -27,7 +27,7 @@ import { factsOf } from '@/lib/format';
 import { colors, fonts, radius } from '@/lib/theme';
 import type { Anime } from '@/lib/types';
 import { api } from '@/lib/api';
-import { backdropOf, useArt } from '@/lib/artwork';
+import { backdropOf, logoFor, useArt } from '@/lib/artwork';
 import { useTitle } from '@/lib/settings';
 
 const AUTO_MS = 6500;
@@ -38,7 +38,7 @@ function Slide({ anime, index, width, height, scrollX, active }: { anime: Anime;
   const { art: tmdb, settled } = useArt(anime, true);
   const title = useTitle(anime);
   const art = settled ? backdropOf(anime, tmdb) : undefined;
-  const logo = tmdb?.logo || anime.logo;
+  const logo = logoFor(tmdb?.logo) || anime.logo;
 
   // Slow zoom-out on the slide that's showing (like the website's hero).
   // Skipped when the phone's "reduce motion" setting is on.

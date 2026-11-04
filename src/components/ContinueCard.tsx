@@ -8,6 +8,7 @@ import { Icon } from './Icon';
 import { PressableScale } from './PressableScale';
 import type { Progress } from '@/lib/library';
 import { colors, fonts, radius } from '@/lib/theme';
+import { api } from '@/lib/api';
 import { backdropOf, useArt } from '@/lib/artwork';
 import type { Anime } from '@/lib/types';
 import { useTitle } from '@/lib/settings';
@@ -23,7 +24,7 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W, compact
   const { art: tmdb, settled } = useArt(a as Anime, true);
   const title = useTitle(a);
   // Waits for TMDB's banner instead of showing the AniList one first.
-  const art = settled ? backdropOf(a as Anime, tmdb) : undefined;
+  const art = settled ? backdropOf(a as Anime, tmdb, true) : undefined;
   const isCompleted = Boolean(item.completed);
   const done = Boolean(item.total && item.episode >= item.total && isCompleted);
   // If completed, prompt next episode; if paused/stopped halfway, continue THIS episode!
@@ -50,7 +51,10 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W, compact
   return (
     <Animated.View entering={reduce ? undefined : compact ? FadeInDown.delay(Math.min(index, 7) * 50).duration(340) : FadeInRight.delay(Math.min(index, 5) * 70).duration(420)} style={{ width }}>
       <PressableScale
-        onPress={() => nav.push(`/watch/${a.id}?ep=${targetEp}` as any)}
+        onPress={() => {
+          api.seedDetail(a as Anime); // the player knows the title at once
+          nav.push(`/watch/${a.id}?ep=${targetEp}` as any);
+        }}
         scaleTo={0.97}
         accessibilityLabel={`Continue ${title}, episode ${targetEp}`}
       >

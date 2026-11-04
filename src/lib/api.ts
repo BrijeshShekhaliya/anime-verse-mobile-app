@@ -129,11 +129,19 @@ export const api = {
 
   genres: () => cached<string[]>('genres', 24 * 60 * 60 * 1000, () => fetchGenres()),
 
-  episodes: (id: string, season = 1, refresh = false) => {
+  // detail: the anime's full details when the caller has them (saves a request).
+  episodes: (id: string, season = 1, refresh = false, detail?: AnimeDetail) => {
     const key = `episodes:${id}:s${season}`;
     if (refresh) memo.delete(key);
-    return cached<EpisodesData>(key, 15 * 60 * 1000, () => fetchEpisodes(id, season));
+    return cached<EpisodesData>(key, 15 * 60 * 1000, () => fetchEpisodes(id, season, detail));
   },
+
+  // The single-language server, for when the main one won't play an episode.
+  resolveBackup: (params: { title: string; romaji?: string; season: number; episode: number; mode: 'sub' | 'dub' }) =>
+    resolveHiAnimeDirect(params, true).catch((e) => {
+      if (params.mode === 'dub') return resolveHiAnimeDirect({ ...params, mode: 'sub' }, true);
+      throw e;
+    }),
 
   resolveStream: async (
     params: {
@@ -155,7 +163,7 @@ export const api = {
     if (cachedEntry && isStreamUrlExpired((cachedEntry.data as StreamData)?.streamUrl)) {
       memo.delete(key);
     }
-    return cached<StreamData>(key, 15 * 60 * 1000, async () => {
+    const stream = await cached<StreamData>(key, 15 * 60 * 1000, async () => {
       const isHindiTarget = prefAudio === 'hindi' || prefAudio === 'hin' || prefAudio === 'hi';
       const memoryKey = isHindiTarget ? getProviderMemoryKey(params, 'hindi') : null;
       const rememberedProvider = memoryKey ? providerMemory.get(memoryKey) : null;
@@ -261,9 +269,28 @@ export const api = {
           options?.forceRefresh,
         ).catch(() => null);
 
-        const hiPromise = resolveHiAnimeDirect(params, options?.forceRefresh).catch(() => null);
+        // The backup starts only if the main source is slow, and nothing waits for
+        // it once the main source has answered with Hindi: waiting for both added
+        // over a second to every first play, for an answer that wasn't used.
+        let hiPromise: Promise<StreamData | null> | null = null;
+        const startHi = () => (hiPromise ??= resolveHiAnimeDirect(params, options?.forceRefresh).catch(() => null));
+        const hiHedge = setTimeout(startHi, 1500);
+        const firstAnswer = await Promise.race([rulzPromise, new Promise<null>((r) => setTimeout(() => r(null), 6000))]);
+        clearTimeout(hiHedge);
 
-        const [multiStream, hiStream] = await Promise.all([rulzPromise, hiPromise]);
+        if (
+          firstAnswer?.streamUrl &&
+          (hasAudioLanguage(firstAnswer.audioTracks, 'hindi') ||
+            firstAnswer.source?.toLowerCase().includes('multi') ||
+            firstAnswer.referer?.includes('ravok') ||
+            firstAnswer.streamUrl?.includes('ravok'))
+        ) {
+          if (memoryKey) providerMemory.set(memoryKey, 'animerulz');
+          return firstAnswer;
+        }
+
+        const hiStream = await startHi();
+        const multiStream = firstAnswer ?? (await rulzPromise);
 
         const rulzHasHindi =
           multiStream &&
@@ -334,6 +361,19 @@ export const api = {
       if (late) return late;
       throw new Error('This episode is not available right now');
     });
+    // The backup only stands in. Kept, one failed moment would decide this
+    // episode's server (and its one language) for the next 15 minutes.
+    if (!stream?.source?.toLowerCase().includes('multi')) memo.delete(key);
+    return stream;
+  },
+
+  // Asks the main server again, for a viewer who is on the backup.
+  resolveMain: (anilistId: number, episode: number, mode: 'sub' | 'dub') => resolveAnimeRulzDirect({ anilistId, episode, mode }, true),
+
+  // Finds the address of an episode someone is about to play, so tapping play
+  // doesn't have to wait for it. Two small requests; the real lookup shares the answer.
+  prewarmStream: (anilistId: number | null | undefined, episode: number, mode: 'sub' | 'dub') => {
+    if (anilistId && episode > 0) resolveAnimeRulzDirect({ anilistId, episode, mode }).catch(() => {});
   },
 
   clearStreamCache: (params: {

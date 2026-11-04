@@ -1,13 +1,13 @@
+import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { keepPreviousData, useInfiniteQuery } from '@tanstack/react-query';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, FlatList, Keyboard, Platform, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions, type TextInputInstance } from 'react-native';
+import { ActivityIndicator, Keyboard, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions, type TextInputInstance } from 'react-native';
 import Animated, { Easing, FadeIn, FadeOut, interpolate, LinearTransition, runOnJS, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BottomSheet } from '@/components/BottomSheet';
 import { Icon, type IconName } from '@/components/Icon';
 import { PosterCard } from '@/components/PosterCard';
-import { wantArt } from '@/lib/artwork';
 import { PressableScale } from '@/components/PressableScale';
 import { Skeleton } from '@/components/Skeleton';
 import { EmptyState, ErrorState } from '@/components/States';
@@ -141,7 +141,7 @@ export default function BrowseScreen() {
   }, [text]);
 
   // ---- Results ----
-  const listRef = useRef<FlatList<Anime>>(null);
+  const listRef = useRef<FlashListRef<Anime>>(null);
   // Solid black bar with the page title once the header scrolls away.
   const scrollY = useSharedValue(0);
   const stickyStyle = useAnimatedStyle(() => ({ opacity: interpolate(scrollY.value, [30, 80], [0, 1], 'clamp') }));
@@ -168,9 +168,6 @@ export default function BrowseScreen() {
     }
     return out;
   }, [results.data, query]);
-  // Look up the pictures for the whole page as soon as it arrives, not when each
-  // card scrolls into view, so cards appear with their final picture.
-  useEffect(() => wantArt(items), [items]);
   const loading = results.isPending;
   const switching = results.isPlaceholderData; // new search/filter on its way
   const error = results.error ? results.error.message || 'Something went wrong' : null;
@@ -327,7 +324,9 @@ export default function BrowseScreen() {
 
   return (
     <View style={styles.screen}>
-      <FlatList
+      {/* FlashList reuses card views while scrolling, and only draws what's near
+          the screen, so posters further down aren't downloaded until needed. */}
+      <FlashList
         ref={listRef}
         onScroll={(e) => {
           scrollY.value = e.nativeEvent.contentOffset.y;
@@ -336,12 +335,19 @@ export default function BrowseScreen() {
         data={switching ? [] : items}
         key={cols}
         numColumns={cols}
-        keyExtractor={(a, i) => `${a.id}-${i}`}
-        renderItem={({ item, index }) => <PosterCard anime={item} index={index} width={cardW} showFacts />}
-        maxToRenderPerBatch={9}
-        columnWrapperStyle={{ gap: 12, paddingHorizontal: 16 }}
-        contentContainerStyle={{ gap: 20, paddingBottom: insets.bottom + 100 }}
-        ListHeaderComponent={header}
+        drawDistance={150}
+        maintainVisibleContentPosition={{ disabled: true }}
+        keyExtractor={(a) => a.id}
+        renderItem={({ item, index }) => (
+          // Every cell is an equal share of the screen's width: this puts each
+          // card in its place on the 16 pt margin and 12 pt gap. Cards don't
+          // animate in here, because their views get reused while scrolling.
+          <View style={{ marginLeft: 16 + (index % cols) * (cardW + 12 - width / cols), paddingBottom: 20 }}>
+            <PosterCard anime={item} width={cardW} showFacts animate={false} />
+          </View>
+        )}
+        contentContainerStyle={{ paddingBottom: insets.bottom + 100 }}
+        ListHeaderComponent={<View style={{ marginBottom: 20 }}>{header}</View>}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
         onEndReachedThreshold={1.5}
@@ -378,9 +384,6 @@ export default function BrowseScreen() {
             <ActivityIndicator color={colors.accent} style={{ marginVertical: 24 }} />
           ) : undefined
         }
-        initialNumToRender={12}
-        windowSize={7}
-        removeClippedSubviews={Platform.OS === 'android'}
       />
 
       {/* The status bar area is always solid; the title bar fades in on scroll. */}

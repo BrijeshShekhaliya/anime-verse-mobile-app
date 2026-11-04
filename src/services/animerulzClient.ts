@@ -405,11 +405,9 @@ async function resolveAnimeRulzOnce(
     if (typeof params.id === 'number' && params.id > 0) {
       anilistId = params.id;
     } else if (typeof params.id === 'string') {
+      // Only "al123" ids are AniList's; a plain number is a MyAnimeList id.
       if (params.id.startsWith('al')) {
         const parsed = parseInt(params.id.slice(2), 10);
-        if (!isNaN(parsed) && parsed > 0) anilistId = parsed;
-      } else if (/^\d+$/.test(params.id)) {
-        const parsed = parseInt(params.id, 10);
         if (!isNaN(parsed) && parsed > 0) anilistId = parsed;
       }
     }
@@ -452,31 +450,42 @@ async function resolveAnimeRulzOnce(
 
   const ep = params.episode;
 
-  const streamUrl = `${domain}/api/reanime/stream?anilist_id=${anilistId}&episode=${ep}`;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 8000);
+  // One bad answer from a busy server shouldn't cost the viewer every language:
+  // try again, then the mirror, before giving up and leaving it to the backup.
+  const mirror = ANIMERULZ_DOMAINS.find((d) => d !== domain);
+  let streamRes: any = null;
+  let lastError: unknown = null;
+  for (const base of mirror ? [domain, domain, mirror] : [domain, domain]) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      const res = await fetch(`${base}/api/reanime/stream?anilist_id=${anilistId}&episode=${ep}`, {
+        headers: {
+          'User-Agent': USER_AGENT,
+          Accept: 'application/json, text/plain, */*',
+          Origin: base,
+          Referer: `${base}/watch?anilist_id=${anilistId}&ep=${ep}`,
+          'Sec-Fetch-Site': 'same-origin',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        signal: ctrl.signal,
+      });
 
-  let streamRes: any;
-  try {
-    const res = await fetch(streamUrl, {
-      headers: {
-        'User-Agent': USER_AGENT,
-        Accept: 'application/json, text/plain, */*',
-        Origin: domain,
-        Referer: `${domain}/watch?anilist_id=${anilistId}&ep=${ep}`,
-        'Sec-Fetch-Site': 'same-origin',
-        'X-Requested-With': 'XMLHttpRequest',
-      },
-      signal: ctrl.signal,
-    });
-
-    if (!res.ok) {
-      throw new Error(`AnimeRulz stream API HTTP ${res.status}`);
+      if (!res.ok) {
+        throw new Error(`AnimeRulz stream API HTTP ${res.status}`);
+      }
+      streamRes = await res.json();
+      if (base !== domain) _pinnedDomain = base;
+      break;
+    } catch (e) {
+      lastError = e;
+      console.log(`[Stream] main server didn't answer (${base}, ep ${ep}): ${e instanceof Error ? e.message : String(e)}`);
+      await new Promise((r) => setTimeout(r, 300));
+    } finally {
+      clearTimeout(timer);
     }
-    streamRes = await res.json();
-  } finally {
-    clearTimeout(timer);
   }
+  if (!streamRes) throw lastError instanceof Error ? lastError : new Error('AnimeRulz stream API failed');
 
   if (!streamRes || !Array.isArray(streamRes.servers) || streamRes.servers.length === 0) {
     throw new Error('No streaming servers available on AnimeRulz');
@@ -539,10 +548,12 @@ async function resolveAnimeRulzOnce(
             const videoData = await postRes.json();
             masterM3u8 = videoData.videoSource || videoData.securedLink || null;
             referer = 'https://ravok.buzz/';
-            break;
+            if (masterM3u8) break;
           }
-        } catch {
+          console.log(`[Stream] main server gave no video link (ep ${ep}, try ${attempt}, HTTP ${postRes?.status})`);
+        } catch (e) {
           // Attempt failed, back off and retry once
+          console.log(`[Stream] video link request failed (ep ${ep}, try ${attempt}): ${e instanceof Error ? e.message : String(e)}`);
         } finally {
           clearTimeout(fetchTimer);
         }

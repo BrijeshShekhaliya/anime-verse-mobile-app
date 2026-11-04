@@ -12,6 +12,7 @@ class NativeMedia3PlayerModule : Module() {
       Prop("referer") { view: NativeMedia3PlayerView, value: String? -> view.setReferer(value) }
       Prop("paused") { view: NativeMedia3PlayerView, value: Boolean -> view.setPaused(value) }
       Prop("playbackRate") { view: NativeMedia3PlayerView, value: Double -> view.setPlaybackRate(value.toFloat()) }
+      Prop("volume") { view: NativeMedia3PlayerView, value: Double -> view.setVolume(value.toFloat()) }
       Prop("fitMode") { view: NativeMedia3PlayerView, value: String -> view.setFitMode(value) }
       Prop("selectedQualityHeight") { view: NativeMedia3PlayerView, value: Int -> view.setSelectedQualityHeight(value) }
       Prop("selectedAudioTrackId") { view: NativeMedia3PlayerView, value: Int? -> view.setSelectedAudioTrackId(value) }

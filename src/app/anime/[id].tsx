@@ -1,19 +1,21 @@
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useLocalSearchParams, useNavigation } from 'expo-router';
+import { useLocalSearchParams } from 'expo-router';
 import { nav } from '@/lib/nav';
 import { airDateLabel } from '@/lib/airDate';
 import * as WebBrowser from 'expo-web-browser';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Linking, Platform, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
 import Animated, {
+  type SharedValue,
   Easing,
   Extrapolation,
   FadeIn,
   FadeInDown,
   interpolate,
   runOnJS,
+  useAnimatedReaction,
   useAnimatedScrollHandler,
   useAnimatedStyle,
   useReducedMotion,
@@ -30,11 +32,13 @@ import { PosterCard } from '@/components/PosterCard';
 import { PressableScale } from '@/components/PressableScale';
 import { Skeleton } from '@/components/Skeleton';
 import { ErrorState } from '@/components/States';
-import { posterOf, tmdbPosition, useArt, type TmdbEpisode } from '@/lib/artwork';
+import { logoFor, posterOf, stillFor, tmdbImagesBlocked, tmdbPosition, useArt, type TmdbEpisode } from '@/lib/artwork';
+import { onMobileData } from '@/lib/network';
 import { fmtNum } from '@/lib/format';
 import { useLibrary } from '@/lib/library';
 import { useDetail, useEpisodeGuide, useExtras, useSeasons, useTmdbShow, useTmdbStills } from '@/lib/queries';
 import { anilistIdOf, type GuideEpisode } from '@/lib/episodeGuide';
+import { api } from '@/lib/api';
 import { displayTitle, useSettings } from '@/lib/settings';
 import { colors, fonts, radius, springs } from '@/lib/theme';
 import type { AnimeDetail } from '@/lib/types';
@@ -53,30 +57,19 @@ const openLink = (url: string) => {
 const goBack = () => nav.back();
 const BOTTOM_BAR = 76;
 // Episodes drawn per step (long seasons grow as you scroll).
-const EP_PAGE = 30;
+const EP_PAGE = 5;
+// How far ahead of the screen an episode row starts loading its picture (pts).
+const PICTURE_AHEAD = 150;
+type PageView = { top: SharedValue<number>; bottom: SharedValue<number>; wrapY: SharedValue<number>; listY: SharedValue<number> };
 
 type Tab = 'episodes' | 'more';
 
 export default function DetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { width } = useWindowDimensions();
+  const { width, height: windowHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const heroH = Math.round(width * 1.25);
   const reduce = useReducedMotion();
-
-  // The episode list and recommendations are drawn once the open transition
-  // has finished, so the page starts appearing the moment it's tapped.
-  const navigation = useNavigation();
-  const [opened2, setOpened2] = useState(false);
-  useEffect(() => {
-    const done = () => setOpened2(true);
-    const unsub = navigation.addListener('transitionEnd' as never, done);
-    const t = setTimeout(done, 700); // in case the event never comes
-    return () => {
-      unsub();
-      clearTimeout(t);
-    };
-  }, [navigation]);
 
   // Saved page (instant), or the tapped card while the full page loads.
   const detail = useDetail(String(id));
@@ -104,15 +97,15 @@ export default function DetailScreen() {
   // from cache) is the first layer of the key art.
   const opened = useRef<{ id: string; poster?: string; logoKnown: boolean } | null>(null);
   // Only a TMDB answer counts (never an AniList cover shown first, then swapped).
-  if (a && opened.current?.id !== a.id) opened.current = { id: a.id, poster: tmdb ? posterOf(a, tmdb) : undefined, logoKnown: artKnown };
+  if (a && opened.current?.id !== a.id) opened.current = { id: a.id, poster: tmdb ? posterOf(a, tmdb, false) : undefined, logoKnown: artKnown };
 
   const [tab, setTab] = useState<Tab>('episodes');
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [seasonOpen, setSeasonOpen] = useState(false);
 
-  // Long seasons (One Piece has 1,100+ episodes) are drawn 30 at a time as you
-  // scroll near the end, so the page never builds hundreds of rows and images at
-  // once: it opens, scrolls and closes as lightly as a short show.
+  // Episodes are drawn a few at a time as you scroll near the end, and each row
+  // loads its own picture when it's drawn: no picture downloads until you're
+  // about to see it, and a long show opens as lightly as a short one.
   const [epLimit, setEpLimit] = useState(EP_PAGE);
   useEffect(() => setEpLimit(EP_PAGE), [seasonId]);
   const epCount = guide.data?.length ?? 0;
@@ -120,12 +113,29 @@ export default function DetailScreen() {
   epTotal.current = epCount;
   const loadMore = useCallback(() => setEpLimit((l) => (l < epTotal.current ? l + EP_PAGE : l)), []);
 
+  // The part of the page on screen (plus a little ahead), kept on the UI thread.
+  // Each episode row watches it and loads its own picture only when it's about
+  // to be seen, the same way Home's cards do. Rows flung past never load theirs.
+  const viewTop = useSharedValue(0);
+  const viewBottom = useSharedValue(windowHeight + PICTURE_AHEAD);
+  const wrapY = useSharedValue(1e7); // where the episodes section sits on the page
+  const listY = useSharedValue(0); // where its list starts inside it
+  const pageView = useRef<PageView>({ top: viewTop, bottom: viewBottom, wrapY, listY }).current;
+  // The season's data (names, picture addresses) waits until the list is near too.
+  const [picturesOn, setPicturesOn] = useState(false);
+  useAnimatedReaction(
+    () => wrapY.value + listY.value < viewBottom.value,
+    (near) => {
+      if (near) runOnJS(setPicturesOn)(true);
+    }
+  );
+
   // Episode stills and names from TMDB (AniList only has them for some shows).
   // TMDB is asked only when an episode on screen is missing its picture or real
   // name in AniList's list, so one thing is never fetched from both sources.
   // Episodes are matched by absolute number: this season's episodes come after
   // all the earlier seasons' ones. Only the TMDB seasons on screen are fetched.
-  const tmdbShow = useTmdbShow(a);
+  const tmdbShow = useTmdbShow(picturesOn ? a : null);
   const offset = useMemo(() => {
     if (!seasonsQ.isSuccess) return null;
     const idx = seasonList.findIndex((x) => x.anilistId === seasonId);
@@ -141,7 +151,18 @@ export default function DetailScreen() {
   const stills = useTmdbStills(offset == null ? null : tmdbShow.data, (offset ?? 0) + 1, (offset ?? 0) + shown, !!a?.airing);
   // TMDB has answered for the episodes on screen (or can't place them): only
   // then may an episode without a TMDB still use AniList's picture.
-  const stillsDone = !tmdbShow.isPending && (!tmdbShow.data || (!seasonsQ.isPending && (offset == null || !stills.pending)));
+  const stillsAnswered = !tmdbShow.isLoading && (!tmdbShow.data || (!seasonsQ.isLoading && (offset == null || !stills.pending)));
+  // A row waits on a plain placeholder for TMDB's answer, so a stand-in picture
+  // never shows first and gets swapped. Only if TMDB says nothing for 8 s (a very
+  // poor connection) do rows use what they have, and TMDB's still replaces it later.
+  const [stillsGaveUp, setStillsGaveUp] = useState(false);
+  useEffect(() => {
+    setStillsGaveUp(false);
+    if (stillsAnswered) return;
+    const t = setTimeout(() => setStillsGaveUp(true), 8000);
+    return () => clearTimeout(t);
+  }, [stillsAnswered, seasonId]);
+  const stillsDone = stillsAnswered || stillsGaveUp;
   const tmdbFor = useCallback(
     (n: number): TmdbEpisode | undefined => {
       if (offset == null || !tmdbShow.data) return undefined;
@@ -156,8 +177,10 @@ export default function DetailScreen() {
   const lastMore = useSharedValue(0);
   const onScroll = useAnimatedScrollHandler((e) => {
     scrollY.value = e.contentOffset.y;
+    viewTop.value = e.contentOffset.y - PICTURE_AHEAD;
+    viewBottom.value = e.contentOffset.y + e.layoutMeasurement.height + PICTURE_AHEAD;
     // Near the bottom: draw the next episodes (at most every 300 ms).
-    if (e.contentOffset.y + e.layoutMeasurement.height > e.contentSize.height - 1400) {
+    if (e.contentOffset.y + e.layoutMeasurement.height > e.contentSize.height - 500) {
       const t = Date.now();
       if (t - lastMore.value > 300) {
         lastMore.value = t;
@@ -198,10 +221,10 @@ export default function DetailScreen() {
   const name = displayTitle(a, titleLang);
   const cardPoster = opened.current?.poster;
   // Tall key art: the TMDB poster at a size fit for the full screen width.
-  const keyArt = !artSettled ? undefined : tmdb?.poster ? tmdb.poster.replace('/w342/', '/w780/') : a ? posterOf(a, tmdb) : undefined;
+  const keyArt = !artSettled ? undefined : tmdb?.poster ? tmdb.poster.replace('/w342/', onMobileData() ? '/w500/' : '/w780/') : a ? posterOf(a, tmdb) : undefined;
   // Title logo: shown if known when the page opened, or as soon as the lookup
   // lands (its space is reserved, so nothing shifts). Otherwise a display-font title.
-  const logo = tmdb?.logo || null;
+  const logo = logoFor(tmdb?.logo);
   const showLogoArea = !artSettled && !opened.current?.logoKnown;
   const meta = [a.year ? String(a.year) : '', a.type || '', ...(a.genres || []).slice(0, 3)].filter(Boolean);
   const episodes = guide.data || [];
@@ -215,7 +238,11 @@ export default function DetailScreen() {
 
   return (
     <View style={styles.screen}>
-      <Animated.ScrollView onScroll={onScroll} scrollEventThrottle={16} contentContainerStyle={{ paddingBottom: insets.bottom + BOTTOM_BAR + 24 }}>
+      <Animated.ScrollView
+        onScroll={onScroll}
+        scrollEventThrottle={16}
+        contentContainerStyle={{ paddingBottom: insets.bottom + BOTTOM_BAR + 24 }}
+      >
         {/* Key art with the title logo over its bottom */}
         <View style={{ height: heroH, overflow: 'hidden' }}>
           <Animated.View style={[StyleSheet.absoluteFill, artStyle]}>
@@ -288,14 +315,8 @@ export default function DetailScreen() {
           ]}
         />
 
-        {!opened2 ? (
-          // Until the open transition has finished, a light placeholder (the
-          // long episode list is drawn right after, so the page opens at once).
-          <View style={styles.epList}>
-            <EpisodeSkeleton thumbW={Math.round((width - 32) * 0.46)} />
-          </View>
-        ) : tab === 'episodes' ? (
-          <Animated.View key="episodes" entering={FadeIn.duration(220)}>
+        {tab === 'episodes' ? (
+          <Animated.View key="episodes" entering={FadeIn.duration(220)} onLayout={(e) => (wrapY.value = e.nativeEvent.layout.y)}>
             <PressableScale haptic disabled={seasonList.length < 2} onPress={() => setSeasonOpen(true)} style={styles.seasonRow} scaleTo={0.99}>
               {seasonList.length > 1 ? <Icon name="down" size={16} color="#fff" /> : null}
               <View style={{ flex: 1 }}>
@@ -311,7 +332,7 @@ export default function DetailScreen() {
               {episodes.length ? <Text style={styles.seasonCount}>{episodes.length} episodes</Text> : null}
             </PressableScale>
 
-            <View style={styles.epList}>
+            <View style={styles.epList} onLayout={(e) => (listY.value = e.nativeEvent.layout.y)}>
               {episodes.length ? (
                 episodes.slice(0, epLimit).map((ep, i) => (
                   <EpisodeRow
@@ -319,6 +340,7 @@ export default function DetailScreen() {
                     ep={ep}
                     tmdb={tmdbFor(ep.number)}
                     tmdbDone={stillsDone}
+                    pageView={pageView}
                     index={i}
                     watchId={watchId}
                     seasonNumber={current?.seasonNumber || 1}
@@ -505,6 +527,16 @@ function BottomBar({ anime, currentSeason = 1, bottom }: { anime: AnimeDetail; c
   const targetEp = watchedEp > 0 ? (isCompleted ? watchedEp + 1 : watchedEp) : 1;
   const isDoneAll = Boolean(anime.episodes && watchedEp >= anime.episodes && isCompleted);
 
+  // Staying on the page for a moment usually means play is next: find that
+  // episode's stream now (two small requests), so pressing play doesn't wait for it.
+  const { audioLang } = useSettings();
+  const prewarmId = currentSeason === 1 ? anime.anilistId : null;
+  useEffect(() => {
+    if (!prewarmId) return;
+    const t = setTimeout(() => api.prewarmStream(prewarmId, targetEp, audioLang === 'japanese' ? 'sub' : 'dub'), 1200);
+    return () => clearTimeout(t);
+  }, [prewarmId, targetEp, audioLang]);
+
   const pop = useSharedValue(1);
   const popStyle = useAnimatedStyle(() => ({ transform: [{ scale: pop.value }] }));
   return (
@@ -594,10 +626,12 @@ const EpisodeRow = memo(function EpisodeRow({
   reduce,
   tmdb,
   tmdbDone,
+  pageView,
 }: {
   ep: GuideEpisode;
   tmdb?: TmdbEpisode;
   tmdbDone: boolean;
+  pageView: PageView;
   index: number;
   watchId: string;
   seasonNumber?: number;
@@ -607,14 +641,27 @@ const EpisodeRow = memo(function EpisodeRow({
   reduce: boolean;
 }) {
   // TMDB's still; AniList's picture only once TMDB has none for this episode.
-  const thumb = tmdb?.still || (tmdbDone ? ep.thumb || fallback : undefined);
+  const tmdbStill = tmdbImagesBlocked() ? null : stillFor(tmdb?.still);
+  // Loads only once this row is about to be seen, then stays.
+  const rowY = useSharedValue(1e7);
+  const [near, setNear] = useState(false);
+  useAnimatedReaction(
+    () => {
+      const top = pageView.wrapY.value + pageView.listY.value + rowY.value;
+      return top < pageView.bottom.value && top + 140 > pageView.top.value;
+    },
+    (on) => {
+      if (on) runOnJS(setNear)(true);
+    }
+  );
+  const thumb = !near ? undefined : tmdbStill || (tmdbDone ? ep.thumb || fallback : undefined);
   // AniList's name, or TMDB's when AniList only has "Episode 4".
   const name = ep.title === `Episode ${ep.number}` && tmdb?.name ? tmdb.name : ep.title;
   const date = ep.airingAt ? new Date(ep.airingAt * 1000) : null;
   // Not out yet: shown with a lock and its date, and can't be opened.
   const upcoming = !!ep.upcoming || (!!date && date.getTime() > Date.now());
   return (
-    <Animated.View entering={reduce || index > 7 ? undefined : FadeInDown.delay(index * 45).duration(320)}>
+    <Animated.View entering={reduce || index > 7 ? undefined : FadeIn.duration(160)} onLayout={(e) => (rowY.value = e.nativeEvent.layout.y)}>
       <PressableScale
         onPress={() => nav.push(`/watch/${watchId}?season=${seasonNumber}&ep=${ep.number}` as any)}
         disabled={upcoming}

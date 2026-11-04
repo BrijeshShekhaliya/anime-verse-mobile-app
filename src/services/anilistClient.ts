@@ -29,6 +29,22 @@ export type SearchParams = {
   page?: number;
 };
 
+// What a card needs: about a quarter of the data of the full field list below.
+// The full details (description, links, rankings...) come when a page opens.
+const CARD_FIELDS = `
+  id idMal
+  title { romaji english native }
+  coverImage { extraLarge large color }
+  bannerImage
+  averageScore meanScore popularity
+  episodes status format season seasonYear duration
+  genres
+  studios(isMain: true) { nodes { name } }
+  startDate { year month day }
+  nextAiringEpisode { episode airingAt }
+  isAdult
+`;
+
 const MEDIA_FIELDS = `
   id idMal
   title { romaji english native }
@@ -46,7 +62,6 @@ const MEDIA_FIELDS = `
   externalLinks { site url type }
   rankings { rank type allTime }
   isAdult
-  family: relations { edges { relationType node { id type format episodes } } }
 `;
 
 const DETAIL_FIELDS = `
@@ -273,14 +288,14 @@ export async function fetchHome(): Promise<Home> {
 
   const q = `
     fragment fields on Media {
-      ${MEDIA_FIELDS}
+      ${CARD_FIELDS}
     }
     query ($season: MediaSeason, $seasonYear: Int, $nextSeason: MediaSeason, $nextSeasonYear: Int) {
       trending: Page(page: 1, perPage: 20) {
-        media(type: ANIME, isAdult: false, sort: [TRENDING_DESC, POPULARITY_DESC], status: RELEASING) { ...fields }
+        media(type: ANIME, isAdult: false, sort: [TRENDING_DESC, POPULARITY_DESC], status: RELEASING) { ...fields description(asHtml: false) }
       }
       seasonNow: Page(page: 1, perPage: 24) {
-        media(type: ANIME, isAdult: false, sort: [POPULARITY_DESC], season: $season, seasonYear: $seasonYear) { ...fields }
+        media(type: ANIME, isAdult: false, sort: [POPULARITY_DESC], season: $season, seasonYear: $seasonYear) { ...fields description(asHtml: false) }
       }
       topRated: Page(page: 1, perPage: 20) {
         media(type: ANIME, isAdult: false, sort: [SCORE_DESC], format_not: MUSIC) { ...fields }
@@ -363,7 +378,7 @@ export async function fetchExtras(id: string): Promise<{ characters: Character[]
       edges { role node { name { full } image { medium } } voiceActors(language: JAPANESE) { name { full } } }
     }
     recommendations(sort: RATING_DESC, perPage: 12) {
-      nodes { mediaRecommendation { ${MEDIA_FIELDS} } }
+      nodes { mediaRecommendation { ${CARD_FIELDS} } }
     }
   } }`;
 
@@ -378,7 +393,7 @@ export async function fetchExtras(id: string): Promise<{ characters: Character[]
             edges { role node { name { full } image { medium } } voiceActors(language: JAPANESE) { name { full } } }
           }
           recommendations(sort: RATING_DESC, perPage: 12) {
-            nodes { mediaRecommendation { ${MEDIA_FIELDS} } }
+            nodes { mediaRecommendation { ${CARD_FIELDS} } }
           }
         } }`,
         { v: num },
@@ -444,7 +459,7 @@ export async function fetchSearch(p: SearchParams): Promise<SearchResult> {
   const q = `query ($page: Int, $perPage: Int${varDefs ? `, ${varDefs}` : ''}) {
     Page(page: $page, perPage: $perPage) {
       pageInfo { hasNextPage lastPage }
-      media(type: ANIME, isAdult: false${filters ? `, ${filters}` : ''}) { ${MEDIA_FIELDS} }
+      media(type: ANIME, isAdult: false${filters ? `, ${filters}` : ''}) { ${CARD_FIELDS} }
     }
   }`;
 
@@ -475,7 +490,7 @@ export async function fetchSchedule(day: string): Promise<Anime[]> {
   const from = Math.floor(target.getTime() / 1000);
   const q = `query ($from: Int, $to: Int) { Page(perPage: 50) {
     airingSchedules(airingAt_greater: $from, airingAt_lesser: $to, sort: TIME) {
-      episode airingAt media { ${MEDIA_FIELDS} }
+      episode airingAt media { ${CARD_FIELDS} }
     } } }`;
 
   const data = await query(q, { from, to: from + 86400 });

@@ -67,7 +67,7 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
 });
 
 const AndroidMedia3Player = forwardRef<NativeVideoPlayerHandle, Props>(function AndroidMedia3Player({
-  uri, referer, paused, playbackRate, fitMode, selectedQualityHeight, selectedAudioTrackId = null, preferredAudioLanguage = null,
+  uri, referer, paused, playbackRate, volume = 1, fitMode, selectedQualityHeight, selectedAudioTrackId = null, preferredAudioLanguage = null,
   selectedTextTrackId = null, subtitles, subtitlesEnabled, onLoad, onProgress, onBuffer,
   onAudioTracks, onTextTracks, onVideoTracks, onEnd, onError,
 }, forwardedRef) {
@@ -117,6 +117,7 @@ const AndroidMedia3Player = forwardRef<NativeVideoPlayerHandle, Props>(function 
         referer={referer}
         paused={paused}
         playbackRate={playbackRate}
+        volume={volume}
         fitMode={fitMode}
         selectedQualityHeight={selectedQualityHeight}
         selectedAudioTrackId={selectedAudioTrackId}
@@ -126,7 +127,7 @@ const AndroidMedia3Player = forwardRef<NativeVideoPlayerHandle, Props>(function 
         onLoad={(event) => onLoad(event.nativeEvent.duration)}
         onProgress={(event) => {
           const { time, duration, buffered, videoWidth, videoHeight } = event.nativeEvent;
-          setPlaybackTime(time);
+          if (cues.length) setPlaybackTime(time);
           onProgress(time, duration, buffered, videoWidth, videoHeight);
         }}
         onBuffer={(event) => onBuffer(event.nativeEvent.buffering)}

@@ -1,8 +1,7 @@
 import { nav } from '@/lib/nav';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { whenIdle } from '@/lib/idle';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { FlatList, RefreshControl, View } from 'react-native';
-import Animated, { useAnimatedScrollHandler, useSharedValue } from 'react-native-reanimated';
+import Animated, { runOnJS, useAnimatedScrollHandler, useSharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CONTINUE_CARD_W, ContinueCard } from '@/components/ContinueCard';
 import { Hero } from '@/components/Hero';
@@ -19,8 +18,20 @@ import { dubOf, useDubs } from '@/lib/dubs';
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const scrollY = useSharedValue(0);
+  // Rows below the screen, and their posters, load when you scroll near them:
+  // someone who only opens Home doesn't download seven rows of pictures.
+  const [rowsShown, setRowsShown] = useState(2);
+  const showNextRow = useCallback(() => setRowsShown((n) => Math.min(7, n + 1)), []);
+  const lastRow = useSharedValue(0);
   const onScroll = useAnimatedScrollHandler((e) => {
     scrollY.value = e.contentOffset.y;
+    if (e.contentOffset.y + e.layoutMeasurement.height > e.contentSize.height - 700) {
+      const t = Date.now();
+      if (t - lastRow.value > 250) {
+        lastRow.value = t;
+        runOnJS(showNextRow)();
+      }
+    }
   });
   const { data, error, isPending, refetch } = useHome();
   const dubsVersion = useDubs();
@@ -43,18 +54,6 @@ export default function HomeScreen() {
   const spotlightRef = useRef(data?.spotlight);
   if (!spotlightRef.current?.length && data?.spotlight?.length) spotlightRef.current = data.spotlight;
   const spotlight = spotlightRef.current || [];
-
-  // The rows below the fold are added one per idle moment instead of all in the
-  // first frame, so Home appears (and the launch animation lands) without a hitch.
-  const [rowsShown, setRowsShown] = useState(2);
-  useEffect(() => {
-    if (!data || rowsShown >= 7) return;
-    let live = true;
-    whenIdle(() => live && setRowsShown((n) => n + 1), 300);
-    return () => {
-      live = false;
-    };
-  }, [data, rowsShown]);
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
       <TopBar scrollY={scrollY} solidAfter={260} />

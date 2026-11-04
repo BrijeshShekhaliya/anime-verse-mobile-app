@@ -22,11 +22,12 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
+import { useSharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PlayerOverlay, type QuickChip } from '@/components/player/PlayerOverlay';
 import { PlayerSettingsSheet, type SheetSection } from '@/components/player/PlayerSettingsSheet';
 import NativeHlsPlayer, { type NativePlayerTrack, type NativeVideoLevel } from '@/components/player/NativeHlsPlayer';
-import { isAudioLanguageMatch, hasAudioLanguage } from '@/components/player/ExpoVideoHlsPlayer';
+import { isAudioLanguageMatch } from '@/components/player/ExpoVideoHlsPlayer';
 import { isStreamUrlExpired } from '@/services/animerulzClient';
 import { airDateLabel } from '@/lib/airDate';
 import { EpisodeBadges } from '@/components/Badges';
@@ -36,6 +37,8 @@ import { api, toFullUrl } from '@/lib/api';
 import { useLibrary } from '@/lib/library';
 import { useSettings, displayTitle } from '@/lib/settings';
 import { colors, fonts, radius } from '@/lib/theme';
+import { useDetail, useSeasons, useTmdbShow, useTmdbStills } from '@/lib/queries';
+import { backdropOf, stillFor, tmdbImagesBlocked, tmdbPosition, useArt } from '@/lib/artwork';
 import type { Episode, EpisodesData, StreamData } from '@/lib/types';
 import { useFetch } from '@/lib/useFetch';
 
@@ -61,6 +64,9 @@ interface VideoLevelInfo {
   width: number;
   bitrate: number;
 }
+
+// The main server carries every language; anything else is the single-language backup.
+const isMainStream = (s?: StreamData | null) => !!s?.source?.toLowerCase().includes('multi');
 
 // Formats seconds into M:SS or H:MM:SS
 function formatDuration(sec: number) {
@@ -126,7 +132,7 @@ export default function WatchScreen() {
   const [currentSeason, setCurrentSeason] = useState<number>(Math.max(1, parseInt(paramSeason || '1', 10) || 1));
   const [currentEp, setCurrentEp] = useState<number>(Math.max(1, parseInt(paramEp || '1', 10) || 1));
   const [retryNonce, setRetryNonce] = useState(0); // bumped by "Try again"
-  const [subtitlesEnabled, setSubtitlesEnabled] = useState<boolean>(true);
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState<boolean>(false); // off until asked for
   const [fitMode, setFitMode] = useState<FitMode>('contain'); // Default: contain (100% video visible, no crop)
   const [badgeText, setBadgeText] = useState<string | null>(null);
 
@@ -148,9 +154,11 @@ export default function WatchScreen() {
   const [hlsError, setHlsError] = useState<string | null>(null);
 
   // Playback states
-  const [currentTime, setCurrentTime] = useState<number>(0);
-  const [scrubbingTime, setScrubbingTime] = useState<number | null>(null);
-  const [bufferedTime, setBufferedTime] = useState<number>(0);
+  // The time goes straight to the seek bar on the UI thread. As React state it
+  // redrew this whole screen several times a second, which is what made every
+  // touch and button wait its turn.
+  const playbackTime = useSharedValue(0);
+  const playbackBuffered = useSharedValue(0);
   const [duration, setDuration] = useState<number>(1429); // fallback ~23:49
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [isBuffering, setIsBuffering] = useState<boolean>(false);
@@ -196,7 +204,7 @@ export default function WatchScreen() {
   const lastProgressSavedTimeRef = useRef<number>(0);
   const isPlayingRef = useRef<boolean>(true);
   const playbackSpeedRef = useRef<number>(1.0);
-  const subtitlesEnabledRef = useRef<boolean>(true);
+  const subtitlesEnabledRef = useRef<boolean>(false);
   const selectedQualityRef = useRef<number>(-1);
   const currentLangRef = useRef<'sub' | 'dub'>('sub');
   const preferredAudioNameRef = useRef<string | null>(null);
@@ -358,28 +366,28 @@ export default function WatchScreen() {
 
   // Fetch anime detail with instant synchronous cache
   const initialAnime = useMemo(() => api.getCachedDetail(String(id)), [id]);
-  const { data: anime } = useFetch(() => api.detail(String(id)), [id], initialAnime);
+  const detailQ = useDetail(String(id));
+  const anime = detailQ.data ?? initialAnime ?? null;
+  // Full details are in (the tapped card's basics don't count), or aren't coming.
+  const fullDetail = detailQ.data && !detailQ.isPlaceholderData ? detailQ.data : undefined;
+  const detailSettled = !!fullDetail || detailQ.isError;
 
   // Synchronous AniList ID resolution (0ms startup without waiting for network GraphQL)
   const initialAnilistId = useMemo(() => {
-    if (typeof id === 'number' && id > 0) return id;
-    if (typeof id === 'string') {
-      if (id.startsWith('al')) {
-        const p = parseInt(id.slice(2), 10);
-        if (!isNaN(p) && p > 0) return p;
-      } else if (/^\d+$/.test(id)) {
-        const p = parseInt(id, 10);
-        if (!isNaN(p) && p > 0) return p;
-      }
+    // Only "al123" ids are AniList's. A plain number is a MyAnimeList id: treating
+    // it as AniList's asked the stream source for a different show entirely.
+    if (typeof id === 'string' && id.startsWith('al')) {
+      const p = parseInt(id.slice(2), 10);
+      if (!isNaN(p) && p > 0) return p;
     }
     return initialAnime?.anilistId || undefined;
   }, [id, initialAnime?.anilistId]);
 
   // Fetch episodes for current season with instant synchronous cache
   const initialEps = useMemo(() => api.getCachedEpisodes(String(id), currentSeason), [id, currentSeason]);
-  const { data: epData, loading: episodesLoading } = useFetch(
-    () => api.episodes(String(id), currentSeason),
-    [id, currentSeason],
+  const { data: epData, loading: episodesLoading } = useFetch<EpisodesData>(
+    () => (detailSettled ? api.episodes(String(id), currentSeason, false, fullDetail) : new Promise<EpisodesData>(() => {})),
+    [id, currentSeason, detailSettled],
     initialEps,
   );
 
@@ -392,6 +400,31 @@ export default function WatchScreen() {
     () => episodes.find((e) => e.episode_number === currentEp + 1) || null,
     [episodes, currentEp],
   );
+  // Up Next's picture: that episode's TMDB still (episodes are matched by absolute
+  // number, as on the anime page), else the show's TMDB banner. The same saved
+  // requests as the anime page, so usually nothing extra is fetched.
+  const { art: showArt, settled: showArtSettled } = useArt(anime, true);
+  const seasonsQ = useSeasons(anime?.anilistId ?? null);
+  const nextAbsolute = useMemo(() => {
+    if (!nextEpisodeObj || !seasonsQ.data || !anime?.anilistId) return null;
+    const idx = seasonsQ.data.findIndex((x) => x.anilistId === anime.anilistId);
+    if (idx < 0) return null;
+    let sum = nextEpisodeObj.episode_number;
+    for (let i = 0; i < idx; i++) {
+      const n = seasonsQ.data[i].episodes;
+      if (!n) return null; // an earlier season's length is unknown: can't place it
+      sum += n;
+    }
+    return sum;
+  }, [nextEpisodeObj, seasonsQ.data, anime?.anilistId]);
+  const tmdbShow = useTmdbShow(nextEpisodeObj ? anime : null);
+  const nextStills = useTmdbStills(nextAbsolute == null ? null : tmdbShow.data, nextAbsolute ?? 0, nextAbsolute ?? 0, !!anime?.airing);
+  const nextPosition = tmdbShow.data && nextAbsolute != null ? tmdbPosition(tmdbShow.data, nextAbsolute) : null;
+  const nextStill = nextPosition && !tmdbImagesBlocked() ? stillFor(nextStills.map.get(`${nextPosition.season}:${nextPosition.episode}`)?.still) : null;
+  // Waits for TMDB's answer about the still, so the banner never shows first and gets swapped.
+  const nextStillPending = tmdbShow.isLoading || seasonsQ.isLoading || (nextAbsolute != null && nextStills.pending);
+  const upNextPicture = nextStill || (anime && showArtSettled && !nextStillPending ? backdropOf(anime, showArt, true) : undefined);
+
   // Episodes that aren't out yet are listed (locked, with their date) but never played.
   const currentEpLocked = !!currentEpisodeObj?.upcoming;
   const nextEpLocked = !!nextEpisodeObj?.upcoming;
@@ -435,6 +468,17 @@ export default function WatchScreen() {
     };
   }, [anime, currentEp, epData, setProgress]);
 
+  // Start finding the stream the moment the screen opens, while the details below
+  // load: the lookup further down then shares this answer instead of starting late.
+  const startedAtRef = useRef(Date.now());
+  useEffect(() => {
+    startedAtRef.current = Date.now();
+    const seasonId = initialEps?.seasons?.find((x) => x.season_number === currentSeason)?.anilistId;
+    const target = seasonId || (currentSeason === 1 ? initialAnilistId : undefined);
+    api.prewarmStream(target, currentEp, preferredAudioLang === 'japanese' ? 'sub' : 'dub');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSeason, currentEp]);
+
   // Caching stream resolver: reuses cached resolution and prevents duplicate concurrent requests
   const resolveStreamWithCache = useCallback(
     async (
@@ -472,7 +516,7 @@ export default function WatchScreen() {
             { id, anilistId: targetAnilistId, title, romaji, season, episode, mode, preferredAudio: prefAudio },
             { forceRefresh: force },
           );
-          if (res && res.streamUrl) {
+          if (res && res.streamUrl && isMainStream(res)) {
             streamCacheRef.current.set(key, { data: res, expiresAt: Date.now() + 15 * 60 * 1000 });
           }
           return res;
@@ -490,6 +534,7 @@ export default function WatchScreen() {
   // Resolve stream URL for current episode/season
   useEffect(() => {
     if (currentEpLocked) return; // not out yet: nothing to load
+    if (!detailSettled || (episodesLoading && !epData)) return;
     if (!playerPreferencesLoaded || (!anime?.title && !initialAnime?.title && !initialAnilistId)) return;
     // If the saved preference is Dub and anime-level metadata does not say
     // whether Dub exists, wait for episode metadata instead of resolving Sub
@@ -569,11 +614,12 @@ export default function WatchScreen() {
           setMountedStream(res);
           setHlsError(null);
 
-          // If user preferred Hindi, but stream only has Japanese (Sub) without Hindi:
-          const isPrefHindi = preferredAudioNameRef.current?.includes('hindi');
-          const hasHindi = res.audioTracks && hasAudioLanguage(res.audioTracks, 'hindi');
-          if (isPrefHindi && !hasHindi && res.mode === 'sub') {
-            showBadge('Hindi dub unavailable — Playing in Japanese');
+          if (!isMainStream(res)) {
+            // The backup has one language: say the true one, and keep trying for the
+            // main server behind the scenes (it picks up from the same moment).
+            setCurrentLang(res.mode);
+            currentLangRef.current = res.mode;
+            retryMainServer(false);
           }
         } else {
           setHlsError('This episode could not load. Check your connection and try again.');
@@ -592,35 +638,23 @@ export default function WatchScreen() {
     return () => {
       cancelled = true;
     };
-  }, [currentEpLocked, retryNonce, playerPreferencesLoaded, anime?.title, anime?.titleRomaji, anime?.languages?.dub, epData, currentSeason, currentEp, currentEpHasDub, resolveStreamWithCache]);
+  }, [currentEpLocked, detailSettled, episodesLoading, retryNonce, playerPreferencesLoaded, anime?.title, anime?.titleRomaji, anime?.languages?.dub, epData, currentSeason, currentEp, currentEpHasDub, resolveStreamWithCache]);
 
-  // Preload the next episode's stream 20 s into this one.
-  const preloadedRef = useRef<string | null>(null);
-  const nextPreloadReady = currentTime > 20 && !!nextEpisodeObj && !nextEpLocked && !!mountedStream?.streamUrl;
   useEffect(() => {
-    if (!nextPreloadReady || !nextEpisodeObj) return;
-    const key = `${currentSeason}:${nextEpisodeObj.episode_number}`;
-    if (preloadedRef.current === key) return;
-    preloadedRef.current = key;
-    const seasonObj = epData?.seasons?.find((s) => s.season_number === currentSeason);
-    const seasonAnilistId =
-      seasonObj?.anilistId ||
-      (seasonObj?.id && !isNaN(Number(seasonObj.id)) ? Number(seasonObj.id) : undefined) ||
-      anime?.anilistId ||
-      initialAnilistId ||
-      undefined;
-    const title =
-      (seasonObj?.title && !/^Season\s+\d+$/i.test(seasonObj.title.trim()) ? seasonObj.title : null) || anime?.title || initialAnime?.title || '';
-    resolveStreamWithCache(
-      title,
-      anime?.titleRomaji || initialAnime?.titleRomaji || undefined,
-      currentSeason,
-      nextEpisodeObj.episode_number,
-      currentLangRef.current,
-      seasonAnilistId,
-    ).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nextPreloadReady, nextEpisodeObj?.episode_number, currentSeason]);
+    if (detailQ.isError && !anime?.title && !initialAnilistId) setHlsError('This episode could not load. Check your connection and try again.');
+  }, [detailQ.isError, anime?.title, initialAnilistId]);
+
+  // Errors show only if they last: a problem the player recovers from by itself
+  // (fresh link, backup server) never flashes on screen.
+  const [shownError, setShownError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!hlsError) {
+      setShownError(null);
+      return;
+    }
+    const t = setTimeout(() => setShownError(hlsError), 1500);
+    return () => clearTimeout(t);
+  }, [hlsError]);
 
   // Alternate Sub/Dub streams are resolved on demand instead of during cold
   // start. Eager prefetch ran before HLS reported in-band audio tracks, creating
@@ -653,14 +687,15 @@ export default function WatchScreen() {
     }, 3800);
   }, []);
 
-  const toggleControls = useCallback(() => {
-    if (controlsVisible) {
-      setControlsVisible(false);
-      if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
-    } else {
-      resetHideTimer();
-    }
-  }, [controlsVisible, resetHideTimer]);
+  // The overlay fades its controls itself, in the same frame as the tap, and
+  // reports here afterwards.
+  const holdControls = useCallback(() => {
+    if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
+  }, []);
+  const onControlsHidden = useCallback(() => {
+    if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
+    setControlsVisible(false);
+  }, []);
 
   useEffect(() => {
     resetHideTimer();
@@ -669,14 +704,38 @@ export default function WatchScreen() {
     };
   }, [resetHideTimer]);
 
-  const seekNativePlayer = useCallback((time: number) => {
-    const target = Math.max(0, time);
-    nativeSeekTargetRef.current = target;
-    seekStartedAtRef.current = Date.now();
-    nativeVideoRef.current?.seek?.(target);
-    nativePlayerTimeRef.current = target;
-    currentTimeRef.current = target;
-  }, []);
+  const lastSeekSentRef = useRef(0);
+  const queuedSeekRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (queuedSeekRef.current) clearTimeout(queuedSeekRef.current);
+    },
+    [],
+  );
+  const seekNativePlayer = useCallback(
+    (time: number) => {
+      const target = Math.max(0, time);
+      nativeSeekTargetRef.current = target;
+      seekStartedAtRef.current = Date.now();
+      nativePlayerTimeRef.current = target;
+      currentTimeRef.current = target;
+      playbackTime.value = target;
+      // Tapping +10 quickly: the first seek goes now, and the rest wait to become
+      // one, so the player isn't made to drop what it's doing for each tap.
+      const wait = 200 - (Date.now() - lastSeekSentRef.current);
+      if (wait <= 0) {
+        lastSeekSentRef.current = Date.now();
+        nativeVideoRef.current?.seek?.(target);
+      } else if (!queuedSeekRef.current) {
+        queuedSeekRef.current = setTimeout(() => {
+          queuedSeekRef.current = null;
+          lastSeekSentRef.current = Date.now();
+          nativeVideoRef.current?.seek?.(nativePlayerTimeRef.current);
+        }, wait);
+      }
+    },
+    [playbackTime],
+  );
 
   // Controls Actions
   const handleTogglePlay = useCallback(() => {
@@ -684,23 +743,10 @@ export default function WatchScreen() {
     resetHideTimer();
   }, [resetHideTimer]);
 
-  const handleRewind10 = useCallback(() => {
-    const next = Math.max(0, nativePlayerTimeRef.current - 10);
-    seekNativePlayer(next);
-    setCurrentTime(next); resetHideTimer();
-  }, [seekNativePlayer, resetHideTimer]);
-
-  const handleForward10 = useCallback(() => {
-    const next = Math.min(duration || Number.MAX_SAFE_INTEGER, nativePlayerTimeRef.current + 10);
-    seekNativePlayer(next);
-    setCurrentTime(next); resetHideTimer();
-  }, [duration, seekNativePlayer, resetHideTimer]);
-
   const handleSeekBy = useCallback(
     (delta: number) => {
       const next = Math.max(0, Math.min(duration || Number.MAX_SAFE_INTEGER, nativePlayerTimeRef.current + delta));
       seekNativePlayer(next);
-      setCurrentTime(next);
     },
     [duration, seekNativePlayer],
   );
@@ -708,7 +754,6 @@ export default function WatchScreen() {
   const handleSeek = useCallback(
     (targetSec: number) => {
       const clamped = Math.max(0, Math.min(duration, targetSec));
-      setCurrentTime(clamped);
       seekNativePlayer(clamped);
       resetHideTimer();
     },
@@ -761,12 +806,14 @@ export default function WatchScreen() {
       showBadge(`Preparing ${targetMode === 'dub' ? 'English Dub' : 'Japanese (Sub)'}...`);
 
       try {
+        const seasonObj = epData?.seasons?.find((s) => s.season_number === currentSeason);
         const resolved = await resolveStreamWithCache(
-          anime!.title,
+          (seasonObj?.title && !/^Season\s+\d+$/i.test(seasonObj.title.trim()) ? seasonObj.title : null) || anime!.title,
           anime!.titleRomaji || undefined,
           currentSeason,
           currentEp,
           targetMode,
+          seasonObj?.anilistId || anime!.anilistId || undefined,
         );
 
         // Guard against episode changes and newer audio selections.
@@ -807,6 +854,7 @@ export default function WatchScreen() {
       currentLang,
       currentEpHasDub,
       anime,
+      epData,
       currentSeason,
       currentEp,
       resolveStreamWithCache,
@@ -868,8 +916,8 @@ export default function WatchScreen() {
       setNativeAudioTrackId(null);
       setCurrentAudioTrackId(0);
       setCurrentEp(nextEp);
-      setCurrentTime(0);
-      setBufferedTime(0);
+      playbackTime.value = 0;
+      playbackBuffered.value = 0;
       setIsPlaying(true);
       resetHideTimer();
     }
@@ -927,7 +975,6 @@ export default function WatchScreen() {
 
     // Immediately seed with all audio tracks discovered by the resolver (Hindi, English, etc.)
     let initialAudioId = 0;
-    let hasMatchingPref = false;
     if (mountedStream.audioTracks && mountedStream.audioTracks.length > 0) {
       const seeded = mountedStream.audioTracks.map((track, idx) => ({
         id: idx,
@@ -940,10 +987,7 @@ export default function WatchScreen() {
       const pref = preferredAudioNameRef.current;
       if (pref && seeded.length > 1) {
         const match = seeded.find((t) => isAudioLanguageMatch(t.name, t.lang, pref));
-        if (match) {
-          initialAudioId = match.id;
-          hasMatchingPref = true;
-        }
+        if (match) initialAudioId = match.id;
       }
     } else {
       setAvailableAudioTracks([]);
@@ -952,13 +996,9 @@ export default function WatchScreen() {
 
     // Immediately activate the preferred audio track in UI
     setCurrentAudioTrackId(initialAudioId);
-    // Only pass an explicit override if we confirmed a matching audio track in seeded data;
-    // otherwise pass null so ExoPlayer prefers Hindi natively without forcing overrides or seeking!
-    if (hasMatchingPref) {
-      setNativeAudioTrackId(initialAudioId);
-    } else {
-      setNativeAudioTrackId(null);
-    }
+    // The player chooses by language from the real list; no track number from this
+    // guess reaches it, since its numbering isn't the real one.
+    setNativeAudioTrackId(null);
 
     // Immediately seed video qualities from resolver manifest if available
     if (mountedStream.videoLevels && mountedStream.videoLevels.length > 0) {
@@ -992,6 +1032,7 @@ export default function WatchScreen() {
   ]);
 
   const onNativePlayerLoad = useCallback((loadedDuration: number) => {
+    if (__DEV__) console.log(`[Player Speed] screen opened to video ready: ${Date.now() - startedAtRef.current} ms`);
     if (loadedDuration > 0) setDuration(loadedDuration);
     const pending = resumeAfterSourceChange;
     if (pending && pending.key === nativeSourceKeyRef.current) {
@@ -999,7 +1040,7 @@ export default function WatchScreen() {
         nativeVideoRef.current?.seek?.(pending.time);
         nativePlayerTimeRef.current = pending.time;
         currentTimeRef.current = pending.time;
-        setCurrentTime(pending.time);
+        playbackTime.value = pending.time;
       }
       setIsPlaying(pending.shouldPlay);
       isPlayingRef.current = pending.shouldPlay;
@@ -1007,7 +1048,7 @@ export default function WatchScreen() {
     }
     setIsBuffering(false);
     setResolvingHls(false);
-  }, [resumeAfterSourceChange]);
+  }, [resumeAfterSourceChange, playbackTime]);
 
   const onNativePlayerProgress = useCallback(
     (time: number, loadedDuration: number, playable: number, videoWidth?: number, videoHeight?: number) => {
@@ -1018,16 +1059,17 @@ export default function WatchScreen() {
       } else if (seekTarget !== null && Date.now() - seekStartedAtRef.current < 4000) {
         // Still seeking: the old position isn't news. Keep the target.
         if (loadedDuration > 0) setDuration(loadedDuration);
-        setBufferedTime(playable);
+        playbackBuffered.value = playable;
         return;
       } else if (seekTarget !== null) {
         nativeSeekTargetRef.current = null;
       }
       nativePlayerTimeRef.current = time;
       currentTimeRef.current = time;
-      setCurrentTime(time);
+      playbackTime.value = time;
+      if (time > 0) setHlsError(null);
       if (loadedDuration > 0) setDuration(loadedDuration);
-      setBufferedTime(playable);
+      playbackBuffered.value = playable;
 
       if (videoHeight && videoHeight > 0) {
         const resKey = `${videoWidth || 0}x${videoHeight}`;
@@ -1058,11 +1100,11 @@ export default function WatchScreen() {
           });
         }
 
-        // Crunchyroll-Style Background Preload: pre-resolve next episode stream when current episode is >= 70% or > 3 mins
+        // Look up the next episode's stream 20 s into this one, so it starts quickly.
         const nextEp = currentEp + 1;
         const total = epData?.episodes?.length || anime?.episodes || anime?.episodeCount || 0;
         const nextKey = `${currentSeason}:${nextEp}`;
-        if ((ratio >= 0.7 || time >= 5) && nextEp <= total && prefetchedNextEpRef.current !== nextKey) {
+        if (time >= 20 && !nextEpLocked && nextEp <= total && prefetchedNextEpRef.current !== nextKey) {
           prefetchedNextEpRef.current = nextKey;
           const currentSeasonObj = epData?.seasons?.find((s) => s.season_number === currentSeason);
           const seasonAnilistId =
@@ -1088,7 +1130,7 @@ export default function WatchScreen() {
         }
       }
     },
-    [currentEp, currentSeason, epData, anime, resolveStreamWithCache],
+    [currentEp, currentSeason, epData, anime, resolveStreamWithCache, nextEpLocked, playbackTime, playbackBuffered],
   );
 
   const isAnimeRulzStream = Boolean(
@@ -1133,7 +1175,12 @@ export default function WatchScreen() {
   );
 
   const onNativePlayerAudioTracks = useCallback((tracks: NativePlayerTrack[]) => {
-    const audio = tracks.filter((track) => track.type === 'audio');
+    const unnamed = (name: string) => !name || /^(und|unknown|audio \d+)$/i.test(name.trim());
+    const listed = tracks.filter((track) => track.type === 'audio');
+    // A single nameless track (the backup's) is the language that was asked for.
+    const audio = listed.length === 1 && unnamed(listed[0].name)
+      ? [{ ...listed[0], name: currentLangRef.current === 'dub' ? 'English' : 'Japanese' }]
+      : listed;
     // If native player reports 0 tracks during source initialization, preserve existing tracks!
     if (audio.length === 0) return;
     setAvailableAudioTracks(audio.map(({ id, name, lang }) => ({ id, name, lang })));
@@ -1162,12 +1209,15 @@ export default function WatchScreen() {
         if (activeTrack && activeTrack.id !== initial.id) {
           setNativeAudioTrackId(initial.id);
         }
-        if (pref && !match && (pref.includes('hindi') || pref === 'hin' || pref === 'hi')) {
+        // Only the main server's list can say a language doesn't exist.
+        if (isAnimeRulzStream && pref && !match && (pref.includes('hindi') || pref === 'hin' || pref === 'hi')) {
           showBadge(`Audio: ${initial.name} (Hindi not available for this anime)`);
+        } else if (!isAnimeRulzStream && mountedStream?.streamUrl) {
+          showBadge(`Backup server: ${initial.name} only`);
         }
       }
     }
-  }, [showBadge]);
+  }, [showBadge, isAnimeRulzStream, mountedStream?.streamUrl]);
 
   const onNativePlayerTextTracks = useCallback((tracks: NativePlayerTrack[]) => {
     const text = tracks.filter((track) => track.type === 'text');
@@ -1193,7 +1243,8 @@ export default function WatchScreen() {
     const targetHeight = selectedQualityRef.current;
     if (targetHeight > 0 && levels.length > 0) {
       const match = levels.find((level) => level.height === targetHeight);
-      const chosenHeight = match ? targetHeight : (levels.find((l) => l.height <= targetHeight) || levels[0])?.height;
+      const below = levels.filter((l) => l.height <= targetHeight).sort((x, y) => y.height - x.height);
+      const chosenHeight = match ? targetHeight : (below[0] || levels[0])?.height;
       if (chosenHeight && chosenHeight !== selectedQualityRef.current) {
         selectedQualityRef.current = chosenHeight;
         setSelectedQualityHeight(chosenHeight);
@@ -1204,9 +1255,89 @@ export default function WatchScreen() {
     }
   }, [showBadge]);
 
+  // Smart server switch: the main (multi-language) server won't play this episode
+  // or keeps stalling, so carry on from the same moment on the backup server.
+  const backupTriedRef = useRef<Record<string, boolean>>({});
+  const switchToBackup = useCallback(() => {
+    const epKey = `${currentSeason}:${currentEp}`;
+    if (backupTriedRef.current[epKey] || !mountedStream?.source?.toLowerCase().includes('multi')) return false;
+    backupTriedRef.current[epKey] = true;
+    const resumeAt = nativePlayerTimeRef.current || currentTimeRef.current;
+    const seasonObj = epData?.seasons?.find((s) => s.season_number === currentSeason);
+    const title = (seasonObj?.title && !/^Season\s+\d+$/i.test(seasonObj.title.trim()) ? seasonObj.title : null) || anime?.title || '';
+    setIsBuffering(true);
+    showBadge('Switching server…');
+    api
+      .resolveBackup({ title, romaji: anime?.titleRomaji || undefined, season: currentSeason, episode: currentEp, mode: currentLangRef.current })
+      .then((res) => {
+        if (currentEpisodeKeyRef.current !== epKey || !res?.streamUrl) return;
+        setResumeAfterSourceChange({ key: `${epKey}:${res.mode}:${res.streamUrl}`, time: resumeAt, shouldPlay: isPlayingRef.current });
+        mountedStreamEpisodeKeyRef.current = epKey;
+        setCurrentLang(res.mode);
+        currentLangRef.current = res.mode;
+        setHlsStream(res);
+        setMountedStream(res);
+        setHlsError(null);
+      })
+      .catch(() => {
+        if (currentEpisodeKeyRef.current === epKey) setHlsError('This episode could not load. Check your connection and try again.');
+      });
+    return true;
+  }, [currentSeason, currentEp, mountedStream?.source, epData, anime?.title, anime?.titleRomaji, showBadge]);
+
+  // On the backup: ask the main server again, and if it answers, carry on there from
+  // the same moment. Once by itself per episode (not after the main server's video
+  // itself failed to play), or any time the viewer asks.
+  const mainRetriedRef = useRef<Record<string, boolean>>({});
+  const retryMainServer = useCallback(
+    (asked: boolean) => {
+      const epKey = `${currentSeason}:${currentEp}`;
+      if (!asked && (mainRetriedRef.current[epKey] || backupTriedRef.current[epKey])) return;
+      mainRetriedRef.current[epKey] = true;
+      const seasonObj = epData?.seasons?.find((s) => s.season_number === currentSeason);
+      const anilistId = seasonObj?.anilistId || anime?.anilistId || initialAnilistId;
+      if (!anilistId) {
+        if (asked) showBadge('The main server has no match for this anime');
+        return;
+      }
+      if (asked) {
+        backupTriedRef.current[epKey] = false;
+        showBadge('Trying the main server…');
+      }
+      api
+        .resolveMain(anilistId, currentEp, currentLangRef.current)
+        .then((res) => {
+          if (currentEpisodeKeyRef.current !== epKey || !res?.streamUrl) return;
+          setResumeAfterSourceChange({
+            key: `${epKey}:${res.mode}:${res.streamUrl}`,
+            time: nativePlayerTimeRef.current || currentTimeRef.current,
+            shouldPlay: isPlayingRef.current,
+          });
+          mountedStreamEpisodeKeyRef.current = epKey;
+          setHlsStream(res);
+          setMountedStream(res);
+          setHlsError(null);
+        })
+        .catch(() => {
+          if (asked) showBadge("The main server isn't answering right now");
+        });
+    },
+    [currentSeason, currentEp, epData, anime?.anilistId, initialAnilistId, showBadge],
+  );
+
+  // Stuck loading for 15 s on the main server: try the backup.
+  useEffect(() => {
+    if (!isBuffering || !isPlaying || !mountedStream?.streamUrl) return;
+    const t = setTimeout(() => switchToBackup(), 15000);
+    return () => clearTimeout(t);
+  }, [isBuffering, isPlaying, mountedStream?.streamUrl, switchToBackup]);
+
   const onNativePlayerError = useCallback((message: string) => {
     const epKey = `${currentSeason}:${currentEp}`;
     const retries = playerRetryCountRef.current[epKey] || 0;
+    // A fresh link on the same server comes first: the backup costs the viewer
+    // every language but one.
+    if (retries >= 1 && switchToBackup()) return;
 
     // Auto-recovery: If stream failed (e.g. token expired on replay or cached link revoked),
     // clear stale caches and fetch fresh signed stream URL automatically
@@ -1250,6 +1381,12 @@ export default function WatchScreen() {
       )
         .then((res) => {
           if (res && res.streamUrl) {
+            setResumeAfterSourceChange({
+              key: `${epKey}:${res.mode}:${res.streamUrl}`,
+              time: nativePlayerTimeRef.current || currentTimeRef.current,
+              shouldPlay: isPlayingRef.current,
+            });
+            mountedStreamEpisodeKeyRef.current = epKey;
             setHlsStream(res);
             setMountedStream(res);
             setHlsError(null);
@@ -1269,7 +1406,7 @@ export default function WatchScreen() {
     setIsBuffering(false);
     setHlsError(message || 'Unable to play this stream');
     setResolvingHls(false);
-  }, [currentSeason, currentEp, id, anime, epData, resolveStreamWithCache]);
+  }, [currentSeason, currentEp, id, anime, epData, resolveStreamWithCache, switchToBackup]);
 
 
   // Interactive like / dislike toggles
@@ -1326,6 +1463,7 @@ export default function WatchScreen() {
     setSettingsOpen(true);
     setControlsVisible(false);
   }, []);
+  const openAllSettings = useCallback(() => openSettings(), [openSettings]);
   const settingsSections = useMemo<SheetSection[]>(() => {
     const qualityLevels = availableLevels
       .map((l) => l.height)
@@ -1354,6 +1492,9 @@ export default function WatchScreen() {
                 disabled: !currentEpHasDub || isSwitchingAudio,
                 onSelect: () => handleSelectAudio({ type: 'separate', mode: 'dub' }),
               },
+              ...(mountedStream && !isAnimeRulzStream
+                ? [{ key: 'main', label: 'More languages', hint: 'Try the main server again', selected: false, onSelect: () => retryMainServer(true) }]
+                : []),
             ],
       },
       {
@@ -1425,7 +1566,7 @@ export default function WatchScreen() {
   }, [
     availableLevels, currentAudioName, hasInBandAlternateAudio, availableAudioTracks, currentAudioTrackId, handleSelectAudio, currentLang, isSwitchingAudio,
     currentEpHasDub, currentSubtitleName, subtitlesEnabled, handleToggleSubtitles, availableTextTracks, nativeTextTrackId, showBadge, selectedQualityHeight,
-    handleSelectQuality, playbackSpeed, handleSetSpeed, fitMode, changeFitMode, autoplay, playingHeight,
+    handleSelectQuality, playbackSpeed, handleSetSpeed, fitMode, changeFitMode, autoplay, playingHeight, mountedStream, isAnimeRulzStream, retryMainServer,
   ]);
   const quickChips = useMemo<QuickChip[]>(
     () => [
@@ -1438,160 +1579,10 @@ export default function WatchScreen() {
     [currentAudioName, currentSubtitleName, playbackSpeed, selectedQualityHeight, playingHeight],
   );
 
-  return (
-    <View
-      style={styles.container}
-      onLayout={onRootLayout}
-    >
-      <StatusBar style="light" />
-      {/* Video player. Its size is worked out natively, in the same frame the
-          screen turns, with no JavaScript in between: full width at 16:9, but
-          never taller than the screen. In portrait that's the usual player
-          under the status bar; in landscape it's capped at the screen's height,
-          so it fills the screen and the details below get no room at all.
-          (Switching sizes from JavaScript only after the turn is what left a
-          second of wrong layout every time.) */}
-      {/* The gap under the status bar, also sized natively: in portrait it's
-          the status bar's height; in landscape the player needs the whole
-          height, so this gives way and shrinks to nothing, in the same frame. */}
-      <View style={[styles.statusGap, { height: topInset }]} />
-      <View
-        style={[styles.playerContainer, styles.playerFrame]}
-        onLayout={(e) => {
-          progressBarWidthRef.current = e.nativeEvent.layout.width;
-        }}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-      >
-        {mountedStream?.streamUrl ? (
-            <NativeHlsPlayer
-              ref={nativeVideoRef}
-              uri={mountedStream.rawMasterUrl || toFullUrl(mountedStream.streamUrl)}
-              referer={mountedStream.referer}
-              paused={!isPlaying || resolvingHls}
-              playbackRate={playbackSpeed}
-              volume={volume}
-              fitMode={fitMode}
-              selectedQualityHeight={selectedQualityHeight}
-              selectedAudioTrackId={nativeAudioTrackId}
-              preferredAudioLanguage={preferredAudioLang}
-              selectedTextTrackId={nativeTextTrackId}
-              subtitlesEnabled={subtitlesEnabled}
-              subtitles={nativeSubtitles}
-              onLoad={onNativePlayerLoad}
-              onProgress={onNativePlayerProgress}
-              onBuffer={setIsBuffering}
-              onAudioTracks={onNativePlayerAudioTracks}
-              onTextTracks={onNativePlayerTextTracks}
-              onVideoTracks={onNativePlayerVideoTracks}
-              onEnd={() => {
-                if (anime && currentEp > 0) {
-                  lastProgressCompletedRef.current = true;
-                  const total = epData?.episodes?.length || anime.episodes || anime.episodeCount || null;
-                  setProgress(anime, currentEp, total, { completed: true });
-                }
-                if (autoplay) handleNextEpisode();
-              }}
-              onError={onNativePlayerError}
-            />
-          ) : null}
-
-        {/* Not out yet: a lock and the date instead of a player. */}
-        {currentEpLocked ? (
-          <View style={[StyleSheet.absoluteFill, styles.playerPlaceholder]}>
-            <Icon name="lock" size={30} color={colors.accent} />
-            <Text style={styles.placeholderError}>Episode {currentEp} is coming soon</Text>
-            <Text style={[styles.placeholderError, { opacity: 0.7, marginTop: 2 }]}>{airDateLabel(currentEpisodeObj?.airingAt)}</Text>
-          </View>
-        ) : null}
-
-        {/* Loading */}
-        {resolvingHls && !currentEpLocked && (
-          <View style={[StyleSheet.absoluteFill, styles.playerPlaceholder]} pointerEvents="none">
-            <ActivityIndicator size="large" color={colors.accent} />
-
-          </View>
-        )}
-
-        {/* Couldn't load: say so, with a retry */}
-        {!resolvingHls && hlsError && !currentEpLocked && (
-          <View style={[StyleSheet.absoluteFill, styles.playerPlaceholder]}>
-            <Icon name="info" size={32} color={colors.accent} />
-            <Text style={styles.placeholderError}>{hlsError}</Text>
-            <PressableScale
-              style={styles.switchServerBtn}
-              onPress={() => {
-                mountedStreamEpisodeKeyRef.current = null;
-                setHlsError(null);
-                setRetryNonce((n) => n + 1);
-              }}
-            >
-              <Text style={styles.switchServerText}>Try again</Text>
-            </PressableScale>
-          </View>
-        )}
-
-        {isBuffering && isPlaying && !resolvingHls && !hlsError && (
-          <View style={[StyleSheet.absoluteFill, { alignItems: 'center', justifyContent: 'center' }]} pointerEvents="none">
-            <ActivityIndicator size="large" color={colors.accent} />
-          </View>
-        )}
-
-        {/* Dynamic Zoom / Fit Toast Badge (flashes in center of player) */}
-        {badgeText && (
-          <View style={styles.badgeToast} pointerEvents="none">
-            <Text style={styles.badgeToastText}>{badgeText}</Text>
-          </View>
-        )}
-
-        {/* Crunchyroll Opening Content Advisory Badge (Top-left inside player for first 6 seconds) */}
-        {showAdvisory && !controlsVisible && !settingsOpen && (
-          <View style={styles.openingAdvisoryWrap} pointerEvents="none">
-            <View style={styles.ageBadgeSmall}>
-              <Text style={styles.ageBadgeSmallText}>{anime?.contentRating || 'U/A 16+'}</Text>
-            </View>
-            <Text style={styles.openingAdvisoryText} numberOfLines={2}>
-              Sexualized Imagery, Smoking, Profanity, Suggestive Dialogue, Violence
-            </Text>
-          </View>
-        )}
-
-        {/* Controls and gestures (tap, double-tap, brightness / volume drag, seek bar). */}
-        {/* Stays mounted while settings are open: it holds the brightness set by
-            dragging (unmounting it gave the screen back the phone's brightness). */}
-        <PlayerOverlay
-          visible={controlsVisible && !settingsOpen}
-          fullscreen={isFullscreenView}
-          title={displayTitle(anime, titleLang) || anime?.title || 'AnimeVerse'}
-          subtitle={`E${currentEp} · ${currentEpisodeObj?.name || `Episode ${currentEp}`}`}
-          isPlaying={isPlaying}
-          isBuffering={isBuffering || resolvingHls}
-          time={currentTime}
-          duration={duration}
-          buffered={bufferedTime}
-          volume={volume}
-          insets={insets}
-          chips={quickChips}
-          hasNext={!!nextEpisodeObj && !nextEpLocked}
-          onToggleControls={toggleControls}
-          onKeepAlive={resetHideTimer}
-          onTogglePlay={handleTogglePlay}
-          onSeek={handleSeek}
-          onSeekBy={handleSeekBy}
-          onVolume={setVolume}
-          onBack={isFullscreenView ? exitFullscreen : () => (router.canGoBack() ? router.back() : router.replace('/'))}
-          onToggleFullscreen={toggleFullscreen}
-          onCycleFit={cycleFitMode}
-          onOpenSettings={openSettings}
-          onNext={handleNextEpisode}
-        />
-
-      </View>
-
-      {/* Under-Player Content Area (Crunchyroll Layout in Portrait). Always
-          mounted: in fullscreen it simply has no room (rebuilding it on every
-          exit from fullscreen was another source of the delay). */}
+  // Under-Player Content Area (Crunchyroll Layout in Portrait). It only redraws
+  // when something in it changes, never because of the player above it.
+  const detailsPanel = useMemo(
+    () => (
         <ScrollView
           style={styles.detailsScroll}
           contentContainerStyle={[styles.detailsContent, { paddingBottom: insets.bottom + 30 }]}
@@ -1640,9 +1631,7 @@ export default function WatchScreen() {
                 <View style={[styles.quickAudioChip, { opacity: 0.85, flexDirection: 'row', alignItems: 'center', gap: 6 }]}>
                   <ActivityIndicator size="small" color={colors.accent} />
                   <Text style={styles.quickAudioChipText}>
-                    {preferredAudioNameRef.current?.includes('hindi')
-                      ? '🇮🇳 Hindi (Connecting...)'
-                      : 'Detecting audio...'}
+                    Connecting…
                   </Text>
                 </View>
               </View>
@@ -1753,7 +1742,7 @@ export default function WatchScreen() {
                 <View style={styles.nextEpThumbWrap}>
                   <Image
                     source={{
-                      uri: nextEpisodeObj.still_path || anime?.backdrop || anime?.banner || anime?.image || undefined,
+                      uri: upNextPicture,
                     }}
                     style={StyleSheet.absoluteFill}
                     contentFit="cover"
@@ -1801,6 +1790,169 @@ export default function WatchScreen() {
             <Icon name="right" size={14} color="rgba(255,255,255,0.4)" />
           </PressableScale>
         </ScrollView>
+    ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      insets.bottom, anime, titleLang, currentEp, currentEpisodeObj, openSettings, hasInBandAlternateAudio, resolvingHls, mountedStream, availableAudioTracks,
+      isHiAnimeStream, currentAudioTrackId, getAudioTrackLabel, handleSelectAudio, handleToggleLike, liked, likeCount, handleToggleDislike, disliked, dislikeCount,
+      nextEpisodeObj, epData, currentSeason, handleNextEpisode, nextEpLocked, upNextPicture, id,
+    ],
+  );
+
+  return (
+    <View
+      style={styles.container}
+      onLayout={onRootLayout}
+    >
+      <StatusBar style="light" />
+      {/* Video player. Its size is worked out natively, in the same frame the
+          screen turns, with no JavaScript in between: full width at 16:9, but
+          never taller than the screen. In portrait that's the usual player
+          under the status bar; in landscape it's capped at the screen's height,
+          so it fills the screen and the details below get no room at all.
+          (Switching sizes from JavaScript only after the turn is what left a
+          second of wrong layout every time.) */}
+      {/* The gap under the status bar, also sized natively: in portrait it's
+          the status bar's height; in landscape the player needs the whole
+          height, so this gives way and shrinks to nothing, in the same frame. */}
+      <View style={[styles.statusGap, { height: topInset }]} />
+      <View
+        style={[styles.playerContainer, styles.playerFrame]}
+        onLayout={(e) => {
+          progressBarWidthRef.current = e.nativeEvent.layout.width;
+        }}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+      >
+        {mountedStream?.streamUrl ? (
+            <NativeHlsPlayer
+              ref={nativeVideoRef}
+              uri={mountedStream.rawMasterUrl || toFullUrl(mountedStream.streamUrl)}
+              referer={mountedStream.referer}
+              paused={!isPlaying || resolvingHls}
+              playbackRate={playbackSpeed}
+              volume={volume}
+              fitMode={fitMode}
+              selectedQualityHeight={selectedQualityHeight}
+              selectedAudioTrackId={nativeAudioTrackId}
+              preferredAudioLanguage={preferredAudioLang}
+              selectedTextTrackId={nativeTextTrackId}
+              subtitlesEnabled={subtitlesEnabled}
+              subtitles={nativeSubtitles}
+              onLoad={onNativePlayerLoad}
+              onProgress={onNativePlayerProgress}
+              onBuffer={setIsBuffering}
+              onAudioTracks={onNativePlayerAudioTracks}
+              onTextTracks={onNativePlayerTextTracks}
+              onVideoTracks={onNativePlayerVideoTracks}
+              onEnd={() => {
+                if (anime && currentEp > 0) {
+                  lastProgressCompletedRef.current = true;
+                  const total = epData?.episodes?.length || anime.episodes || anime.episodeCount || null;
+                  setProgress(anime, currentEp, total, { completed: true });
+                }
+                if (autoplay) handleNextEpisode();
+              }}
+              onError={onNativePlayerError}
+            />
+          ) : null}
+
+        {/* Not out yet: a lock and the date instead of a player. */}
+        {currentEpLocked ? (
+          <View style={[StyleSheet.absoluteFill, styles.playerPlaceholder]}>
+            <Icon name="lock" size={30} color={colors.accent} />
+            <Text style={styles.placeholderError}>Episode {currentEp} is coming soon</Text>
+            <Text style={[styles.placeholderError, { opacity: 0.7, marginTop: 2 }]}>{airDateLabel(currentEpisodeObj?.airingAt)}</Text>
+          </View>
+        ) : null}
+
+        {/* Loading */}
+        {resolvingHls && !currentEpLocked && (
+          <View style={[StyleSheet.absoluteFill, styles.playerPlaceholder]} pointerEvents="none" />
+        )}
+
+        {/* Couldn't load: say so, with a retry */}
+        {!resolvingHls && shownError && !currentEpLocked && (
+          <View style={[StyleSheet.absoluteFill, styles.playerPlaceholder]}>
+            <Icon name="info" size={32} color={colors.accent} />
+            <Text style={styles.placeholderError}>{shownError}</Text>
+            <PressableScale
+              style={styles.switchServerBtn}
+              onPress={() => {
+                mountedStreamEpisodeKeyRef.current = null;
+                backupTriedRef.current = {};
+                playerRetryCountRef.current = {};
+                setHlsError(null);
+                if (detailQ.isError) detailQ.refetch();
+                setRetryNonce((n) => n + 1);
+              }}
+            >
+              <Text style={styles.switchServerText}>Try again</Text>
+            </PressableScale>
+          </View>
+        )}
+
+        {/* Dynamic Zoom / Fit Toast Badge (flashes in center of player) */}
+        {badgeText && (
+          <View style={styles.badgeToast} pointerEvents="none">
+            <Text style={styles.badgeToastText}>{badgeText}</Text>
+          </View>
+        )}
+
+        {/* Crunchyroll Opening Content Advisory Badge (Top-left inside player for first 6 seconds) */}
+        {showAdvisory && !controlsVisible && !settingsOpen && (
+          <View style={styles.openingAdvisoryWrap} pointerEvents="none">
+            <View style={styles.ageBadgeSmall}>
+              <Text style={styles.ageBadgeSmallText}>{anime?.contentRating || 'U/A 16+'}</Text>
+            </View>
+            <Text style={styles.openingAdvisoryText} numberOfLines={2}>
+              Sexualized Imagery, Smoking, Profanity, Suggestive Dialogue, Violence
+            </Text>
+          </View>
+        )}
+
+        {/* Controls and gestures (tap, double-tap, brightness / volume drag, seek bar). */}
+        {/* Stays mounted while settings are open: it holds the brightness set by
+            dragging (unmounting it gave the screen back the phone's brightness). */}
+        <PlayerOverlay
+          visible={(controlsVisible && !settingsOpen) || !!shownError || currentEpLocked}
+          locked={settingsOpen}
+          failed={!!shownError || currentEpLocked}
+          fullscreen={isFullscreenView}
+          title={displayTitle(anime, titleLang) || anime?.title || 'AnimeVerse'}
+          subtitle={`E${currentEp} · ${currentEpisodeObj?.name || `Episode ${currentEp}`}`}
+          isPlaying={isPlaying}
+          isBuffering={isBuffering || resolvingHls}
+          time={playbackTime}
+          duration={duration}
+          buffered={playbackBuffered}
+          volume={volume}
+          insets={insets}
+          chips={quickChips}
+          menus={settingsSections}
+          hasNext={!!nextEpisodeObj && !nextEpLocked}
+          onControlsShown={resetHideTimer}
+          onControlsHidden={onControlsHidden}
+          onHoldControls={holdControls}
+          onKeepAlive={resetHideTimer}
+          onTogglePlay={handleTogglePlay}
+          onSeek={handleSeek}
+          onSeekBy={handleSeekBy}
+          onVolume={setVolume}
+          onBack={isFullscreenView ? exitFullscreen : () => (router.canGoBack() ? router.back() : router.replace('/'))}
+          onToggleFullscreen={toggleFullscreen}
+          onCycleFit={cycleFitMode}
+          onOpenSettings={openAllSettings}
+          onNext={handleNextEpisode}
+        />
+
+      </View>
+
+      {/* Under-Player Content Area (Crunchyroll Layout in Portrait). Always
+          mounted: in fullscreen it simply has no room (rebuilding it on every
+          exit from fullscreen was another source of the delay). */}
+        {detailsPanel}
 
       <PlayerSettingsSheet
         open={settingsOpen}

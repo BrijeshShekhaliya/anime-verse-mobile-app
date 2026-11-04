@@ -48,10 +48,10 @@ import { isAudioLanguageMatch, hasAudioLanguage } from '@/lib/audioMatch';
 export { isAudioLanguageMatch, hasAudioLanguage };
 
 const BUFFER_OPTIONS = {
-  // Start after a short startup buffer, then keep a larger forward window so
-  // brief mobile-network dips do not immediately stall playback. The byte
-  // budget must be large enough for a minute of high-bitrate 1080p HLS.
-  minBufferForPlayback: 1.5,
+  // Start as soon as a moment of video is ready, then keep a larger forward
+  // window so brief mobile-network dips do not immediately stall playback. The
+  // byte budget must be large enough for a minute of high-bitrate 1080p HLS.
+  minBufferForPlayback: 0.8,
   preferredForwardBufferDuration: 30,
   maxBufferBytes: 128 * 1024 * 1024,
   prioritizeTimeOverSizeThreshold: true,
@@ -169,6 +169,9 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
   const player = useVideoPlayer(null, (instance) => {
     instance.timeUpdateEventInterval = 0.4;
     instance.bufferOptions = BUFFER_OPTIONS;
+    // Land on the nearest keyframe: skipping shows the new picture at once
+    // instead of decoding up to the exact frame.
+    instance.seekTolerance = { toleranceBefore: 1, toleranceAfter: 1 };
     instance.keepScreenOnWhilePlaying = true;
     instance.staysActiveInBackground = false;
   });
@@ -184,25 +187,52 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
     useCaching: true,
   } : null;
 
+  // The screen makes new callbacks whenever its data refreshes. Loading reads the
+  // latest ones from here, so only a new address ever (re)loads the video: having
+  // them as dependencies restarted the stream at random and downloaded it twice.
+  const latest = useRef({ onBuffer, onError, paused, source });
+  latest.current = { onBuffer, onError, paused, source };
+
+  // A lost signal mid-episode isn't a broken video: pick up from the same moment
+  // (twice at most, then the screen's own recovery takes over).
+  const playedToRef = useRef(0);
+  const retries = useRef({ count: 0, at: 0 });
+  const retryAfterNetworkError = useCallback(() => {
+    const { source: current } = latest.current;
+    if (!current || retries.current.count >= 2 || playedToRef.current <= 0) return false;
+    retries.current = { count: retries.current.count + 1, at: playedToRef.current };
+    const resumeAt = playedToRef.current;
+    latest.current.onBuffer(true);
+    setTimeout(() => {
+      player.replaceAsync(current).then(() => {
+        player.currentTime = resumeAt;
+        if (!latest.current.paused) player.play();
+      }).catch(() => latest.current.onError('HLS playback failed'));
+    }, 1000 * retries.current.count);
+    return true;
+  }, [player]);
+
   // Keep one VideoPlayer instance alive across source, orientation and control changes.
   useEffect(() => {
     if (!source) return;
     let active = true;
     readySourceRef.current = null;
-    onBuffer(true);
+    playedToRef.current = 0;
+    retries.current = { count: 0, at: 0 };
+    latest.current.onBuffer(true);
     setHasEmbeddedSubtitleTracks(false);
     setExternalSubtitleCues([]);
     player.replaceAsync(source).then(() => {
       if (!active) return;
-      if (paused) player.pause();
+      if (latest.current.paused) player.pause();
       else player.play();
     }).catch((error: unknown) => {
       if (!active) return;
-      onBuffer(false);
-      onError(error instanceof Error ? error.message : 'Unable to load the HLS stream');
+      latest.current.onBuffer(false);
+      latest.current.onError(error instanceof Error ? error.message : 'Unable to load the HLS stream');
     });
     return () => { active = false; };
-  }, [player, uri, referer, onBuffer, onError]);
+  }, [player, uri, referer]);
 
   useEffect(() => {
     if (paused) player.pause();
@@ -330,7 +360,9 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
       }),
       player.addListener('timeUpdate', (event) => {
         const time = Math.max(0, event.currentTime || 0);
-        setPlaybackTime(time);
+        playedToRef.current = time;
+        if (retries.current.count > 0 && time > retries.current.at + 10) retries.current = { count: 0, at: 0 };
+        if (hasCuesRef.current) setPlaybackTime(time); // only subtitles on screen need it here
         const playing = player.videoTrack as unknown as { size?: { width?: number; height?: number } } | null;
         onProgress(time, Math.max(0, player.duration || 0), Math.max(0, event.bufferedPosition || 0), playing?.size?.width, playing?.size?.height);
       }),
@@ -345,6 +377,7 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
           }
         }
         if (event.status === 'error') {
+          if (retryAfterNetworkError()) return;
           onBuffer(false);
           const error = event.error as unknown as { message?: string } | undefined;
           onError(error?.message || 'HLS playback failed');
@@ -358,8 +391,10 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
       player.addListener('playToEnd', onEnd),
     ];
     return () => subscriptions.forEach((subscription) => subscription.remove());
-  }, [player, uri, onLoad, onProgress, onBuffer, onError, onEnd, publishTracks, syncAudioTrack]);
+  }, [player, uri, onLoad, onProgress, onBuffer, onError, onEnd, publishTracks, syncAudioTrack, retryAfterNetworkError]);
 
+  const hasCuesRef = useRef(false);
+  hasCuesRef.current = externalSubtitleCues.length > 0;
   const activeSubtitle = externalSubtitleCues.find((cue) => playbackTime >= cue.start && playbackTime <= cue.end);
 
   return (

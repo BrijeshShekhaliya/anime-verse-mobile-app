@@ -11,7 +11,7 @@ import { Icon } from '@/components/Icon';
 import { PressableScale } from '@/components/PressableScale';
 import { Skeleton } from '@/components/Skeleton';
 import { EmptyState, ErrorState } from '@/components/States';
-import { thumbOf, useArt, wantArt } from '@/lib/artwork';
+import { thumbOf, useArt } from '@/lib/artwork';
 import { countdown } from '@/lib/format';
 import { scheduleDateOptions, useScheduleDate } from '@/lib/queries';
 import { dateKey } from '@/lib/scheduleByDate';
@@ -61,13 +61,7 @@ export default function ScheduleScreen() {
   useEffect(() => {
     if (prefetched.current || shown !== TODAY || !q.data) return;
     prefetched.current = true;
-    // Their pictures are looked up too (after today's), so switching day shows them at once.
-    [TODAY - 1, TODAY + 1].forEach((i) =>
-      qc
-        .fetchQuery(scheduleDateOptions(days[i].key, days[i].past))
-        .then((list) => wantArt(list as Anime[]))
-        .catch(() => {})
-    );
+    [TODAY - 1, TODAY + 1].forEach((i) => qc.prefetchQuery(scheduleDateOptions(days[i].key, days[i].past)).catch(() => {}));
   }, [shown, q.data, qc, days]);
 
   // Back on this tab: refresh the day on screen only if it's out of date.
@@ -109,11 +103,6 @@ export default function ScheduleScreen() {
     () => (q.data ? [...q.data].sort((a, b) => (a.nextEpisode?.airingAt || 9e9) - (b.nextEpisode?.airingAt || 9e9)) : null),
     [q.data]
   );
-  // The whole day's pictures are looked up as soon as it loads (in list order),
-  // not one by one as rows scroll into view.
-  useEffect(() => {
-    if (sorted) wantArt(sorted);
-  }, [sorted]);
   const firstUpcoming = useMemo(() => (day.today ? sorted?.findIndex((a) => (a.nextEpisode?.airingAt || 0) > now) ?? -1 : -1), [sorted, now, day.today]);
   const listRef = useRef<FlatList<Anime>>(null);
   useEffect(() => {

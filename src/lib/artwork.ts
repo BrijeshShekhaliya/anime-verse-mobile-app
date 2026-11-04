@@ -11,6 +11,7 @@ import Constants from 'expo-constants';
 import { Image } from 'expo-image';
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import { whenIdle } from './idle';
+import { onMobileData } from './network';
 import type { Anime } from './types';
 
 export type Art = {
@@ -24,15 +25,18 @@ type Entry = Art & { t: number; full: boolean };
 
 const TMDB_KEY: string =
   process.env.EXPO_PUBLIC_TMDB_API_KEY || (Constants.expoConfig?.extra as { tmdbApiKey?: string } | undefined)?.tmdbApiKey || '';
-const TMDB = 'https://api.themoviedb.org/3';
+// TMDB's two API addresses. Some mobile networks block the main one, so the
+// first to answer on this network is used (see tmdbBase).
+const TMDB_HOSTS = ['https://api.themoviedb.org/3', 'https://api.tmdb.org/3'];
 const IMG = 'https://image.tmdb.org/t/p';
 
-const KEY = 'animeverse:art:v2'; // v2: season entries get TMDB season posters
-AsyncStorage.removeItem('animeverse:art:v1').catch(() => {});
-const HIT_TTL = 7 * 24 * 60 * 60 * 1000;
-const MISS_TTL = 24 * 60 * 60 * 1000; // "TMDB has nothing" is re-checked daily
+const KEY = 'animeverse:art:v4'; // v4: titles once saved as "no picture" try the better matching
+AsyncStorage.multiRemove(['animeverse:art:v1', 'animeverse:art:v2', 'animeverse:art:v3']).catch(() => {});
+const HIT_TTL = 30 * 24 * 60 * 60 * 1000;
+const MISS_TTL = 3 * 24 * 60 * 60 * 1000; // "TMDB has nothing" is re-checked every few days
+const HOST_KEY = 'animeverse:tmdb-host';
 const MAX_SAVED = 1500;
-const CONCURRENCY = 10;
+const CONCURRENCY = 6;
 
 const store = new Map<string, Entry>();
 const listeners = new Map<string, Set<() => void>>();
@@ -91,6 +95,7 @@ const isSeasonEntry = (title: string) => /\b(season|part|cour|final)\b|\b(2nd|3r
 type TmdbResult = {
   id: number;
   name?: string;
+  original_name?: string;
   title?: string;
   genre_ids?: number[];
   origin_country?: string[];
@@ -112,20 +117,127 @@ function score(r: TmdbResult, year: number | null, wanted: string) {
   return s + Math.min(2, (r.popularity || 0) / 50);
 }
 
-async function tmdb<T>(path: string): Promise<T> {
+async function fetchWithin(url: string, ms: number, init?: RequestInit) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
+  const timer = setTimeout(() => controller.abort(), ms);
   try {
-    const res = await fetch(`${TMDB}${path}${path.includes('?') ? '&' : '?'}api_key=${TMDB_KEY}`, { signal: controller.signal });
-    if (!res.ok) throw new Error(`TMDB ${res.status}`);
-    return (await res.json()) as T;
+    return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
   }
 }
 
+// ---- Which TMDB addresses work on this network ----
+// Asked once (again after a failure): both API addresses at once, first to
+// answer wins. A network that blocks TMDB is known within seconds, and every
+// picture falls back at once instead of each waiting for its own timeout.
+let basePromise: Promise<string | null> | null = null;
+let savedHostChecked = false;
+function tmdbBase(): Promise<string | null> {
+  if (!basePromise && !savedHostChecked) {
+    // First use this launch: trust the address that worked last time. If it
+    // fails, the request below clears this and the addresses are checked.
+    savedHostChecked = true;
+    basePromise = AsyncStorage.getItem(HOST_KEY)
+      .catch(() => null)
+      .then((saved) => (saved && TMDB_HOSTS.includes(saved) ? saved : ((basePromise = null), tmdbBase())));
+    return basePromise;
+  }
+  if (!basePromise) {
+    const probe = () =>
+      Promise.any(
+        TMDB_HOSTS.map(async (host) => {
+          const res = await fetchWithin(`${host}/configuration?api_key=${TMDB_KEY}`, 5000);
+          if (!res.ok) throw new Error(`TMDB ${res.status}`);
+          return host;
+        })
+      ).catch(() => null);
+    basePromise = (async () => {
+      let base = await probe();
+      if (!base) {
+        // No answer yet: pictures waiting on screen show AniList's for now
+        // (and change as soon as TMDB's arrive). One more try before pausing.
+        fallingBack = true;
+        modeChanged();
+        await new Promise((r) => setTimeout(r, 1000));
+        base = await probe();
+      }
+      if (!base) {
+        basePromise = null; // ask again next time
+        goOffline();
+      } else {
+        AsyncStorage.setItem(HOST_KEY, base).catch(() => {});
+      }
+      return base;
+    })();
+  }
+  return basePromise;
+}
+
+// The picture server can be blocked on its own. Then saved TMDB addresses
+// would just stay blank, so screens use AniList's pictures until it's back.
+let imagesBlocked = false;
+let imagesChecked = false;
+function checkImages() {
+  if (imagesChecked) return;
+  imagesChecked = true;
+  // Any answer (even "not found") means the server can be reached.
+  fetchWithin(`${IMG}/w45/jQFsHzYKQDxvIpX42PqszYUmpn5.jpg`, 5000, { method: 'HEAD' })
+    .then(() => setImagesBlocked(false))
+    .catch(() => {
+      setImagesBlocked(true);
+      setTimeout(() => {
+        imagesChecked = false;
+        checkImages();
+      }, 60 * 1000);
+    });
+}
+function setImagesBlocked(blocked: boolean) {
+  if (blocked === imagesBlocked) return;
+  imagesBlocked = blocked;
+  modeChanged();
+}
+export const tmdbImagesBlocked = () => imagesBlocked;
+// Episode pictures show small: w300 is sharp enough there, at about half the
+// data of w500 (saved answers may still hold w500 addresses).
+export const stillFor = (still: string | null | undefined) => still?.replace('/w500/', '/w300/') ?? null;
+// Title logos: a smaller file on mobile data.
+export const logoFor = (logo: string | null | undefined) => (logo && onMobileData() ? logo.replace('/w500/', '/w300/') : logo ?? null);
+
+let busyUntil = 0;
+async function tmdb<T>(path: string): Promise<T> {
+  if (Date.now() < offlineUntil) throw new Error('TMDB unreachable');
+  const busy = busyUntil - Date.now();
+  if (busy > 0) await new Promise((r) => setTimeout(r, busy));
+  const base = await tmdbBase();
+  if (!base) throw new Error('TMDB unreachable');
+  let res: Response;
+  try {
+    res = await fetchWithin(`${base}${path}${path.includes('?') ? '&' : '?'}api_key=${TMDB_KEY}`, 10000);
+  } catch (e) {
+    basePromise = null; // no answer: the network may have changed, check again next time
+    throw e;
+  }
+  // A busy answer (429, or a server error) isn't a network problem: the lookup
+  // just tries again in a moment.
+  if (res.status === 429) {
+    const seconds = Number(res.headers.get('retry-after')) || 2;
+    busyUntil = Date.now() + seconds * 1000 + Math.random() * 1000;
+  }
+  if (!res.ok) throw new Error(`TMDB ${res.status}`);
+  return (await res.json()) as T;
+}
+
 // The TMDB title an anime maps to, or null when TMDB has none. Throws when TMDB
 // can't be reached, so an outage is never saved as "no picture".
+// Shorter forms of a title: without a trailing sequel number, and the part before
+// a ":" or " - " ("Re:ZERO" stays whole: "Re" is too short to mean anything).
+function mainTitles(title: string): string[] {
+  const noNumber = title.replace(/\s+\d{1,2}$/, '');
+  const beforeBreak = title.split(/\s*[:：]\s*|\s+-\s+/)[0].trim();
+  return [noNumber, beforeBreak].filter((t) => t !== title && t.length >= 4);
+}
+
 async function findMatch(a: Anime): Promise<{ kind: 'tv' | 'movie'; item: TmdbResult } | null> {
   const isMovie = a.type === 'Movie';
   const kind = isMovie ? 'movie' : 'tv';
@@ -143,7 +255,24 @@ async function findMatch(a: Anime): Promise<{ kind: 'tv' | 'movie'; item: TmdbRe
       failed += 1;
     }
   }
-  if (queries.length && failed === queries.length) throw new Error('TMDB unreachable');
+  if (failed) throw new Error('TMDB unreachable'); // not a real "no picture": don't save it
+  // Nothing under the full name: an arc, part or numbered sequel ("Jujutsu
+  // Kaisen: Shimetsu Kaiyuu", "Kono Subarashii... 4") is usually listed on TMDB
+  // under its main show. Movies are left out: their own title is the only match.
+  if (isMovie) return null;
+  const shorter = [...new Set(queries.flatMap(mainTitles))].filter((q) => !queries.includes(q));
+  for (const q of shorter) {
+    const res = await tmdb<{ results?: TmdbResult[] }>(`/search/${kind}?query=${encodeURIComponent(q)}`);
+    const wanted = q.toLowerCase();
+    const best = (res.results || [])
+      // A short name must really be how the show's name begins ("MASHLE"), so
+      // it can't land on an unrelated show that merely contains the word.
+      .filter((r) => q.length >= 12 || [r.name, r.original_name].some((n) => (n || '').toLowerCase().startsWith(wanted)))
+      .map((r) => ({ r, s: score(r, null, q) }))
+      .filter((x) => x.s >= 6)
+      .sort((x, y) => y.s - x.s)[0];
+    if (best) return { kind, item: best.r };
+  }
   return null;
 }
 
@@ -174,7 +303,7 @@ function detailsFor(kind: 'tv' | 'movie', id: number) {
   const key = `${kind}:${id}`;
   let p = details.get(key);
   if (!p) {
-    p = tmdb<TmdbDetails>(`/${kind}/${id}?append_to_response=images&include_image_language=en,ja,null`);
+    p = tmdb<TmdbDetails>(`/${kind}/${id}?append_to_response=images&include_image_language=en`);
     details.set(key, p);
     p.then(
       () => setTimeout(() => details.delete(key), 10 * 60 * 1000), // keep briefly; results are saved elsewhere
@@ -213,7 +342,7 @@ export async function fetchTmdbSeason(showId: number, season: number): Promise<T
     number: e.episode_number,
     // TMDB's placeholder names ("Episode 4") aren't real names.
     name: e.name && !/^episode\s+\d+$/i.test(e.name.trim()) ? e.name.trim() : null,
-    still: e.still_path ? `${IMG}/w500${e.still_path}` : null,
+    still: e.still_path ? `${IMG}/w300${e.still_path}` : null,
   }));
 }
 
@@ -271,23 +400,53 @@ async function lookup(a: Anime, full: boolean): Promise<Art> {
 }
 
 // ---- Queue: a few lookups at a time, banners (on screen now) first ----
-type Job = { a: Anime; full: boolean };
+type Job = { a: Anime; full: boolean; tries?: number };
 const queue: Job[] = [];
 const queued = new Set<string>();
 let running = 0;
 let offlineUntil = 0; // TMDB unreachable: stop trying for a while
-let failures = 0;
+let fallingBack = false; // TMDB isn't answering: waiting pictures show AniList's meanwhile
+const OFFLINE_PAUSE = 30 * 1000;
+const RETRY_LATER = 60 * 1000;
+const retryAt = new Map<string, number>(); // titles whose lookups kept failing: next try
+let retryTick: ReturnType<typeof setTimeout> | null = null;
+
+// Network state changes re-render every picture on screen (a store update
+// alone wouldn't: the title's own entry hasn't changed).
+const modeListeners = new Set<() => void>();
+let mode = 0;
+function modeChanged() {
+  mode += 1;
+  modeListeners.forEach((l) => l());
+}
+const subscribeMode = (cb: () => void) => {
+  modeListeners.add(cb);
+  return () => {
+    modeListeners.delete(cb);
+  };
+};
+function goOffline() {
+  if (Date.now() < offlineUntil) return;
+  offlineUntil = Date.now() + OFFLINE_PAUSE;
+  fallingBack = true;
+  queue.length = 0;
+  queued.clear();
+  modeChanged();
+  // When the pause ends, pictures on screen ask again (they keep AniList's
+  // meanwhile, and change to TMDB's only if it answers).
+  setTimeout(modeChanged, OFFLINE_PAUSE + 50);
+}
 
 export const artworkOffline = () => !TMDB_KEY || Date.now() < offlineUntil;
 
 export function wantArt(items: (Anime | null | undefined)[], full = false) {
+  checkImages();
   if (artworkOffline()) return;
-  for (const a of items) {
+  for (const a of [...items].reverse()) {
     const k = `${a?.id}:${full}`;
-    if (!a?.id || !a.title || queued.has(k) || isFresh(store.get(a.id), full)) continue;
+    if (!a?.id || !a.title || queued.has(k) || isFresh(store.get(a.id), full) || (retryAt.get(a.id) ?? 0) > Date.now()) continue;
     queued.add(k);
-    if (full) queue.unshift({ a, full });
-    else queue.push({ a, full });
+    queue.unshift({ a, full });
   }
   pump();
 }
@@ -295,6 +454,10 @@ export function wantArt(items: (Anime | null | undefined)[], full = false) {
 function pump() {
   while (running < CONCURRENCY && queue.length) {
     const job = queue.shift()!;
+    if (!listeners.has(job.a.id) && !anyListeners.size) {
+      queued.delete(`${job.a.id}:${job.full}`); // scrolled away: not needed any more
+      continue;
+    }
     running += 1;
     run(job).finally(() => {
       running -= 1;
@@ -304,7 +467,7 @@ function pump() {
   }
 }
 
-async function run({ a, full }: Job) {
+async function run({ a, full, tries = 0 }: Job) {
   await ready;
   if (isFresh(store.get(a.id), full)) return;
   try {
@@ -313,21 +476,28 @@ async function run({ a, full }: Job) {
     // A poster-only answer never throws away a banner we already have.
     store.set(a.id, { ...(prev?.full && !full ? prev : {}), ...art, t: Date.now(), full: full || !!prev?.full });
     save();
-    failures = 0;
-    // Download the pictures now, so they show the moment they're needed.
-    const urls = [art.poster2x || art.poster, ...(full ? [art.backdrop, art.logo] : [])].filter(Boolean) as string[];
-    if (urls.length) Image.prefetch(urls, 'memory-disk').catch(() => {});
+    retryAt.delete(a.id);
+    fallingBack = false; // TMDB is answering again
   } catch {
-    // One failed lookup is retried; several in a row means TMDB is unreachable,
-    // and every waiting picture falls back to AniList's instead of staying blank.
-    failures += 1;
-    if (failures >= 3) {
-      offlineUntil = Date.now() + 60 * 1000;
-      queue.length = 0;
-      queued.clear();
-      [...listeners.keys()].forEach(notify);
-    } else {
-      setTimeout(() => wantArt([a], full), 1500);
+    // A failed lookup tries again by itself, a little later each time. If it
+    // keeps failing, only this title shows AniList's picture for now.
+    if (tries < 2) {
+      setTimeout(() => {
+        const k = `${a.id}:${full}`;
+        if (queued.has(k) || isFresh(store.get(a.id), full)) return;
+        queued.add(k);
+        queue.push({ a, full, tries: tries + 1 });
+        pump();
+      }, 1500 * 2 ** tries);
+    } else if (Date.now() >= offlineUntil) {
+      retryAt.set(a.id, Date.now() + RETRY_LATER);
+      modeChanged();
+      if (!retryTick) {
+        retryTick = setTimeout(() => {
+          retryTick = null;
+          modeChanged(); // pictures on screen ask again
+        }, RETRY_LATER + 50);
+      }
     }
   }
   notify(a.id);
@@ -352,15 +522,17 @@ export function useArt(anime: Anime | null | undefined, full = false): { art: Ar
     [id]
   );
   const entry = useSyncExternalStore(subscribe, () => (id ? store.get(id) : undefined), () => undefined);
+  const networkMode = useSyncExternalStore(subscribeMode, () => mode, () => mode);
 
   useEffect(() => {
     if (anime) wantArt([anime], full);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, full]);
+  }, [id, full, networkMode]);
 
   // Wait for TMDB's answer, so a picture never flashes its AniList version first.
   const known = !!entry && (!full || entry.full);
-  return { art: entry, settled: known || artworkOffline(), known };
+  // TMDB pictures that can't be downloaded here count as none (AniList's show).
+  return { art: imagesBlocked ? undefined : entry, settled: known || fallingBack || imagesBlocked || artworkOffline() || (!!id && retryAt.has(id)), known };
 }
 
 // Posters for a whole list (undefined while a title's TMDB answer is pending).
@@ -372,10 +544,11 @@ const subscribeAny = (cb: () => void) => {
 };
 export function usePosters(items: Anime[], hiDpi = true): (string | undefined)[] {
   useSyncExternalStore(subscribeAny, () => version, () => version);
+  useSyncExternalStore(subscribeMode, () => mode, () => mode);
   useEffect(() => wantArt(items), [items]);
   return items.map((a) => {
     const e = store.get(a.id);
-    return e || artworkOffline() ? posterOf(a, e, hiDpi) : undefined;
+    return e || fallingBack || imagesBlocked || artworkOffline() || retryAt.has(a.id) ? posterOf(a, imagesBlocked ? undefined : e, hiDpi) : undefined;
   });
 }
 
@@ -396,7 +569,7 @@ export function whenPostersReady(items: Anime[], ms: number): Promise<void> {
     const check = () => {
       if (!items.every((a) => store.has(a.id)) && !artworkOffline()) return;
       anyListeners.delete(check);
-      const urls = items.map((a) => posterOf(a, store.get(a.id), true)).filter(Boolean) as string[];
+      const urls = items.map((a) => posterOf(a, imagesBlocked ? undefined : store.get(a.id), true)).filter(Boolean) as string[];
       Image.prefetch(urls, 'memory-disk').catch(() => {}).finally(finish);
     };
     anyListeners.add(check);
@@ -414,7 +587,10 @@ export const thumbOf = (a: Anime, art: Art | undefined) => {
   const uri = posterOf(a, art, false);
   return uri?.startsWith(IMG) ? uri.replace('/w342/', '/w185/') : uri;
 };
-export const backdropOf = (a: Anime, art: Art | undefined) => art?.backdrop || a.backdrop || a.banner || a.image || undefined;
+export const backdropOf = (a: Anime, art: Art | undefined, small = false) => {
+  const tmdbBackdrop = small || onMobileData() ? art?.backdrop?.replace('/w1280/', '/w780/') : art?.backdrop;
+  return tmdbBackdrop || a.backdrop || a.banner || a.image || undefined;
+};
 
 // Settings → Clear cached data.
 export function clearArtwork() {

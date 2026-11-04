@@ -38,6 +38,8 @@ export function useDetail(id: string) {
     queryFn: () => fetchDetail(id),
     // The card the user tapped is shown while the full page loads.
     placeholderData: () => api.getCachedDetail(id) ?? undefined,
+    retry: 3, // a brief network or rate-limit hiccup shouldn't leave a page empty
+    retryDelay: (n) => 800 * 2 ** n,
     staleTime: (q) => ((q.state.data as AnimeDetail | undefined)?.airing ? HOUR : 7 * DAY),
     enabled: !!id,
   });
