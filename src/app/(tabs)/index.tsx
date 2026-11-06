@@ -105,6 +105,11 @@ export default function HomeScreen() {
                     data={continueWatching}
                     keyExtractor={(p) => p.anime.id}
                     renderItem={({ item, index }) => <ContinueCard item={item} index={index} />}
+                    // Off: on Android it can leave cards that ignore taps until the row is scrolled.
+                    removeClippedSubviews={false}
+                    initialNumToRender={3}
+                    maxToRenderPerBatch={2}
+                    windowSize={3}
                     contentContainerStyle={{ paddingHorizontal: 16, gap: 12 }}
                     showsHorizontalScrollIndicator={false}
                     // Glides card to card instead of stopping half-way.

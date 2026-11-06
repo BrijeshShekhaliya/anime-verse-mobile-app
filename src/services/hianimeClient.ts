@@ -24,7 +24,10 @@ const OBFUSCATION_KEY = 'otaku-embed-v1';
 const _searchCache = new Map<string, { ts: number; data: Array<{ id: string; title: string; jname?: string | null }> }>();
 const _episodesCache = new Map<string, { ts: number; data: Array<{ epId: string; number: number }> }>();
 const _streamCache = new Map<string, { ts: number; data: StreamData }>();
+const _serversCache = new Map<string, { ts: number; html: string }>();
 const CACHE_TTL = 15 * 60 * 1000; // 15 mins
+// A forced lookup wants fresh links, but not the same list again seconds later.
+const SERVERS_JUST_READ_MS = 5000;
 
 async function fetchWithTimeout(url: string, referer?: string, timeoutMs = 9000): Promise<string> {
   const ctrl = new AbortController();
@@ -135,11 +138,15 @@ export function parseHlsAudioTracks(manifestText: string, manifestUrl: string): 
 }
 
 // ── AniList Sequel Resolution ───────────────────────────────────────────────
+const _seasonTitles = new Map<string, { title: string; romaji?: string | null }>();
+
 export async function anilistSeasonTitle(
   baseTitle: string,
   seasonNumber: number,
 ): Promise<{ title: string; romaji?: string | null }> {
   if (seasonNumber <= 1) return { title: baseTitle, romaji: null };
+  const known = _seasonTitles.get(`${baseTitle}:${seasonNumber}`);
+  if (known) return known;
   try {
     const query = `query($search:String){Media(search:$search,type:ANIME,sort:SEARCH_MATCH){title{english romaji}episodes relations{edges{relationType node{type format title{english romaji}episodes startDate{year}seasonYear}}}}}`;
     const ctrl = new AbortController();
@@ -170,12 +177,11 @@ export async function anilistSeasonTitle(
       });
 
     const target = sequels[seasonNumber - 2];
-    if (!target) return { title: baseTitle, romaji: media.title?.romaji || null };
-
-    return {
-      title: target.node.title?.english || target.node.title?.romaji || baseTitle,
-      romaji: target.node.title?.romaji || null,
-    };
+    const found = target
+      ? { title: target.node.title?.english || target.node.title?.romaji || baseTitle, romaji: target.node.title?.romaji || null }
+      : { title: baseTitle, romaji: media.title?.romaji || null };
+    _seasonTitles.set(`${baseTitle}:${seasonNumber}`, found);
+    return found;
   } catch {
     return { title: baseTitle, romaji: null };
   }
@@ -272,12 +278,12 @@ async function resolveHiAnimeOnce(
 
   // 1. Resolve franchise sequel title for S2+
   const anilistInfo = await anilistSeasonTitle(params.title, params.season);
-  const searchCandidates = [
+  const searchCandidates = [...new Set([
     anilistInfo.title,
     anilistInfo.romaji,
     params.title,
     params.romaji,
-  ].filter(Boolean) as string[];
+  ].filter(Boolean) as string[])];
 
   // 2. Find show matching candidate title (parallel search across candidates)
   let show: { id: string; title: string; jname?: string | null } | null = null;
@@ -312,12 +318,27 @@ async function resolveHiAnimeOnce(
   }
 
   // 4. Fetch available stream servers for this episode
-  const servBody = await fetchWithTimeout(
-    `${BASE_URL}/api/theme/episode/servers?episodeId=${episode.epId}`,
-    `${BASE_URL}/`,
-    8000,
-  );
-  const servHtml = unwrapApiHtml(servBody);
+  // No dub listed, so sub is asked for next? That answer is already here.
+  const knownServers = _serversCache.get(episode.epId);
+  let servHtml: string;
+  if (knownServers && Date.now() - knownServers.ts < (forceRefresh ? SERVERS_JUST_READ_MS : CACHE_TTL)) {
+    servHtml = knownServers.html;
+  } else {
+    const servBody = await fetchWithTimeout(
+      `${BASE_URL}/api/theme/episode/servers?episodeId=${episode.epId}`,
+      `${BASE_URL}/`,
+      8000,
+    );
+    servHtml = unwrapApiHtml(servBody);
+    _serversCache.set(episode.epId, { ts: Date.now(), html: servHtml });
+  }
+
+  // A "dub" entry pointing at the same stream as a sub entry isn't a dub.
+  const listed = servHtml.split('server-item').slice(1).map((chunk) => ({ type: getAttr(chunk, 'data-type'), hash: getAttr(chunk, 'data-hash') }));
+  const subHashes = new Set(listed.filter((x) => x.type === 'sub').map((x) => x.hash));
+  const hasRealDub = listed.some((x) => x.type === 'dub' && x.hash && !subHashes.has(x.hash));
+  const modes = (['sub', 'dub'] as const).filter((m) => (m === 'dub' ? hasRealDub : listed.some((x) => x.type === 'sub')));
+  if (params.mode === 'dub' && !hasRealDub) throw new Error('No compatible stream server found for mode: dub');
 
   let targetHash: string | null = null;
   // Prefer ZokoAnime server first
@@ -402,6 +423,7 @@ async function resolveHiAnimeOnce(
     referer,
     subtitles,
     audioTracks,
+    modes,
   };
 
   _streamCache.set(cacheKey, { ts: Date.now(), data: result });

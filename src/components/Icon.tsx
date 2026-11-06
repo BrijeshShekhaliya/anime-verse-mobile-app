@@ -7,7 +7,7 @@ export type IconName =
   | 'bookmark' | 'bookmarkOn' | 'clock' | 'x' | 'check' | 'mic' | 'cc' | 'ext' | 'shield' | 'plus'
   | 'minus' | 'trash' | 'spark' | 'history' | 'list' | 'share'
   | 'settings' | 'fullscreen' | 'exitFullscreen' | 'pause' | 'skip' | 'cast' | 'thumbUp' | 'thumbDown' | 'download' | 'more'
-  | 'rewind10' | 'forward10' | 'fastForward' | 'aspectRatio' | 'lock';
+  | 'rewind10' | 'forward10' | 'fastForward' | 'aspectRatio' | 'lock' | 'micLine' | 'ccLine' | 'gaugeLine' | 'autoLine';
 
 type Props = { name: IconName; size?: number; color?: string; strokeWidth?: number };
 
@@ -190,7 +190,7 @@ export function Icon({ name, size = 22, color = '#fff', strokeWidth = 2 }: Props
       body = (
         <>
           {/* Crunchyroll diagonal expand arrows */}
-          <Path {...s} strokeWidth={2.4} d="M15 3h6v6M21 3l-7 7M9 21H3v-6M3 21l7-7" />
+          <Path {...s} d="M15 3h6v6M21 3l-7 7M9 21H3v-6M3 21l7-7" />
         </>
       );
       break;
@@ -198,7 +198,7 @@ export function Icon({ name, size = 22, color = '#fff', strokeWidth = 2 }: Props
       body = (
         <>
           {/* Crunchyroll diagonal contract arrows */}
-          <Path {...s} strokeWidth={2.4} d="M21 9h-6V3M15 9l6-6M3 15h6v6M9 15L3 21" />
+          <Path {...s} d="M21 9h-6V3M15 9l6-6M3 15h6v6M9 15L3 21" />
         </>
       );
       break;
@@ -282,6 +282,29 @@ export function Icon({ name, size = 22, color = '#fff', strokeWidth = 2 }: Props
           <Path {...s} d="M5 21h14" />
         </>
       );
+      break;
+    // Thin and plain, for the player: no filled layer behind them.
+    case 'micLine':
+      body = (
+        <>
+          <Rect {...s} x="9" y="2.5" width="6" height="12" rx="3" />
+          <Path {...s} d="M5 11a7 7 0 0014 0M12 18v3.5M8.5 21.5h7" />
+        </>
+      );
+      break;
+    case 'ccLine':
+      body = (
+        <>
+          <Rect {...s} x="2.5" y="5" width="19" height="14" rx="2.5" />
+          <Path {...s} d="M10.5 10a2.5 2.5 0 100 4M17 10a2.5 2.5 0 100 4" />
+        </>
+      );
+      break;
+    case 'gaugeLine':
+      body = <Path {...s} d="M12 14l4-4M3.34 19a10 10 0 1117.32 0" />;
+      break;
+    case 'autoLine':
+      body = <Path {...s} d="M5 4.5l10 7.5-10 7.5zM19 5v14" />;
       break;
     case 'more':
       body = (

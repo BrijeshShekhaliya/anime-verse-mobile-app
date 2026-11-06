@@ -3,7 +3,6 @@ import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams } from 'expo-router';
 import { nav } from '@/lib/nav';
-import { airDateLabel } from '@/lib/airDate';
 import * as WebBrowser from 'expo-web-browser';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Linking, Platform, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
@@ -27,6 +26,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BottomSheet } from '@/components/BottomSheet';
+import { EpisodeCard } from '@/components/EpisodeCard';
 import { Icon, type IconName } from '@/components/Icon';
 import { PosterCard } from '@/components/PosterCard';
 import { PressableScale } from '@/components/PressableScale';
@@ -38,7 +38,6 @@ import { fmtNum } from '@/lib/format';
 import { useLibrary } from '@/lib/library';
 import { useDetail, useEpisodeGuide, useExtras, useSeasons, useTmdbShow, useTmdbStills } from '@/lib/queries';
 import { anilistIdOf, type GuideEpisode } from '@/lib/episodeGuide';
-import { api } from '@/lib/api';
 import { displayTitle, useSettings } from '@/lib/settings';
 import { colors, fonts, radius, springs } from '@/lib/theme';
 import type { AnimeDetail } from '@/lib/types';
@@ -520,29 +519,21 @@ function ActionIcons({ anime, name }: { anime: AnimeDetail; name: string }) {
 function BottomBar({ anime, currentSeason = 1, bottom }: { anime: AnimeDetail; currentSeason?: number; bottom: number }) {
   const { inList, toggleList, progress } = useLibrary();
   const saved = inList(anime.id);
-  const userProgress = progress[anime.id];
+  const savedProgress = progress[anime.id];
+  const userProgress = savedProgress && (savedProgress.season ?? 1) === currentSeason ? savedProgress : undefined;
   const watchedEp = userProgress?.episode || 0;
   const isCompleted = Boolean(userProgress?.completed);
   // If the episode is completed, prompt next episode; if paused/stopped halfway, continue THIS episode!
   const targetEp = watchedEp > 0 ? (isCompleted ? watchedEp + 1 : watchedEp) : 1;
   const isDoneAll = Boolean(anime.episodes && watchedEp >= anime.episodes && isCompleted);
-
-  // Staying on the page for a moment usually means play is next: find that
-  // episode's stream now (two small requests), so pressing play doesn't wait for it.
-  const { audioLang } = useSettings();
-  const prewarmId = currentSeason === 1 ? anime.anilistId : null;
-  useEffect(() => {
-    if (!prewarmId) return;
-    const t = setTimeout(() => api.prewarmStream(prewarmId, targetEp, audioLang === 'japanese' ? 'sub' : 'dub'), 1200);
-    return () => clearTimeout(t);
-  }, [prewarmId, targetEp, audioLang]);
+  const openEp = isDoneAll ? 1 : targetEp;
 
   const pop = useSharedValue(1);
   const popStyle = useAnimatedStyle(() => ({ transform: [{ scale: pop.value }] }));
   return (
     <View style={[styles.bottomBar, { paddingBottom: bottom + 10 }]} pointerEvents="box-none">
       <LinearGradient colors={['transparent', 'rgba(0,0,0,0.92)', '#000']} locations={[0, 0.45, 1]} style={StyleSheet.absoluteFill} pointerEvents="none" />
-      <PressableScale haptic style={styles.primaryBtn} scaleTo={0.97} onPress={() => nav.push(`/watch/${anime.id}?season=${currentSeason}&ep=${targetEp}` as any)}>
+      <PressableScale haptic style={styles.primaryBtn} scaleTo={0.97} onPress={() => nav.push(`/watch/${anime.id}?season=${currentSeason}&ep=${openEp}` as any)}>
         <Icon name="play" size={20} color="#000" />
         <Text style={styles.primaryText} numberOfLines={1}>
           {watchedEp > 0 ? (isDoneAll ? 'Replay E1' : `Continue E${targetEp}`) : 'Start Watching E1'}
@@ -657,48 +648,18 @@ const EpisodeRow = memo(function EpisodeRow({
   const thumb = !near ? undefined : tmdbStill || (tmdbDone ? ep.thumb || fallback : undefined);
   // AniList's name, or TMDB's when AniList only has "Episode 4".
   const name = ep.title === `Episode ${ep.number}` && tmdb?.name ? tmdb.name : ep.title;
-  const date = ep.airingAt ? new Date(ep.airingAt * 1000) : null;
-  // Not out yet: shown with a lock and its date, and can't be opened.
-  const upcoming = !!ep.upcoming || (!!date && date.getTime() > Date.now());
   return (
     <Animated.View entering={reduce || index > 7 ? undefined : FadeIn.duration(160)} onLayout={(e) => (rowY.value = e.nativeEvent.layout.y)}>
-      <PressableScale
+      <EpisodeCard
+        number={ep.number}
+        name={name}
+        thumb={thumb}
+        runtime={runtime}
+        airingAt={ep.airingAt}
+        upcoming={ep.upcoming}
+        thumbW={thumbW}
         onPress={() => nav.push(`/watch/${watchId}?season=${seasonNumber}&ep=${ep.number}` as any)}
-        disabled={upcoming}
-        style={[styles.epRow, upcoming && { opacity: 0.75 }]}
-        scaleTo={0.98}
-        accessibilityLabel={upcoming ? `Episode ${ep.number}, coming soon, ${airDateLabel(ep.airingAt)}` : `Episode ${ep.number}, ${ep.title}`}
-      >
-        <View style={[styles.epThumb, { width: thumbW, height: Math.round(thumbW * 0.5625) }]}>
-          {thumb ? <Image source={{ uri: thumb }} style={StyleSheet.absoluteFill} contentFit="cover" transition={200} cachePolicy="memory-disk" /> : null}
-          {upcoming ? (
-            <View style={styles.epLocked}>
-              <Icon name="lock" size={18} color="#fff" />
-              <Text style={styles.epLockedText}>COMING SOON</Text>
-            </View>
-          ) : (
-            <View style={styles.epPlay}>
-              <Icon name="play" size={16} color="#fff" />
-            </View>
-          )}
-          {runtime ? (
-            <View style={styles.epDuration}>
-              <Text style={styles.epDurationText}>{runtime}m</Text>
-            </View>
-          ) : null}
-        </View>
-        <View style={{ flex: 1, paddingTop: 2 }}>
-          <Text style={styles.epTitle} numberOfLines={3}>
-            {/* "4. The Door to Hell"; just "Episode 4" when AniList has no name for it. */}
-            {name === `Episode ${ep.number}` ? name : `${ep.number}. ${name}`}
-          </Text>
-          {upcoming ? (
-            <Text style={[styles.epMeta, { color: colors.accent }]}>Coming {airDateLabel(ep.airingAt)}</Text>
-          ) : date ? (
-            <Text style={styles.epMeta}>{date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</Text>
-          ) : null}
-        </View>
-      </PressableScale>
+      />
     </Animated.View>
   );
 });
@@ -809,17 +770,8 @@ const styles = StyleSheet.create({
   seasonCount: { color: colors.muted, fontFamily: fonts.bold, fontSize: 12.5 },
   seasonSub: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12.5, marginTop: 2 },
   epList: { paddingHorizontal: 16, paddingTop: 20, gap: 24 },
-  epRow: { flexDirection: 'row', gap: 14 },
-  epThumb: { borderRadius: 4, overflow: 'hidden', backgroundColor: colors.surface2 },
-  epPlay: { position: 'absolute', top: '50%', left: '50%', marginTop: -18, marginLeft: -18, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', paddingLeft: 2 },
-  epDuration: { position: 'absolute', right: 5, bottom: 5, paddingHorizontal: 6, height: 19, borderRadius: 3, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center' },
-  epDurationText: { color: '#fff', fontFamily: fonts.regular, fontSize: 12 },
-  epTitle: { color: '#fff', fontFamily: fonts.regular, fontSize: 15.5, lineHeight: 21 },
-  epMeta: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12.5, marginTop: 6 },
   moreEps: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingVertical: 18 },
   moreEpsText: { color: colors.muted, fontFamily: fonts.medium, fontSize: 12.5 },
-  epLocked: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center', gap: 4, backgroundColor: 'rgba(0,0,0,0.6)' },
-  epLockedText: { color: '#fff', fontFamily: fonts.black, fontSize: 10, letterSpacing: 1.2 },
   empty: { color: colors.muted, fontFamily: fonts.regular, fontSize: 14, paddingVertical: 12 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', columnGap: 12, rowGap: 18, paddingHorizontal: 16, paddingTop: 18 },
   topBar: { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10 },

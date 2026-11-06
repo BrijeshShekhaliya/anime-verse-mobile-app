@@ -1,8 +1,8 @@
 import { Image } from 'expo-image';
 import { nav } from '@/lib/nav';
-import { useEffect, useState } from 'react';
-import { Alert, FlatList, Platform, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import Animated, { FadeInDown, FadeOut, LinearTransition, useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
+import { useEffect, useState, type ReactElement, type ReactNode } from 'react';
+import { Alert, Platform, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import Animated, { Easing, FadeInDown, FadeOut, LinearTransition, useAnimatedStyle, useReducedMotion, useSharedValue, withSpring } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ContinueCard } from '@/components/ContinueCard';
 import { Icon } from '@/components/Icon';
@@ -15,6 +15,11 @@ import { colors, fonts, radius, springs } from '@/lib/theme';
 import type { Anime } from '@/lib/types';
 import { thumbOf, useArt } from '@/lib/artwork';
 import { displayTitle, useSettings } from '@/lib/settings';
+
+// A removed card fades away, then the others slide into its place.
+const MOVE = LinearTransition.duration(280).easing(Easing.out(Easing.cubic));
+const LEAVE = FadeOut.duration(160);
+const GRID_PAGE = 24;
 
 const TABS = ['Continue', 'My List', 'History'] as const;
 type Tab = (typeof TABS)[number];
@@ -69,46 +74,49 @@ export default function LibraryScreen() {
       </View>
 
       {tab === 'Continue' && (
-        <FlatList
-          key={`continue-${contCols}`}
-          data={lib.continueWatching}
-          numColumns={contCols}
-          keyExtractor={(p) => p.anime.id}
-          columnWrapperStyle={lib.continueWatching.length ? { gap: 12 } : undefined}
-          contentContainerStyle={styles.list}
-          ListEmptyComponent={
+        <AnimatedList
+          items={lib.continueWatching}
+          keyOf={(p) => p.anime.id}
+          rowGap={18}
+          columnGap={12}
+          empty={
             <EmptyState icon="history" title="Nothing in progress" text="Start watching any anime and you can pick it up again here." action="Browse anime" onAction={() => nav.push('/browse')} />
           }
-          renderItem={({ item, index }) => (
-            <Animated.View exiting={FadeOut} layout={LinearTransition.springify()} style={{ marginBottom: 18 }}>
+          renderItem={(item, index) => (
+            <>
               <ContinueCard item={item} index={index} width={contW} compact />
               <PressableScale onPress={() => lib.clearProgress(item.anime.id)} style={styles.removeChip} hitSlop={10} accessibilityLabel="Remove from Continue Watching">
                 <Icon name="x" size={13} color="#fff" />
               </PressableScale>
-            </Animated.View>
+            </>
           )}
         />
       )}
 
       {tab === 'My List' && (
-        <FlatList
-          key={`list-${cols}`}
-          data={lib.list}
-          numColumns={cols}
-          keyExtractor={(l) => l.anime.id}
-          columnWrapperStyle={lib.list.length ? { gap: 12 } : undefined}
-          contentContainerStyle={[styles.list, { gap: 20 }]}
-          ListEmptyComponent={<EmptyState icon="bookmark" title="Your list is empty" text="Tap the bookmark on any anime to save it here." action="Find something" onAction={() => nav.push('/browse')} />}
-          renderItem={({ item, index }) => <PosterCard anime={item.anime as Anime} index={index % 12} width={cardW} showFacts />}
+        <AnimatedList
+          items={lib.list}
+          keyOf={(l) => l.anime.id}
+          rowGap={20}
+          columnGap={12}
+          empty={<EmptyState icon="bookmark" title="Your list is empty" text="Tap the bookmark on any anime to save it here." action="Find something" onAction={() => nav.push('/browse')} />}
+          renderItem={(item, index) => (
+            <>
+              <PosterCard anime={item.anime as Anime} index={index % 12} width={cardW} showFacts />
+              <PressableScale onPress={() => lib.toggleList(item.anime as Anime)} style={styles.removeChip} hitSlop={10} accessibilityLabel="Remove from My List">
+                <Icon name="x" size={13} color="#fff" />
+              </PressableScale>
+            </>
+          )}
         />
       )}
 
       {tab === 'History' && (
-        <FlatList
-          data={lib.history}
-          keyExtractor={(h) => h.anime.id}
-          contentContainerStyle={styles.list}
-          ListHeaderComponent={
+        <AnimatedList
+          items={lib.history}
+          keyOf={(h) => h.anime.id}
+          fullWidth
+          header={
             lib.history.length ? (
               <PressableScale onPress={confirmClear} style={styles.clear} hitSlop={8}>
                 <Icon name="trash" size={15} color={colors.muted} />
@@ -116,9 +124,9 @@ export default function LibraryScreen() {
               </PressableScale>
             ) : undefined
           }
-          ListEmptyComponent={<EmptyState icon="history" title="No history yet" text="Anime you watch will show up here." />}
-          renderItem={({ item, index }) => (
-            <Animated.View entering={FadeInDown.delay(Math.min(index, 10) * 30)} exiting={FadeOut} layout={LinearTransition.springify()}>
+          empty={<EmptyState icon="history" title="No history yet" text="Anime you watch will show up here." />}
+          renderItem={(item, index) => (
+            <Animated.View entering={FadeInDown.delay(Math.min(index, 10) * 30)}>
               <PressableScale onPress={() => nav.push(`/anime/${item.anime.id}`)} style={styles.historyRow}>
                 <HistThumb anime={item.anime as Anime} />
                 <View style={{ flex: 1 }}>
@@ -143,6 +151,57 @@ export default function LibraryScreen() {
   );
 }
 
+// All the cards live in one wrapping container, keyed by title. So removing one touches only
+// that one: it fades, and the rest slide along (up a row when needed). A list split into rows
+// rebuilds every row after it, which replays their entrance and looks like a page reload.
+function AnimatedList<T>({
+  items,
+  keyOf,
+  renderItem,
+  empty,
+  header,
+  rowGap = 0,
+  columnGap = 0,
+  fullWidth = false,
+}: {
+  items: T[];
+  keyOf: (item: T) => string;
+  renderItem: (item: T, index: number) => ReactNode;
+  empty: ReactElement;
+  header?: ReactElement;
+  rowGap?: number;
+  columnGap?: number;
+  fullWidth?: boolean;
+}) {
+  // A long list adds cards as they're reached, so opening it never loads every picture.
+  const [limit, setLimit] = useState(GRID_PAGE);
+  const reduce = useReducedMotion();
+  const leaving = reduce ? undefined : LEAVE;
+  return (
+    <ScrollView
+      contentContainerStyle={styles.list}
+      scrollEventThrottle={100}
+      onScroll={(e) => {
+        const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+        if (contentOffset.y + layoutMeasurement.height > contentSize.height - 500 && limit < items.length) setLimit((n) => n + GRID_PAGE);
+      }}
+    >
+      {header}
+      {items.length ? (
+        <View style={[styles.grid, { rowGap, columnGap }]}>
+          {items.slice(0, limit).map((item, index) => (
+            <Animated.View key={keyOf(item)} exiting={leaving} layout={reduce ? undefined : MOVE} style={fullWidth ? styles.fullWidth : undefined}>
+              {renderItem(item, index)}
+            </Animated.View>
+          ))}
+        </View>
+      ) : (
+        empty
+      )}
+    </ScrollView>
+  );
+}
+
 // History poster: TMDB art when known, else the saved AniList cover.
 function HistThumb({ anime }: { anime: Anime }) {
   const { art, settled } = useArt(anime);
@@ -160,6 +219,8 @@ const styles = StyleSheet.create({
   count: { color: colors.accent, fontFamily: fonts.black, fontSize: 12 },
   underline: { position: 'absolute', bottom: -1, left: 0, height: 3, borderRadius: 2, backgroundColor: colors.accent },
   list: { padding: 16, paddingBottom: 120 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap' },
+  fullWidth: { width: '100%' },
   removeChip: { position: 'absolute', top: 6, right: 6, width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' },
   clear: { flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-end', marginBottom: 12 },
   clearText: { color: colors.muted, fontFamily: fonts.black, fontSize: 12, letterSpacing: 0.5, textTransform: 'uppercase' },

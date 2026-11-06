@@ -2,7 +2,8 @@
 // often is re-checked sooner, data that never changes is kept for days.
 import { useQueries, useQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
-import { fetchTmdbSeason, fetchTmdbShow, seriesTitle, tmdbPosition, type TmdbEpisode, type TmdbShow } from './artwork';
+import { fetchTmdbSeason, fetchTmdbShow, seriesTitle, stillFor, tmdbImagesBlocked, tmdbPosition, type TmdbEpisode, type TmdbShow } from './artwork';
+import { absoluteEpisode, episodeName, seasonIndex } from './resume';
 import { api } from './api';
 import { fetchEpisodeGuide, fetchSeasons } from './episodeGuide';
 import { fetchScheduleForDate } from './scheduleByDate';
@@ -163,4 +164,31 @@ export function useTmdbStills(show: TmdbShow | null | undefined, from: number, t
     })),
     combine: toStillMap,
   });
+}
+
+// One episode's picture, using the same saved answers as the anime page. pending: still
+// finding out, so nothing else is shown first and then swapped.
+// With names: also the episode's name, from AniList's guide and TMDB as on the anime page.
+export function useEpisodeStill(anime: Anime | null | undefined, season: number, episode: number, withName = false) {
+  const fromId = anime?.id && /^al\d+$/.test(anime.id) ? Number(anime.id.slice(2)) : null;
+  // Saved before the AniList id was kept: looked up once, then saved like any other page.
+  const needsLookup = !!anime && !anime.anilistId && !fromId;
+  const detail = useDetail(needsLookup ? anime.id : '');
+  const anilistId = anime?.anilistId ?? fromId ?? detail.data?.anilistId ?? null;
+  const seasonsQ = useSeasons(anime ? anilistId : null);
+  const absolute = useMemo(
+    () => (seasonsQ.data && anilistId && episode > 0 ? absoluteEpisode(seasonsQ.data, anilistId, season, episode) : null),
+    [seasonsQ.data, anilistId, season, episode],
+  );
+  const show = useTmdbShow(anime ?? null);
+  const stills = useTmdbStills(absolute == null ? null : show.data, absolute ?? 0, absolute ?? 0, !!anime?.airing);
+  const position = show.data && absolute != null ? tmdbPosition(show.data, absolute) : null;
+  const still = position && !tmdbImagesBlocked() ? stillFor(stills.map.get(`${position.season}:${position.episode}`)?.still) : null;
+  const pending = (needsLookup && detail.isLoading) || seasonsQ.isLoading || show.isLoading || (absolute != null && stills.pending);
+  const entry = seasonsQ.data && anilistId ? seasonIndex(seasonsQ.data, anilistId, season) : -1;
+  const guide = useEpisodeGuide(withName && entry >= 0 ? seasonsQ.data![entry].anilistId : null, !!anime?.airing);
+  const guideEpisode = guide.data?.find((e) => e.number === episode);
+  const guideTitle = guideEpisode?.title;
+  const tmdbName = position ? stills.map.get(`${position.season}:${position.episode}`)?.name : null;
+  return { still, pending, name: episodeName(episode, guideTitle, tmdbName), thumb: guideEpisode?.thumb ?? null, airingAt: guideEpisode?.airingAt ?? null };
 }

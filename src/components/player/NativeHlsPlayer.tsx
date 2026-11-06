@@ -1,5 +1,6 @@
 import React, { forwardRef, memo, useCallback, useImperativeHandle, useRef, useState } from 'react';
 import { Platform, StyleSheet, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 import {
   NativeMedia3View,
   isNativeMedia3Available,
@@ -24,6 +25,12 @@ type Props = {
   selectedQualityHeight: number;
   selectedAudioTrackId?: number | null;
   preferredAudioLanguage?: string | null;
+  fallbackAudioLanguage?: string | null;
+  preload?: string[] | null; // [address, referer] of the video likely to play next
+  startTime?: number; // where a new video starts, in seconds
+  enhanced?: boolean; // View Enhancement
+  zoomStyle?: React.ComponentProps<typeof Animated.View>['style']; // the pinched size, on the video alone: subtitles stay put
+  onSystemPause?: () => void; // the system stopped it: a call, another app's sound
   selectedTextTrackId?: number | null;
   subtitles: NativeSubtitle[];
   subtitlesEnabled: boolean;
@@ -67,7 +74,7 @@ const NativeHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function Nati
 });
 
 const AndroidMedia3Player = forwardRef<NativeVideoPlayerHandle, Props>(function AndroidMedia3Player({
-  uri, referer, paused, playbackRate, volume = 1, fitMode, selectedQualityHeight, selectedAudioTrackId = null, preferredAudioLanguage = null,
+  uri, referer, paused, playbackRate, volume = 1, fitMode, selectedQualityHeight, selectedAudioTrackId = null, preferredAudioLanguage = null, fallbackAudioLanguage = null, preload = null, startTime = 0, enhanced = false, zoomStyle, onSystemPause,
   selectedTextTrackId = null, subtitles, subtitlesEnabled, onLoad, onProgress, onBuffer,
   onAudioTracks, onTextTracks, onVideoTracks, onEnd, onError,
 }, forwardedRef) {
@@ -110,6 +117,7 @@ const AndroidMedia3Player = forwardRef<NativeVideoPlayerHandle, Props>(function 
 
   return (
     <View style={StyleSheet.absoluteFill}>
+      <Animated.View collapsable={false} style={[StyleSheet.absoluteFill, zoomStyle]}>
       <NativeMedia3View
         ref={nativeRef as React.Ref<NativeMedia3ViewRef>}
         style={StyleSheet.absoluteFill}
@@ -122,6 +130,10 @@ const AndroidMedia3Player = forwardRef<NativeVideoPlayerHandle, Props>(function 
         selectedQualityHeight={selectedQualityHeight}
         selectedAudioTrackId={selectedAudioTrackId}
         preferredAudioLanguage={preferredAudioLanguage}
+        fallbackAudioLanguage={fallbackAudioLanguage}
+        preload={preload}
+        startTime={startTime}
+        enhanced={enhanced}
         selectedTextTrackId={selectedTextTrackId}
         subtitlesEnabled={subtitlesEnabled}
         onLoad={(event) => onLoad(event.nativeEvent.duration)}
@@ -136,7 +148,9 @@ const AndroidMedia3Player = forwardRef<NativeVideoPlayerHandle, Props>(function 
         onVideoTracks={videoTracks}
         onEnd={onEnd}
         onError={(event) => onError(event.nativeEvent.message)}
+        onSystemPause={onSystemPause}
       />
+      </Animated.View>
       {subtitlesEnabled && !hasEmbeddedSubtitleTracks && activeCue ? (
         <View pointerEvents="none" style={styles.subtitleContainer}>
           <Text style={styles.subtitleText}>{activeCue.text}</Text>

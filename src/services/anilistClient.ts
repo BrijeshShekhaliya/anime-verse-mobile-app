@@ -619,7 +619,6 @@ export async function fetchEpisodes(id: string, season = 1, animeDetail?: AnimeD
       air_date: anime.aired || null,
       runtime: anime.duration ? parseInt(anime.duration, 10) : 24,
       hasSub: true,
-      hasDub: true,
     });
   }
   if (upcoming) {
@@ -649,7 +648,6 @@ export async function fetchEpisodes(id: string, season = 1, animeDetail?: AnimeD
     })),
     selectedSeason: season,
     episodes: episodeList,
-    dubCount: count,
     subCount: count,
   };
 }

@@ -16,7 +16,7 @@ import {
 } from '@/services/anilistClient';
 import { resolveAnimeRulzDirect, isStreamUrlExpired } from '@/services/animerulzClient';
 import { resolveHiAnimeDirect } from '@/services/hianimeClient';
-import { hasAudioLanguage } from './audioMatch';
+import { askMain, canAskMain, pickServer } from './streamRouter';
 import {
   providerMemory,
   getProviderMemoryKey,
@@ -137,11 +137,9 @@ export const api = {
   },
 
   // The single-language server, for when the main one won't play an episode.
-  resolveBackup: (params: { title: string; romaji?: string; season: number; episode: number; mode: 'sub' | 'dub' }) =>
-    resolveHiAnimeDirect(params, true).catch((e) => {
-      if (params.mode === 'dub') return resolveHiAnimeDirect({ ...params, mode: 'sub' }, true);
-      throw e;
-    }),
+  // The answer's own mode says what it really is: sub, if there's no dub.
+  resolveBackup: (params: { title: string; romaji?: string; season: number; episode: number; mode: 'sub' | 'dub' }, fresh = true) =>
+    resolveHiAnimeDirect(params, fresh).catch(() => resolveHiAnimeDirect({ ...params, mode: params.mode === 'dub' ? 'sub' : 'dub' }, fresh)),
 
   resolveStream: async (
     params: {
@@ -163,217 +161,33 @@ export const api = {
     if (cachedEntry && isStreamUrlExpired((cachedEntry.data as StreamData)?.streamUrl)) {
       memo.delete(key);
     }
-    const stream = await cached<StreamData>(key, 15 * 60 * 1000, async () => {
-      const isHindiTarget = prefAudio === 'hindi' || prefAudio === 'hin' || prefAudio === 'hi';
-      const memoryKey = isHindiTarget ? getProviderMemoryKey(params, 'hindi') : null;
-      const rememberedProvider = memoryKey ? providerMemory.get(memoryKey) : null;
-
-      // 1. If provider was already verified for this anime season & audio language, use it directly
-      if (rememberedProvider === 'hianime') {
-        let hiStream: StreamData | null = null;
-        try {
-          hiStream = await resolveHiAnimeDirect(params, options?.forceRefresh);
-          if (hiStream && hiStream.streamUrl) {
-            if (!isHindiTarget || hasAudioLanguage(hiStream.audioTracks, 'hindi')) {
-              return hiStream;
-            }
-          }
-        } catch {
-          // HiAnime failed or requested dub unavailable for this episode
-        }
-
-        // HiAnime lacked Hindi (or failed). Check if AnimeRulz has Hindi:
-        let multiStream: StreamData | null = null;
-        try {
-          multiStream = await resolveAnimeRulzDirect(
-            {
-              id: params.id,
-              anilistId: params.anilistId,
-              title: params.title,
-              episode: params.episode,
-              season: params.season,
-              mode: params.mode,
-            },
-            options?.forceRefresh,
-          );
-          if (multiStream && multiStream.streamUrl && hasAudioLanguage(multiStream.audioTracks, 'hindi')) {
-            return multiStream;
-          }
-        } catch {
-          // AnimeRulz failed
-        }
-
-        // If neither provider has Hindi for this episode, gracefully fall back to Japanese (Sub)
-        // without corrupting the season's Hindi memory:
-        if (multiStream && multiStream.streamUrl) return multiStream;
-        if (hiStream && hiStream.streamUrl) return hiStream;
-        return resolveHiAnimeDirect({ ...params, mode: 'sub' }, options?.forceRefresh);
-      }
-
-      if (rememberedProvider === 'animerulz') {
-        let multiStream: StreamData | null = null;
-        try {
-          multiStream = await resolveAnimeRulzDirect(
-            {
-              id: params.id,
-              anilistId: params.anilistId,
-              title: params.title,
-              episode: params.episode,
-              season: params.season,
-              mode: params.mode,
-            },
-            options?.forceRefresh,
-          );
-          if (multiStream && multiStream.streamUrl) {
-            const isMultiAudioSource =
-              multiStream.source?.toLowerCase().includes('multi') ||
-              multiStream.referer?.includes('ravok') ||
-              multiStream.streamUrl?.includes('ravok');
-            if (!isHindiTarget || hasAudioLanguage(multiStream.audioTracks, 'hindi') || isMultiAudioSource) {
-              return multiStream;
-            }
-          }
-        } catch {
-          // AnimeRulz failed
-        }
-
-        // AnimeRulz lacked Hindi (or failed). Check if HiAnime has Hindi:
-        let hiStream: StreamData | null = null;
-        try {
-          hiStream = await resolveHiAnimeDirect(params, options?.forceRefresh);
-          if (hiStream && hiStream.streamUrl && hasAudioLanguage(hiStream.audioTracks, 'hindi')) {
-            return hiStream;
-          }
-        } catch {
-          // HiAnime failed
-        }
-
-        // If neither provider has Hindi for this episode, gracefully fall back to Japanese (Sub):
-        if (multiStream && multiStream.streamUrl) return multiStream;
-        if (hiStream && hiStream.streamUrl) return hiStream;
-        return resolveHiAnimeDirect({ ...params, mode: 'sub' }, options?.forceRefresh);
-      }
-
-      // 2. Standard flow / unremembered provider:
-      // When Hindi is requested, dispatch both resolvers concurrently to avoid sequential 5-15s waterfalls
-      if (isHindiTarget) {
-        const rulzPromise = resolveAnimeRulzDirect(
-          {
-            id: params.id,
-            anilistId: params.anilistId,
-            title: params.title,
-            episode: params.episode,
-            season: params.season,
-            mode: params.mode,
-          },
-          options?.forceRefresh,
-        ).catch(() => null);
-
-        // The backup starts only if the main source is slow, and nothing waits for
-        // it once the main source has answered with Hindi: waiting for both added
-        // over a second to every first play, for an answer that wasn't used.
-        let hiPromise: Promise<StreamData | null> | null = null;
-        const startHi = () => (hiPromise ??= resolveHiAnimeDirect(params, options?.forceRefresh).catch(() => null));
-        const hiHedge = setTimeout(startHi, 1500);
-        const firstAnswer = await Promise.race([rulzPromise, new Promise<null>((r) => setTimeout(() => r(null), 6000))]);
-        clearTimeout(hiHedge);
-
-        if (
-          firstAnswer?.streamUrl &&
-          (hasAudioLanguage(firstAnswer.audioTracks, 'hindi') ||
-            firstAnswer.source?.toLowerCase().includes('multi') ||
-            firstAnswer.referer?.includes('ravok') ||
-            firstAnswer.streamUrl?.includes('ravok'))
-        ) {
-          if (memoryKey) providerMemory.set(memoryKey, 'animerulz');
-          return firstAnswer;
-        }
-
-        const hiStream = await startHi();
-        const multiStream = firstAnswer ?? (await rulzPromise);
-
-        const rulzHasHindi =
-          multiStream &&
-          multiStream.streamUrl &&
-          (hasAudioLanguage(multiStream.audioTracks, 'hindi') ||
-            multiStream.source?.toLowerCase().includes('multi') ||
-            multiStream.referer?.includes('ravok') ||
-            multiStream.streamUrl?.includes('ravok'));
-
-        const hiHasHindi =
-          hiStream && hiStream.streamUrl && hasAudioLanguage(hiStream.audioTracks, 'hindi');
-
-        // Priority 1: Provider with verified Hindi audio
-        if (rulzHasHindi) {
-          if (memoryKey) providerMemory.set(memoryKey, 'animerulz');
-          return multiStream!;
-        }
-        if (hiHasHindi) {
-          if (memoryKey) providerMemory.set(memoryKey, 'hianime');
-          return hiStream!;
-        }
-
-        // Priority 2: Fallback to fastest successful stream (Japanese/Sub) without extra network calls
-        if (multiStream && multiStream.streamUrl) {
-          if (memoryKey) providerMemory.set(memoryKey, 'animerulz');
-          return multiStream;
-        }
-        if (hiStream && hiStream.streamUrl) {
-          return hiStream;
-        }
-
-        // Priority 3: HiAnime Sub fallback
-        return resolveHiAnimeDirect({ ...params, mode: 'sub' }, options?.forceRefresh);
-      }
-
-      // Everything else: the multi-audio source comes first, because it carries
-      // every language the episode has (Japanese, English, Hindi, Tamil,
-      // Telugu...), so the player can offer them all. The single-language
-      // backup only starts if the multi-audio source hasn't answered within
-      // 1.5 s (no extra requests when it's quick, which is almost always), and
-      // is used only if the multi-audio source fails or takes over 6 s.
-      const multiPromise = resolveAnimeRulzDirect(
-        {
-          id: params.id,
-          anilistId: params.anilistId,
-          title: params.title,
-          episode: params.episode,
-          season: params.season,
-          mode: params.mode,
-        },
-        options?.forceRefresh,
-      )
-        .then((s) => (s && s.streamUrl ? s : null))
-        .catch(() => null);
-      let backupPromise: Promise<StreamData | null> | null = null;
-      const startBackup = () =>
-        (backupPromise ??= resolveHiAnimeDirect(params, options?.forceRefresh).catch(() =>
-          params.mode === 'dub' ? resolveHiAnimeDirect({ ...params, mode: 'sub' }, options?.forceRefresh).catch(() => null) : null,
-        ));
-      const hedge = setTimeout(startBackup, 1500);
-      const multiStream = await Promise.race([multiPromise, new Promise<null>((r) => setTimeout(() => r(null), 6000))]);
-      clearTimeout(hedge);
-      if (multiStream) return multiStream;
-      const backup = await startBackup();
-      if (backup && backup.streamUrl) return backup;
-      // The multi-audio source may still answer after the 6 s mark.
-      const late = await multiPromise;
-      if (late) return late;
-      throw new Error('This episode is not available right now');
-    });
+    const force = options?.forceRefresh;
+    const stream = await cached<StreamData>(key, 15 * 60 * 1000, () =>
+      pickServer({
+        main: () =>
+          resolveAnimeRulzDirect(
+            { id: params.id, anilistId: params.anilistId, title: params.title, episode: params.episode, season: params.season, mode: params.mode },
+            force,
+          ),
+        backup: () =>
+          // An episode with only the other kind is still better than nothing.
+          resolveHiAnimeDirect(params, force).catch(() => resolveHiAnimeDirect({ ...params, mode: params.mode === 'dub' ? 'sub' : 'dub' }, force)),
+      }),
+    );
     // The backup only stands in. Kept, one failed moment would decide this
     // episode's server (and its one language) for the next 15 minutes.
     if (!stream?.source?.toLowerCase().includes('multi')) memo.delete(key);
     return stream;
   },
 
-  // Asks the main server again, for a viewer who is on the backup.
-  resolveMain: (anilistId: number, episode: number, mode: 'sub' | 'dub') => resolveAnimeRulzDirect({ anilistId, episode, mode }, true),
+  // A viewer on the backup asks for the main server: one try, even during its rest.
+  resolveMain: (anilistId: number, episode: number, mode: 'sub' | 'dub'): Promise<StreamData> =>
+    askMain(() => resolveAnimeRulzDirect({ anilistId, episode, mode }, true)),
 
   // Finds the address of an episode someone is about to play, so tapping play
   // doesn't have to wait for it. Two small requests; the real lookup shares the answer.
   prewarmStream: (anilistId: number | null | undefined, episode: number, mode: 'sub' | 'dub') => {
-    if (anilistId && episode > 0) resolveAnimeRulzDirect({ anilistId, episode, mode }).catch(() => {});
+    if (anilistId && episode > 0 && canAskMain()) resolveAnimeRulzDirect({ anilistId, episode, mode }).catch(() => {});
   },
 
   clearStreamCache: (params: {

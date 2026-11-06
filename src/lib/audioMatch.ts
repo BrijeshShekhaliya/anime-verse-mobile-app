@@ -35,3 +35,37 @@ export function hasAudioLanguage(tracks: StreamAudioTrack[] | undefined | null, 
   if (!tracks || !Array.isArray(tracks) || tracks.length === 0) return false;
   return tracks.some((t) => isAudioLanguageMatch(t.name || '', t.language || '', targetLang));
 }
+
+// ── Which language plays ─────────────────────────────────────────────────────
+// The order everywhere: the viewer's first language, their second, then Japanese,
+// then English. Falling back never changes the preference, so the next episode asks
+// for the first language again.
+type Track = { name: string; lang: string; selected?: boolean };
+
+// Which kind of stream to ask the backup for. It only carries Japanese (sub) and
+// English (dub), so it goes by the first of the viewer's languages it can have.
+export function modeForLanguage(preferred: string | null | undefined, second?: string | null): 'sub' | 'dub' {
+  for (const language of [preferred, second]) {
+    const value = String(language || '').trim();
+    if (/english|^eng?$/i.test(value)) return 'dub';
+    if (/japan|^jpn$|^ja$/i.test(value)) return 'sub';
+  }
+  return 'sub';
+}
+
+export function pickAudioTrack<T extends Track>(tracks: T[], preferred: string | null | undefined, second?: string | null): T | undefined {
+  const find = (language: string) => tracks.find((t) => isAudioLanguageMatch(t.name, t.lang, language));
+  return (preferred ? find(preferred) : undefined) || (second ? find(second) : undefined) || find('japanese') || find('english') || tracks.find((t) => t.selected) || tracks[0];
+}
+
+// The second language can't be the first one: if they match, it moves on.
+export function secondLanguageFor<T extends string>(first: string, saved: T | null | undefined): T | 'japanese' | 'english' {
+  if (saved && saved !== first) return saved;
+  return first === 'japanese' ? 'english' : 'japanese';
+}
+
+// What a server lists for this episode but the stream playing doesn't carry: still
+// offered, so English stays in the menu even while Japanese plays.
+export function missingModes<T extends Track>(tracks: T[], modes: Array<'sub' | 'dub'> | null | undefined): Array<'sub' | 'dub'> {
+  return (modes ?? []).filter((m) => !tracks.some((t) => isAudioLanguageMatch(t.name, t.lang, m === 'dub' ? 'english' : 'japanese')));
+}

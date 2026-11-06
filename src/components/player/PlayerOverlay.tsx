@@ -1,15 +1,19 @@
 import * as Brightness from 'expo-brightness';
+import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-native';
-import { GestureDetector, useCompetingGestures, usePanGesture, useTapGesture } from 'react-native-gesture-handler';
+import { GestureDetector, useCompetingGestures, usePanGesture, usePinchGesture, useTapGesture } from 'react-native-gesture-handler';
 import Animated, {
   Easing,
   type SharedValue,
   interpolate,
+  measure,
   runOnJS,
   runOnUI,
   useAnimatedReaction,
+  useAnimatedProps,
+  useAnimatedRef,
   useAnimatedStyle,
   useSharedValue,
   withDelay,
@@ -17,14 +21,19 @@ import Animated, {
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
-import Svg, { Path } from 'react-native-svg';
+import Svg, { Path, Rect } from 'react-native-svg';
+import { systemVolume } from 'native-media3-player';
 import { Icon, type IconName } from '@/components/Icon';
 import { PressableScale } from '@/components/PressableScale';
 import { colors, fonts } from '@/lib/theme';
-import { MINI_MENU_WIDTH, PlayerMiniMenu } from './PlayerMiniMenu';
+import { MINI_MENU_WIDTH, PLAYER_COLOURS, PlayerMiniMenu, QualityBadge } from './PlayerMiniMenu';
 import type { SheetSection } from './PlayerSettingsSheet';
+import type { ScreenShape } from '@/lib/screenShape';
+import { clampZoom, fillZoom, fitTap, isZoomed, type FitMode } from '@/lib/videoZoom';
 
-export type QuickChip = { key: string; icon: IconName; label: string };
+export type QuickChip = { key: string; icon: IconName; label: string; badge?: string | null };
+
+type PinchFrom = { zoom: number; fill: number };
 
 type Insets = { top: number; bottom: number; left: number; right: number };
 
@@ -32,7 +41,8 @@ type Props = {
   visible: boolean;
   locked: boolean; // a panel is open over the player: taps on the video do nothing
   failed: boolean; // nothing to play: only the top bar, and touches pass to what's underneath
-  fullscreen: boolean;
+  shape: ScreenShape;
+  menuOpen: ScreenShape; // tells the video behind to blur while a selection menu is open
   title: string;
   subtitle: string;
   isPlaying: boolean;
@@ -45,6 +55,13 @@ type Props = {
   chips: QuickChip[];
   menus: SheetSection[];
   hasNext: boolean;
+  enhanced: boolean;
+  onToggleEnhance: () => void;
+  autoplay: boolean;
+  onToggleAutoplay: () => void;
+  fitMode: FitMode;
+  zoom: SharedValue<number>; // the pinched size: 1 is the fit mode's own
+  onZoomEnd: (zoom: number) => void;
   onControlsShown: () => void;
   onControlsHidden: () => void;
   onHoldControls: () => void;
@@ -89,18 +106,49 @@ const clamp01 = (v: number) => {
 // as the tap whatever else the app is doing. Showing never waits to see whether a
 // second tap is coming: a double-tap simply keeps them up. Only hiding waits.
 export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
+  // Read directly, not through the watch screen, so the controls don't wait for it to re-render.
+  const fullscreen = useSyncExternalStore(p.shape.subscribe, p.shape.get);
+  useLayoutEffect(() => {
+    if (__DEV__ && p.shape.changedAt()) console.log(`[Rotate] controls ready ${Date.now() - p.shape.changedAt()} ms after the tap`);
+  }, [fullscreen, p.shape]);
+
   // ---- Controls fade ----
   const shown = useSharedValue(p.visible ? 1 : 0);
   const wanted = useSharedValue(p.visible);
+  // Whether the buttons are really live. Trusting the fade alone could leave controls drawn
+  // but switched off, which is a player that ignores every touch.
+  const live = useSharedValue(p.visible);
+  // They leave as the screen starts to turn, with no fade to watch them change shape in, and
+  // stop taking touches at the same moment: the watch screen only hears of it later, and until
+  // then its "visible" would leave invisible buttons to be pressed by accident.
+  // An error's buttons stay: they are the only way out of it.
+  const [turning, setTurning] = useState(false);
+  const failedRef = useRef(p.failed);
+  failedRef.current = p.failed;
+  useEffect(
+    () =>
+      p.shape.subscribe(() => {
+        if (failedRef.current) return;
+        setTurning(true);
+        wanted.value = false;
+        live.value = false;
+        shown.value = 0;
+      }),
+    [p.shape, wanted, live, shown]
+  );
+  useEffect(() => {
+    if (p.visible) setTurning(false);
+  }, [p.visible]);
   useEffect(() => {
     const next = p.visible;
     runOnUI(() => {
       'worklet';
+      live.value = next;
       if (wanted.value === next) return;
       wanted.value = next;
       shown.value = withTiming(next ? 1 : 0, { duration: next ? 140 : 200, easing: Easing.out(Easing.quad) });
     })();
-  }, [p.visible, shown, wanted]);
+  }, [p.visible, shown, wanted, live]);
   const controlsStyle = useAnimatedStyle(() => ({ opacity: shown.value }));
   const topStyle = useAnimatedStyle(() => ({ transform: [{ translateY: interpolate(shown.value, [0, 1], [-8, 0]) }] }));
   const bottomStyle = useAnimatedStyle(() => ({ transform: [{ translateY: interpolate(shown.value, [0, 1], [8, 0]) }] }));
@@ -111,9 +159,10 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
   const surfaceH = useSharedValue(1);
   const topZone = useSharedValue(0);
   const bottomZone = useSharedValue(1e7);
-  const skipSize = p.fullscreen ? 58 : 48;
-  const playSize = p.fullscreen ? 74 : 62;
-  const centerGap = p.fullscreen ? 64 : 36;
+  // What answers to a finger. The icons themselves are smaller, with nothing drawn around them.
+  const skipSize = fullscreen ? 56 : 48;
+  const playSize = fullscreen ? 64 : 56;
+  const centerGap = fullscreen ? 44 : 22;
   const centerRow = useSharedValue({ playR: 0, skipR: 0, skipAt: 0 });
   useEffect(() => {
     centerRow.value = { playR: playSize / 2, skipR: skipSize / 2, skipAt: playSize / 2 + centerGap + skipSize / 2 };
@@ -140,14 +189,22 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
   const chipX = useRef<Record<string, number>>({});
   const surfaceSize = useRef({ w: 0, h: 0 });
   const menuX = useRef(0);
-  const sideGap = p.fullscreen ? Math.max(p.insets.left, p.insets.right, 20) : 12;
-  const bottomGap = p.fullscreen ? Math.max(p.insets.bottom, 10) + 16 : 10;
+  // Fullscreen's margins are fixed in advance. The phone's insets only reach here a second after
+  // a turn, and following them made the controls jump into place late. The notch is the same
+  // size whichever side it's on, so the largest inset seen so far already says how much room to leave.
+  const notch = useRef(0);
+  notch.current = Math.max(notch.current, p.insets.top, p.insets.left, p.insets.right);
+  const sideGap = fullscreen ? Math.max(notch.current, 20) : 12;
+  const bottomGap = fullscreen ? 26 : 10;
   const { onHoldControls, onKeepAlive, onControlsShown, onControlsHidden, onSeekBy, onTogglePlay, onVolume } = p;
 
   const openMenu = useCallback(
     (key: string) => {
       const left = sideGap + (chipX.current[key] ?? 0);
-      menuX.current = Math.max(sideGap, Math.min(left, surfaceSize.current.w - MINI_MENU_WIDTH - sideGap));
+      // Menus only open in fullscreen, so the long side is the width, even if the layout event
+      // from the turn hasn't arrived yet.
+      const width = Math.max(surfaceSize.current.w, surfaceSize.current.h);
+      menuX.current = Math.max(sideGap, Math.min(left, width - MINI_MENU_WIDTH - sideGap));
       setMenuKey(key);
       onHoldControls(); // the controls stay up while choosing
     },
@@ -158,15 +215,18 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
     onKeepAlive();
   }, [onKeepAlive]);
   useEffect(() => {
-    if (!p.fullscreen) setMenuKey(null);
-  }, [p.fullscreen]);
+    if (!fullscreen) setMenuKey(null);
+  }, [fullscreen]);
+  // Only a menu that's really there takes the taps.
+  const menuIsOpen = !!menuKey && p.menus.some((m) => m.key === menuKey);
   useEffect(() => {
-    blocked.value = p.locked || !!menuKey;
-  }, [p.locked, menuKey, blocked]);
+    blocked.value = p.locked || menuIsOpen;
+    p.menuOpen.set(menuIsOpen || p.locked);
+  }, [p.locked, menuIsOpen, blocked, p.menuOpen]);
 
   // ---- Brightness / volume drag ----
   const bright = useSharedValue(0.5);
-  const vol = useSharedValue(p.volume);
+  const vol = useSharedValue(systemVolume.get() ?? p.volume);
   const hudLevel = useSharedValue(0);
   const hudOpacity = useSharedValue(0);
   const dragKind = useSharedValue(0); // 1 brightness, 2 volume
@@ -175,8 +235,13 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
   const [hudKind, setHudKind] = useState<1 | 2>(1);
 
   useEffect(() => {
-    vol.value = p.volume;
+    if (!systemVolume.available) vol.value = p.volume;
   }, [p.volume, vol]);
+  // The side buttons may have changed it: read it fresh when a finger comes down.
+  const readSystemVolume = useCallback(() => {
+    const now = systemVolume.get();
+    if (now != null) vol.value = now;
+  }, [vol]);
   useEffect(() => {
     if (Platform.OS === 'web') return;
     Brightness.getBrightnessAsync()
@@ -192,7 +257,8 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
     (kind: number, level: number) => {
       if (kind === 1) {
         if (Platform.OS !== 'web') Brightness.setBrightnessAsync(level).catch(() => {});
-      } else onVolume(level);
+      } else if (systemVolume.available) systemVolume.set(level);
+      else onVolume(level);
     },
     [onVolume]
   );
@@ -201,11 +267,15 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
     activeOffsetY: [-22, 22],
     failOffsetX: [-24, 24],
     maxPointers: 1,
+    onBegin: () => {
+      'worklet';
+      runOnJS(readSystemVolume)();
+    },
     onActivate: (e) => {
       'worklet';
       const startY = e.y - e.translationY;
       // Not from a screen edge (that's the phone's own gesture), a button, or under a panel.
-      if (blocked.value || startY < 30 || startY > surfaceH.value - 30 || (wanted.value && onControl(e.x, startY))) return;
+      if (blocked.value || startY < 30 || startY > surfaceH.value - 30 || (wanted.value && live.value && onControl(e.x, startY))) return;
       const kind = e.x < surfaceW.value / 2 ? 1 : 2;
       dragKind.value = kind;
       dragStart.value = kind === 1 ? bright.value : vol.value;
@@ -275,7 +345,10 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
   const lastTapX = useSharedValue(0);
   const repeatUntil = useSharedValue(0);
   const repeatSide = useSharedValue(0);
-  const tellShown = useCallback(() => onControlsShown(), [onControlsShown]);
+  const tellShown = useCallback(() => {
+    setTurning(false);
+    onControlsShown();
+  }, [onControlsShown]);
   const tellHidden = useCallback(() => onControlsHidden(), [onControlsHidden]);
 
   const tap = useTapGesture({
@@ -283,7 +356,8 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
     maxDistance: 16,
     onActivate: (e) => {
       'worklet';
-      if (blocked.value || (wanted.value && onControl(e.x, e.y))) return;
+      const showing = wanted.value && live.value;
+      if (blocked.value || (showing && onControl(e.x, e.y))) return;
       const now = Date.now();
       const w = surfaceW.value;
       const zone = e.x < w * 0.36 ? -1 : e.x > w * 0.64 ? 1 : 0;
@@ -293,15 +367,17 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
         // A double-tap: the controls stay up (this also calls off a hide just begun).
         lastTapAt.value = 0;
         wanted.value = true;
+        live.value = true;
         shown.value = withTiming(1, { duration: 120 });
         repeatSide.value = zone;
         repeatUntil.value = now + REPEAT_MS;
+        runOnJS(tellShown)();
         runOnJS(onDoubleTap)(zone);
         return;
       }
       lastTapAt.value = now;
       lastTapX.value = e.x;
-      if (wanted.value) {
+      if (showing) {
         wanted.value = false;
         shown.value = withDelay(
           DOUBLE_TAP_MS,
@@ -311,27 +387,105 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
         );
       } else {
         wanted.value = true;
+        live.value = true;
         shown.value = withTiming(1, { duration: 140, easing: Easing.out(Easing.quad) });
         runOnJS(tellShown)();
       }
     },
   });
-  const gestures = useCompetingGestures(pan, tap);
+  // ---- Pinch: the video's size, to the percent, in fullscreen ----
+  const surfaceRef = useAnimatedRef<Animated.View>();
+  const { zoom, onZoomEnd } = p;
+  const pinchFrom = useSharedValue<PinchFrom>({ zoom: 1, fill: 0 });
+  const pinching = useSharedValue(false);
+  const badge = useSharedValue(0);
+  const fitModeNow = useSharedValue<FitMode>(p.fitMode);
+  const tick = useCallback(() => {
+    if (Platform.OS !== 'web') Haptics.selectionAsync().catch(() => {});
+  }, []);
+  const pinch = usePinchGesture({
+    enabled: fullscreen && !p.failed,
+    onActivate: () => {
+      'worklet';
+      if (blocked.value) return;
+      const box = measure(surfaceRef);
+      const w = box && box.width > 0 ? box.width : surfaceW.value;
+      const h = box && box.height > 0 ? box.height : surfaceH.value;
+      pinchFrom.value = { zoom: zoom.value, fill: fitModeNow.value === 'contain' ? fillZoom(w, h) : 0 };
+      pinching.value = true;
+      badge.value = withTiming(1, { duration: 120 });
+      // The picture is what's being adjusted: nothing in the way.
+      if (wanted.value) {
+        wanted.value = false;
+        shown.value = withTiming(0, { duration: 140 }, (done) => {
+          if (done) runOnJS(tellHidden)();
+        });
+      }
+    },
+    onUpdate: (e) => {
+      'worklet';
+      if (!pinching.value) return;
+      const from = pinchFrom.value;
+      const next = clampZoom(from.zoom * e.scale);
+      // A small tap under the fingers at the sizes worth stopping at.
+      const before = zoom.value;
+      if ((before - 1) * (next - 1) < 0 || (from.fill && (before - from.fill) * (next - from.fill) < 0)) runOnJS(tick)();
+      zoom.value = next;
+    },
+    onDeactivate: () => {
+      'worklet';
+      if (!pinching.value) return;
+      pinching.value = false;
+      badge.value = withDelay(500, withTiming(0, { duration: 220 }));
+      // Settles on a whole percent, so what's shown is exactly what's kept.
+      const settled = Math.round(zoom.value * 100) / 100;
+      zoom.value = settled;
+      runOnJS(onZoomEnd)(settled);
+    },
+  });
+  const resetZoom = useCallback(() => {
+    zoom.value = withSpring(1, { damping: 20, stiffness: 220 });
+    onZoomEnd(1);
+  }, [zoom, onZoomEnd]);
+  useEffect(() => {
+    fitModeNow.value = p.fitMode;
+  }, [p.fitMode, fitModeNow]);
+  const { onCycleFit } = p;
+  const pressFit = useCallback(() => {
+    onKeepAlive();
+    const action = fitTap(fitModeNow.value, isZoomed(zoom.value));
+    if (action.reset) {
+      resetZoom();
+      return;
+    }
+    fitModeNow.value = action.mode; // the icon turns now, not after the screen has re-rendered
+    onCycleFit();
+  }, [fitModeNow, zoom, resetZoom, onCycleFit, onKeepAlive]);
+
+  const gestures = useCompetingGestures(pinch, pan, tap);
 
   const hudStyle = useAnimatedStyle(() => ({ opacity: hudOpacity.value }));
   const hudFill = useAnimatedStyle(() => ({ transform: [{ scaleX: Math.max(0.001, hudLevel.value) }] }));
 
   // ---- Play button ----
+  // 0 is the play triangle, 1 the pause bars. Turns at the tap, and the real state confirms it.
+  const playShape = useSharedValue(p.isPlaying ? 1 : 0);
   const playPop = useSharedValue(1);
   const firstRender = useRef(true);
   useEffect(() => {
+    playShape.value = withTiming(p.isPlaying ? 1 : 0, { duration: 180, easing: Easing.out(Easing.cubic) });
     if (firstRender.current) {
       firstRender.current = false;
       return;
     }
-    playPop.value = withSequence(withTiming(0.8, { duration: 70 }), withSpring(1, { damping: 12, stiffness: 260 }));
-  }, [p.isPlaying, playPop]);
+    playPop.value = withSequence(withTiming(0.82, { duration: 70 }), withSpring(1, { damping: 12, stiffness: 260 }));
+  }, [p.isPlaying, playPop, playShape]);
   const playIconStyle = useAnimatedStyle(() => ({ transform: [{ scale: playPop.value }] }));
+  const { isPlaying } = p;
+  const pressPlay = useCallback(() => {
+    playShape.value = withTiming(isPlaying ? 0 : 1, { duration: 180, easing: Easing.out(Easing.cubic) });
+    onTogglePlay();
+  }, [isPlaying, onTogglePlay, playShape]);
 
   // One spinner at a time, and only for a pause long enough to notice.
   const waiting = p.isBuffering && p.isPlaying;
@@ -346,12 +500,15 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
   }, [waiting]);
 
   const menu = menuKey ? p.menus.find((m) => m.key === menuKey) : undefined;
+  const menuChip = menuKey ? p.chips.find((c) => c.key === menuKey) : undefined;
+  const [narrowRow, setNarrowRow] = useState(false);
 
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
       {/* Gesture surface (under the controls). */}
       <GestureDetector gesture={gestures}>
         <Animated.View
+          ref={surfaceRef}
           style={StyleSheet.absoluteFill}
           pointerEvents={p.failed ? 'none' : 'auto'}
           onLayout={(e) => {
@@ -369,24 +526,27 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
         </View>
       ) : null}
 
+      {/* The size while pinching. */}
+      <ZoomBadge zoom={zoom} opacity={badge} from={pinchFrom} />
+
       {/* Brightness / volume level. */}
       <Animated.View pointerEvents="none" style={[styles.hud, hudStyle]}>
         <HudReadout kind={hudKind} level={hudLevel} fill={hudFill} />
       </Animated.View>
 
       {/* Controls. */}
-      <Animated.View style={[StyleSheet.absoluteFill, controlsStyle]} pointerEvents={p.visible ? 'box-none' : 'none'}>
+      <Animated.View style={[StyleSheet.absoluteFill, controlsStyle, menuIsOpen && styles.behindMenu]} pointerEvents={p.visible && !turning ? 'box-none' : 'none'}>
         {p.failed ? null : <View style={styles.dim} pointerEvents="none" />}
         <LinearGradient colors={['rgba(0,0,0,0.75)', 'transparent']} style={styles.topScrim} pointerEvents="none" />
         {p.failed ? null : <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={styles.bottomScrim} pointerEvents="none" />}
 
         {/* Top bar */}
         <Animated.View
-          style={[styles.topBar, { paddingTop: p.fullscreen ? Math.max(p.insets.top, 10) + 6 : 8, paddingHorizontal: sideGap }, topStyle]}
+          style={[styles.topBar, { paddingTop: fullscreen ? 16 : 8, paddingHorizontal: sideGap }, topStyle]}
           pointerEvents="box-none"
           onLayout={(e) => (topZone.value = e.nativeEvent.layout.height)}
         >
-          <PressableScale onPress={p.onBack} style={styles.iconBtn} hitSlop={8} accessibilityLabel={p.fullscreen ? 'Exit fullscreen' : 'Back'}>
+          <PressableScale onPress={p.onBack} style={styles.iconBtn} hitSlop={8} accessibilityLabel={fullscreen ? 'Exit fullscreen' : 'Back'}>
             <Icon name="left" size={24} color="#fff" />
           </PressableScale>
           <View style={styles.titleWrap} pointerEvents="none">
@@ -397,12 +557,10 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
               {p.subtitle}
             </Text>
           </View>
-          {p.failed ? null : (
-            <PressableScale onPress={p.onCycleFit} style={styles.iconBtn} hitSlop={6} accessibilityLabel="Screen fit">
-              <Icon name="aspectRatio" size={21} color="#fff" />
-            </PressableScale>
-          )}
-          {p.failed ? null : (
+          {p.failed || !fullscreen ? null : <AutoNextSwitch on={p.autoplay} onPress={p.onToggleAutoplay} />}
+          {p.failed || !fullscreen ? null : <FitButton mode={fitModeNow} zoom={zoom} onPress={pressFit} />}
+          {/* In fullscreen its options are all on the bottom row. */}
+          {p.failed || fullscreen ? null : (
             <PressableScale onPress={p.onOpenSettings} style={styles.iconBtn} hitSlop={6} accessibilityLabel="Player settings">
               <Icon name="settings" size={21} color="#fff" />
             </PressableScale>
@@ -412,22 +570,22 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
         {/* Centre */}
         {p.failed ? null : (
           <Animated.View style={[styles.center, { gap: centerGap }, centerStyle]} pointerEvents="box-none">
-            <SkipButton dir={-1} size={skipSize} total={backTotal} turn={backTurn} pop={backPop} onPress={skip} />
+            <SkipButton dir={-1} size={skipSize} glyph={fullscreen ? 34 : 28} total={backTotal} turn={backTurn} pop={backPop} onPress={skip} />
             <PressableScale
-              onPress={p.onTogglePlay}
-              style={[styles.round, { width: playSize, height: playSize, borderRadius: playSize / 2 }]}
-              scaleTo={0.9}
+              onPress={pressPlay}
+              style={[styles.centerBtn, { width: playSize, height: playSize }]}
+              scaleTo={0.86}
               accessibilityLabel={p.isPlaying ? 'Pause' : 'Play'}
             >
               {spinner ? (
                 <ActivityIndicator size="large" color="#fff" />
               ) : (
-                <Animated.View style={[!p.isPlaying && styles.playNudge, playIconStyle]}>
-                  <Icon name={p.isPlaying ? 'pause' : 'play'} size={p.fullscreen ? 34 : 28} color="#fff" />
+                <Animated.View style={[styles.glyphShadow, playIconStyle]}>
+                  <PlayPauseGlyph shape={playShape} size={fullscreen ? 44 : 36} />
                 </Animated.View>
               )}
             </PressableScale>
-            <SkipButton dir={1} size={skipSize} total={forwardTotal} turn={forwardTurn} pop={forwardPop} onPress={skip} />
+            <SkipButton dir={1} size={skipSize} glyph={fullscreen ? 34 : 28} total={forwardTotal} turn={forwardTurn} pop={forwardPop} onPress={skip} />
           </Animated.View>
         )}
 
@@ -441,50 +599,245 @@ export const PlayerOverlay = memo(function PlayerOverlay(p: Props) {
             <View style={styles.timeRow} pointerEvents="box-none">
               <TimeLabel time={p.time} duration={p.duration} shown={shown} />
               <View style={{ flex: 1 }} />
-              {p.hasNext && !p.fullscreen ? (
+              {p.hasNext && !fullscreen ? (
                 <PressableScale onPress={p.onNext} style={styles.iconBtnSmall} hitSlop={6} accessibilityLabel="Next episode">
                   <Icon name="skip" size={19} color="#fff" />
                 </PressableScale>
               ) : null}
-              <PressableScale onPress={p.onToggleFullscreen} style={styles.iconBtnSmall} hitSlop={8} accessibilityLabel={p.fullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
-                <Icon name={p.fullscreen ? 'exitFullscreen' : 'fullscreen'} size={20} color="#fff" />
+              <PressableScale onPress={p.onToggleFullscreen} style={styles.iconBtnSmall} hitSlop={8} accessibilityLabel={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+                <Icon name={fullscreen ? 'exitFullscreen' : 'fullscreen'} size={20} color="#fff" />
               </PressableScale>
             </View>
             <SeekBar time={p.time} duration={p.duration} buffered={p.buffered} onSeek={p.onSeek} onKeepAlive={p.onKeepAlive} />
-            {p.fullscreen ? (
-              <View style={styles.chipRow} pointerEvents="box-none">
+            {/* Always built, and folded away outside fullscreen: building it during a turn is
+                why it used to appear so late. */}
+            <View
+              style={[styles.chipRow, !fullscreen && styles.chipRowFolded]}
+              pointerEvents={fullscreen ? 'box-none' : 'none'}
+              importantForAccessibility={fullscreen ? 'auto' : 'no-hide-descendants'}
+              onLayout={(e) => setNarrowRow(e.nativeEvent.layout.width < 600)}
+            >
                 {p.chips.map((c) => (
                   <PressableScale
                     key={c.key}
                     onPress={() => openMenu(c.key)}
                     onLayout={(e) => (chipX.current[c.key] = e.nativeEvent.layout.x)}
-                    style={[styles.chip, menuKey === c.key && styles.chipOn]}
+                    style={[styles.chip, c.key === 'audio' && styles.chipFlexible, menuKey === c.key && styles.chipOn]}
                     scaleTo={0.95}
                     accessibilityLabel={c.label}
                   >
-                    <Icon name={c.icon} size={15} color="#fff" />
+                    {c.badge ? <QualityBadge name={c.badge} /> : <Icon name={c.icon} size={17} color={PLAYER_COLOURS[c.key] ?? '#fff'} />}
                     <Text style={styles.chipText} numberOfLines={1}>
                       {c.label}
                     </Text>
                   </PressableScale>
                 ))}
+                <EnhanceChip on={p.enhanced} onPress={p.onToggleEnhance} />
                 <View style={{ flex: 1 }} />
                 {p.hasNext ? (
                   <PressableScale onPress={p.onNext} style={[styles.chip, styles.nextChip]} scaleTo={0.95} accessibilityLabel="Next episode">
-                    <Text style={[styles.chipText, { color: '#000' }]}>Next episode</Text>
+                    {narrowRow ? null : <Text style={[styles.chipText, { color: '#000' }]}>Next episode</Text>}
                     <Icon name="skip" size={15} color="#000" />
                   </PressableScale>
                 ) : null}
-              </View>
-            ) : null}
+            </View>
           </Animated.View>
         )}
       </Animated.View>
 
-      <PlayerMiniMenu section={menu} x={menuX.current} bottom={bottomGap + 40} maxHeight={Math.max(120, surfaceSize.current.h - bottomGap - 54)} onClose={closeMenu} />
+      <PlayerMiniMenu
+        section={menu}
+        accent={PLAYER_COLOURS[menuChip?.key ?? ''] ?? '#fff'}
+        head={menuChip?.badge ? <QualityBadge name={menuChip.badge} /> : menuChip ? <Icon name={menuChip.icon} size={17} color={PLAYER_COLOURS[menuChip.key] ?? '#fff'} /> : null}
+        x={menuX.current} bottom={bottomGap + 38} onClose={closeMenu} />
     </View>
   );
 });
+
+// View Enhancement. A band of full colour runs through the button for 1.5 s as it turns on,
+// then stays lit; off, only its coloured edge remains. All on the UI thread.
+// The whole spectrum repeats once per button width, so it's all visible at any moment.
+const SPECTRUM = ['#FF2D55', '#FF9500', '#FFD60A', '#30D158', '#0A84FF', '#BF5AF2'] as const;
+const RGB = [...SPECTRUM, ...SPECTRUM, ...SPECTRUM, ...SPECTRUM, SPECTRUM[0]] as const;
+const ENHANCE_ANIMATION_MS = 1500;
+
+function EnhanceChip({ on, onPress }: { on: boolean; onPress: () => void }) {
+  const [w, setW] = useState(0);
+  const sweep = useSharedValue(on ? 1 : 0);
+  const lit = useSharedValue(on ? 1 : 0);
+  const pulse = useSharedValue(1);
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    if (on) {
+      sweep.value = 0;
+      sweep.value = withTiming(1, { duration: ENHANCE_ANIMATION_MS, easing: Easing.inOut(Easing.cubic) });
+      lit.value = withTiming(1, { duration: ENHANCE_ANIMATION_MS, easing: Easing.inOut(Easing.quad) });
+      pulse.value = withSequence(withTiming(1.08, { duration: 300, easing: Easing.out(Easing.quad) }), withDelay(ENHANCE_ANIMATION_MS - 600, withSpring(1, { damping: 12, stiffness: 180 })));
+    } else {
+      lit.value = withTiming(0, { duration: 220 });
+      pulse.value = withSequence(withTiming(0.95, { duration: 90 }), withSpring(1, { damping: 14, stiffness: 240 }));
+    }
+  }, [on, sweep, lit, pulse]);
+
+  const bandStyle = useAnimatedStyle(() => ({ transform: [{ translateX: -w * 3 * (1 - sweep.value) }] }), [w]);
+  const coverStyle = useAnimatedStyle(() => ({ opacity: interpolate(lit.value, [0, 1], [0.94, 0.12]) }));
+  const chipStyle = useAnimatedStyle(() => ({ transform: [{ scale: pulse.value }] }));
+  const iconStyle = useAnimatedStyle(() => ({ transform: [{ rotate: `${sweep.value * 360}deg` }] }));
+
+  return (
+    <Animated.View style={chipStyle}>
+      <PressableScale
+        onPress={onPress}
+        onLayout={(e) => setW(e.nativeEvent.layout.width)}
+        style={styles.enhanceChip}
+        scaleTo={0.95}
+        accessibilityRole="switch"
+        accessibilityState={{ checked: on }}
+        accessibilityLabel="View enhancement"
+      >
+        {w > 0 ? (
+          <Animated.View style={[styles.enhanceBand, { width: w * 4 }, bandStyle]} pointerEvents="none">
+            <LinearGradient colors={RGB} start={{ x: 0, y: 0.5 }} end={{ x: 1, y: 0.5 }} style={StyleSheet.absoluteFill} />
+          </Animated.View>
+        ) : null}
+        <Animated.View style={[styles.enhanceCover, coverStyle]} pointerEvents="none" />
+        <Animated.View style={iconStyle}>
+          <Svg width={15} height={15} viewBox="0 0 24 24" fill="#fff">
+            <Path d="M12 2l1.9 6.1L20 10l-6.1 1.9L12 18l-1.9-6.1L4 10l6.1-1.9L12 2z" />
+            <Path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z" />
+          </Svg>
+        </Animated.View>
+        <Text style={styles.enhanceText} numberOfLines={1}>
+          Enhance
+        </Text>
+      </PressableScale>
+    </Animated.View>
+  );
+}
+
+// Auto next: its icon and a small switch, on or off at a glance.
+function AutoNextSwitch({ on, onPress }: { on: boolean; onPress: () => void }) {
+  const lit = useSharedValue(on ? 1 : 0);
+  useEffect(() => {
+    lit.value = withTiming(on ? 1 : 0, { duration: 180, easing: Easing.out(Easing.cubic) });
+  }, [on, lit]);
+  const trackStyle = useAnimatedStyle(() => ({ opacity: interpolate(lit.value, [0, 1], [0.3, 1]) }));
+  const knobStyle = useAnimatedStyle(() => ({ transform: [{ translateX: lit.value * 12 }] }));
+  return (
+    <PressableScale
+      onPress={onPress}
+      haptic
+      style={styles.autoSwitch}
+      hitSlop={6}
+      scaleTo={0.94}
+      accessibilityRole="switch"
+      accessibilityState={{ checked: on }}
+      accessibilityLabel="Auto next episode"
+    >
+      <Icon name="autoLine" size={19} color={on ? PLAYER_COLOURS.autoNext : 'rgba(255,255,255,0.6)'} />
+      <View style={styles.miniSwitch}>
+        <Animated.View style={[styles.miniTrack, trackStyle]} />
+        <Animated.View style={[styles.miniKnob, knobStyle]} />
+      </View>
+    </PressableScale>
+  );
+}
+
+// The size while pinching, to the percent. It says so when it reaches the size that fills the screen.
+function ZoomBadge({ zoom, opacity, from }: { zoom: SharedValue<number>; opacity: SharedValue<number>; from: SharedValue<PinchFrom> }) {
+  const [pct, setPct] = useState(100);
+  const [fills, setFills] = useState(false);
+  useAnimatedReaction(
+    () => (opacity.value > 0 ? Math.round(zoom.value * 100) : -1),
+    (now, before) => {
+      if (now < 0 || now === before) return;
+      runOnJS(setPct)(now);
+      runOnJS(setFills)(from.value.fill > 0 && Math.abs(now - from.value.fill * 100) < 1);
+    }
+  );
+  const style = useAnimatedStyle(() => ({ opacity: opacity.value }));
+  return (
+    <Animated.View pointerEvents="none" style={[styles.zoomBadge, style]}>
+      <Text style={styles.zoomText}>{pct}%</Text>
+      {fills ? <Text style={styles.zoomHint}>Fills screen</Text> : null}
+    </Animated.View>
+  );
+}
+
+// The fit button: a drawing of the screen and the picture on it. The picture changes shape with
+// the mode and grows live under the fingers, and the size shows beside it until it's reset.
+const ARect = Animated.createAnimatedComponent(Rect);
+const APath = Animated.createAnimatedComponent(Path);
+const FIT_COLOUR = '#2DD4BF';
+
+function FitButton({ mode, zoom, onPress }: { mode: SharedValue<FitMode>; zoom: SharedValue<number>; onPress: () => void }) {
+  const [pct, setPct] = useState(100);
+  useAnimatedReaction(
+    () => Math.round(zoom.value * 100),
+    (now, before) => {
+      if (now !== before) runOnJS(setPct)(now);
+    }
+  );
+  // 0 fit, 1 zoom, 2 stretch, moving smoothly between them.
+  const shape = useSharedValue(mode.value === 'contain' ? 0 : mode.value === 'cover' ? 1 : 2);
+  useAnimatedReaction(
+    () => mode.value,
+    (now) => {
+      shape.value = withSpring(now === 'contain' ? 0 : now === 'cover' ? 1 : 2, { damping: 16, stiffness: 180 });
+    }
+  );
+  const pictureProps = useAnimatedProps(() => {
+    const baseW = interpolate(shape.value, [0, 1, 2], [11, 19, 19]);
+    const baseH = interpolate(shape.value, [0, 1, 2], [8, 14, 14]);
+    const w = Math.min(19, Math.max(4, baseW * zoom.value));
+    const h = Math.min(14, Math.max(3, baseH * zoom.value));
+    return { x: 12 - w / 2, y: 12 - h / 2, width: w, height: h };
+  });
+  const coverProps = useAnimatedProps(() => ({ opacity: Math.max(0, 1 - Math.abs(shape.value - 1) * 2) }));
+  const stretchProps = useAnimatedProps(() => ({ opacity: Math.max(0, Math.min(1, (shape.value - 1.5) * 2)) }));
+  return (
+    <PressableScale onPress={onPress} style={styles.fitBtn} hitSlop={6} scaleTo={0.9} accessibilityLabel={pct === 100 ? 'Screen fit' : `Reset size, now ${pct} percent`}>
+      {pct === 100 ? null : <Text style={styles.fitPct}>{pct}%</Text>}
+      <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
+        <ARect animatedProps={pictureProps} rx={1.5} fill={FIT_COLOUR} fillOpacity={0.28} />
+        <Rect x={2.5} y={5} width={19} height={14} rx={2.5} stroke={FIT_COLOUR} strokeWidth={1.6} />
+        <APath animatedProps={coverProps} d="M14 8.5h3v3M10 15.5H7v-3" stroke="#fff" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+        <APath animatedProps={stretchProps} d="M6.5 12h11M9 9.5L6.5 12L9 14.5M15 9.5L17.5 12L15 14.5" stroke="#fff" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+      </Svg>
+    </PressableScale>
+  );
+}
+
+// Play and pause are one drawing: two four-cornered shapes that are bars when playing, and the
+// two halves of a triangle when paused. The triangle sits so its weight is on the centre, which
+// is what makes it look centred.
+const PLAY = [[7.5, 3.5, 14.25, 7.75, 14.25, 16.25, 7.5, 20.5], [14.25, 7.75, 21, 12, 21, 12, 14.25, 16.25]];
+const PAUSE = [[6.5, 4.5, 10, 4.5, 10, 19.5, 6.5, 19.5], [14, 4.5, 17.5, 4.5, 17.5, 19.5, 14, 19.5]];
+
+function PlayPauseGlyph({ shape, size }: { shape: SharedValue<number>; size: number }) {
+  const props = useAnimatedProps(() => {
+    const t = shape.value;
+    let d = '';
+    for (let part = 0; part < 2; part += 1) {
+      for (let i = 0; i < 8; i += 2) {
+        const x = PLAY[part][i] + (PAUSE[part][i] - PLAY[part][i]) * t;
+        const y = PLAY[part][i + 1] + (PAUSE[part][i + 1] - PLAY[part][i + 1]) * t;
+        d += `${i === 0 ? 'M' : 'L'}${x.toFixed(2)} ${y.toFixed(2)}`;
+      }
+      d += 'Z';
+    }
+    return { d };
+  });
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <APath animatedProps={props} fill="#fff" stroke="#fff" strokeWidth={1} strokeLinejoin="round" />
+    </Svg>
+  );
+}
 
 // The time, redrawn once a second and only while the controls can be seen.
 function TimeLabel({ time, duration, shown }: { time: SharedValue<number>; duration: number; shown: SharedValue<number> }) {
@@ -498,7 +851,7 @@ function TimeLabel({ time, duration, shown }: { time: SharedValue<number>; durat
   return (
     <Text style={styles.time}>
       {fmt(sec)}
-      <Text style={styles.timeDim}>{`  /  ${fmt(duration)}`}</Text>
+      <Text style={styles.timeDim}>{`  /  ${duration > 0 ? fmt(duration) : '--:--'}`}</Text>
     </Text>
   );
 }
@@ -545,18 +898,24 @@ function SeekBar({
   const lastSec = useSharedValue(-1);
   const [preview, setPreview] = useState(0);
 
-  // Glides between the player's time updates; a jump (a skip) moves quickly.
+  // Glides between the player's time updates. A jump (resuming, a skip) goes straight
+  // there: sliding looked as if something were dragging the bar.
   useAnimatedReaction(
     () => (duration > 0 ? clamp01(time.value / duration) : 0),
     (r) => {
       if (dragging.value) return;
       const far = Math.abs(r - progress.value) * duration > 2;
-      progress.value = withTiming(r, far ? { duration: 140, easing: Easing.out(Easing.quad) } : { duration: 420, easing: Easing.linear });
+      progress.value = far ? r : withTiming(r, { duration: 420, easing: Easing.linear });
     },
     [duration]
   );
 
-  const commit = useCallback((r: number) => onSeek(r * duration), [onSeek, duration]);
+  const commit = useCallback(
+    (r: number) => {
+      if (duration > 0) onSeek(r * duration);
+    },
+    [onSeek, duration]
+  );
   const show = useCallback(
     (r: number) => {
       setPreview(r * duration);
@@ -565,11 +924,20 @@ function SeekBar({
     [duration, onKeepAlive]
   );
 
+  // The bar's real width now: right after a turn, the layout event hasn't reached here yet.
+  const barRef = useAnimatedRef<Animated.View>();
+  const measureBar = () => {
+    'worklet';
+    const bar = measure(barRef);
+    if (bar && bar.width > 0) width.value = bar.width;
+  };
+
   const drag = usePanGesture({
     activeOffsetX: [-5, 5],
     failOffsetY: [-20, 20],
     onActivate: (e) => {
       'worklet';
+      measureBar();
       dragging.value = 1;
       progress.value = clamp01(e.x / width.value);
       lastSec.value = -1;
@@ -594,6 +962,7 @@ function SeekBar({
     maxDistance: 8,
     onActivate: (e) => {
       'worklet';
+      measureBar();
       progress.value = clamp01(e.x / width.value);
       runOnJS(commit)(progress.value);
     },
@@ -603,9 +972,10 @@ function SeekBar({
   const fillStyle = useAnimatedStyle(() => ({ transform: [{ scaleX: Math.max(0.001, progress.value) }] }));
   const bufferStyle = useAnimatedStyle(() => ({ transform: [{ scaleX: duration > 0 ? Math.max(0.001, clamp01(buffered.value / duration)) : 0.001 }] }), [duration]);
   const trackStyle = useAnimatedStyle(() => ({ transform: [{ scaleY: withTiming(dragging.value ? 1.6 : 1, { duration: 120 }) }] }));
-  const thumbStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: progress.value * width.value - 8 }, { scale: withTiming(dragging.value ? 1.35 : 1, { duration: 120 }) }],
-  }));
+  // A percentage of the bar's own width, so the dot stays on the fill through a turn, with
+  // nothing to wait for.
+  const railStyle = useAnimatedStyle(() => ({ transform: [{ translateX: `${progress.value * 100}%` }] }));
+  const thumbStyle = useAnimatedStyle(() => ({ transform: [{ scale: withTiming(dragging.value ? 1.35 : 1, { duration: 120 }) }] }));
   const bubbleStyle = useAnimatedStyle(() => ({
     opacity: withTiming(dragging.value ? 1 : 0, { duration: 120 }),
     transform: [{ translateX: Math.min(Math.max(progress.value * width.value - 34, 0), width.value - 68) }],
@@ -613,7 +983,7 @@ function SeekBar({
 
   return (
     <GestureDetector gesture={gesture}>
-      <Animated.View style={styles.seek} onLayout={(e) => (width.value = Math.max(1, e.nativeEvent.layout.width))}>
+      <Animated.View ref={barRef} style={styles.seek} onLayout={(e) => (width.value = Math.max(1, e.nativeEvent.layout.width))}>
         <Animated.View style={[styles.bubble, bubbleStyle]} pointerEvents="none">
           <Text style={styles.bubbleText}>{fmt(preview)}</Text>
         </Animated.View>
@@ -621,16 +991,19 @@ function SeekBar({
           <Animated.View style={[styles.trackFill, styles.buffered, bufferStyle]} />
           <Animated.View style={[styles.trackFill, styles.played, fillStyle]} />
         </Animated.View>
-        <Animated.View style={[styles.thumb, thumbStyle]} pointerEvents="none" />
+        <Animated.View style={[styles.thumbRail, railStyle]} pointerEvents="none">
+          <Animated.View style={[styles.thumb, thumbStyle]} />
+        </Animated.View>
       </Animated.View>
     </GestureDetector>
   );
 }
 
-// Round button with a turning arrow and "10", plus the small "+10" beside it.
+// A turning arrow around "10", with nothing drawn behind it, plus the small "+10" beside it.
 function SkipButton({
   dir,
   size,
+  glyph,
   total,
   turn,
   pop,
@@ -638,35 +1011,35 @@ function SkipButton({
 }: {
   dir: -1 | 1;
   size: number;
+  glyph: number;
   total: number;
   turn: SharedValue<number>;
   pop: SharedValue<number>;
   onPress: (side: -1 | 1) => void;
 }) {
-  const icon = Math.round(size * 0.58);
   const turnStyle = useAnimatedStyle(() => ({ transform: [{ rotate: `${turn.value}deg` }] }));
-  const popStyle = useAnimatedStyle(() => ({ opacity: pop.value, transform: [{ translateX: dir * 6 * pop.value }] }));
+  const popStyle = useAnimatedStyle(() => ({ opacity: pop.value, transform: [{ translateX: dir * 8 * pop.value }] }));
   return (
     <View style={{ width: size, height: size }}>
       <PressableScale
         onPress={() => onPress(dir)}
-        style={[styles.round, { width: size, height: size, borderRadius: size / 2 }]}
-        scaleTo={0.9}
-        hitSlop={12}
+        style={[styles.centerBtn, { width: size, height: size }]}
+        scaleTo={0.86}
+        hitSlop={8}
         accessibilityLabel={dir < 0 ? 'Back 10 seconds' : 'Forward 10 seconds'}
       >
-        <Animated.View style={turnStyle}>
-          <Svg width={icon} height={icon} viewBox="0 0 24 24" fill="none" style={dir < 0 ? { transform: [{ scaleX: -1 }] } : undefined}>
-            <Path d="M19.36 8.25A8.5 8.5 0 1 1 12 4" stroke="#fff" strokeWidth={2} strokeLinecap="round" />
-            <Path d="M10 1.4L12.6 4L10 6.6" stroke="#fff" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+        <Animated.View style={[styles.glyphShadow, turnStyle]}>
+          <Svg width={glyph} height={glyph} viewBox="0 0 24 24" fill="none" style={dir < 0 ? { transform: [{ scaleX: -1 }] } : undefined}>
+            <Path d="M19.36 8.25A8.5 8.5 0 1 1 12 4" stroke="#fff" strokeWidth={1.8} strokeLinecap="round" />
+            <Path d="M10 1.4L12.6 4L10 6.6" stroke="#fff" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
           </Svg>
         </Animated.View>
-        <Text style={[styles.skipNum, { fontSize: Math.round(icon * 0.33), marginTop: 2 }]}>10</Text>
+        <Text style={[styles.skipNum, { fontSize: Math.round(glyph * 0.3), marginTop: 2 }]}>10</Text>
       </PressableScale>
       <Animated.Text
         pointerEvents="none"
         numberOfLines={1}
-        style={[styles.skipPop, { top: size / 2 - 9 }, dir < 0 ? { right: size + 6 } : { left: size + 6 }, popStyle]}
+        style={[styles.skipPop, { top: size / 2 - 9 }, dir < 0 ? { right: size - 2 } : { left: size - 2 }, popStyle]}
       >
         {`${dir < 0 ? '−' : '+'}${total}`}
       </Animated.Text>
@@ -703,16 +1076,11 @@ const styles = StyleSheet.create({
   iconBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   iconBtnSmall: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   center: { ...StyleSheet.absoluteFill, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
-  // The same round glass button for skip and play: a soft dark disc with a thin edge.
-  round: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(14,14,18,0.5)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
-  },
-  playNudge: { marginLeft: 3 }, // a triangle looks off-centre until nudged towards its point
-  skipNum: { position: 'absolute', color: '#fff', fontFamily: fonts.black, letterSpacing: -0.3 },
+  behindMenu: { filter: [{ blur: 5 }] },
+  centerBtn: { alignItems: 'center', justifyContent: 'center' },
+  // Keeps white icons readable on a bright picture, with nothing drawn around them.
+  glyphShadow: { filter: [{ dropShadow: { offsetX: 0, offsetY: 1, standardDeviation: '3px', color: 'rgba(0,0,0,0.55)' } }] },
+  skipNum: { position: 'absolute', color: '#fff', fontFamily: fonts.bold, letterSpacing: -0.2, textShadowColor: 'rgba(0,0,0,0.6)', textShadowRadius: 3 },
   skipPop: { position: 'absolute', color: '#fff', fontFamily: fonts.black, fontSize: 13, lineHeight: 18, textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 4 },
   spinnerWrap: { alignItems: 'center', justifyContent: 'center' },
   bottom: { position: 'absolute', left: 0, right: 0, bottom: 0 },
@@ -724,14 +1092,32 @@ const styles = StyleSheet.create({
   trackFill: { ...StyleSheet.absoluteFill, transformOrigin: 'left' },
   buffered: { backgroundColor: 'rgba(255,255,255,0.4)' },
   played: { backgroundColor: colors.accent },
-  thumb: { position: 'absolute', left: 0, width: 16, height: 16, borderRadius: 8, backgroundColor: colors.accent, borderWidth: 2, borderColor: '#fff' },
+  thumbRail: { ...StyleSheet.absoluteFill, justifyContent: 'center' },
+  thumb: { position: 'absolute', left: -8, width: 16, height: 16, borderRadius: 8, backgroundColor: colors.accent, borderWidth: 2, borderColor: '#fff' },
   bubble: { position: 'absolute', left: 0, bottom: 28, width: 68, paddingVertical: 4, borderRadius: 8, backgroundColor: 'rgba(20,21,25,0.92)', alignItems: 'center' },
   bubbleText: { color: '#fff', fontFamily: fonts.bold, fontSize: 12.5 },
   chipRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 },
+  chipRowFolded: { height: 0, marginTop: 0, overflow: 'hidden' },
   chip: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 32, paddingHorizontal: 12, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.12)' },
+  // Only a language name can be long: on a small phone it gives way, and nothing else is cut.
+  chipFlexible: { flexShrink: 1, minWidth: 64 },
+  autoSwitch: { height: 40, paddingHorizontal: 6, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  miniSwitch: { width: 26, height: 14, justifyContent: 'center' },
+  miniTrack: { ...StyleSheet.absoluteFill, borderRadius: 7, backgroundColor: '#A78BFA' },
+  miniKnob: { width: 12, height: 12, marginLeft: 1, borderRadius: 6, backgroundColor: '#fff' },
+  fitBtn: { minWidth: 40, height: 40, paddingHorizontal: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5 },
+  fitPct: { color: FIT_COLOUR, fontFamily: fonts.bold, fontSize: 12.5 },
+  zoomBadge: { position: 'absolute', top: 18, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, height: 34, borderRadius: 17, backgroundColor: 'rgba(14,14,18,0.78)' },
+  zoomText: { color: '#fff', fontFamily: fonts.black, fontSize: 15 },
+  zoomHint: { color: FIT_COLOUR, fontFamily: fonts.bold, fontSize: 12.5 },
   chipOn: { backgroundColor: 'rgba(255,255,255,0.26)' },
   chipText: { color: '#fff', fontFamily: fonts.bold, fontSize: 12.5, maxWidth: 140 },
   nextChip: { backgroundColor: '#fff' },
+  enhanceChip: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 32, paddingHorizontal: 12, borderRadius: 16, overflow: 'hidden' },
+  enhanceBand: { position: 'absolute', top: 0, bottom: 0, left: 0 },
+  // Inset by the edge's width, so the colour shows as a ring when off.
+  enhanceCover: { position: 'absolute', top: 1.5, bottom: 1.5, left: 1.5, right: 1.5, borderRadius: 14.5, backgroundColor: '#15151b' },
+  enhanceText: { color: '#fff', fontFamily: fonts.bold, fontSize: 12.5, textShadowColor: 'rgba(0,0,0,0.5)', textShadowRadius: 3 },
   hud: {
     position: 'absolute',
     alignSelf: 'center',

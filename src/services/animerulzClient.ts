@@ -30,6 +30,41 @@ const STORAGE_ACTIVE_DOMAIN_KEY = '@animeverse:animerulz_active_domain';
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
+// If the site moves, edit config/stream-domains.json in this app's GitHub repo and
+// every installed app finds the new address within a day, with no update needed.
+const DOMAIN_LIST_URL = 'https://raw.githubusercontent.com/BrijeshShekhaliya/anime-verse-mobile-app/main/config/stream-domains.json';
+const STORAGE_DOMAIN_LIST_KEY = '@animeverse:animerulz_domain_list';
+const DOMAIN_LIST_REFRESH_MS = 24 * 60 * 60 * 1000;
+
+let _domains: string[] = [...ANIMERULZ_DOMAINS];
+let _domainListAt = 0;
+
+// Only plain https addresses count; the built-in ones always stay as a fallback.
+export function mergeDomainList(list: unknown): string[] {
+  const fresh = (Array.isArray(list) ? list : [])
+    .filter((d): d is string => typeof d === 'string' && /^https:\/\/[a-z0-9.-]+$/i.test(d))
+    .slice(0, 10);
+  return [...new Set([...fresh, ...ANIMERULZ_DOMAINS])];
+}
+
+async function refreshDomainList(): Promise<void> {
+  if (Date.now() - _domainListAt < DOMAIN_LIST_REFRESH_MS) return;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4000);
+  try {
+    const res = await fetch(DOMAIN_LIST_URL, { signal: ctrl.signal });
+    if (!res.ok) return;
+    const data = await res.json();
+    _domains = mergeDomainList(data?.domains);
+    _domainListAt = Date.now();
+    AsyncStorage?.setItem(STORAGE_DOMAIN_LIST_KEY, JSON.stringify({ at: _domainListAt, domains: _domains })).catch(() => {});
+  } catch {
+    // The saved or built-in list carries on.
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 let _pinnedDomain: string = ANIMERULZ_DOMAINS[0];
 let _hasVerifiedThisSession = false;
 let _verificationPromise: Promise<string> | null = null;
@@ -37,9 +72,17 @@ let _verificationPromise: Promise<string> | null = null;
 // Eagerly hydrate last working domain from storage in the background without blocking execution
 if (AsyncStorage) {
   try {
-    AsyncStorage.getItem(STORAGE_ACTIVE_DOMAIN_KEY)
+    AsyncStorage.getItem(STORAGE_DOMAIN_LIST_KEY)
+      .then((raw: string | null) => {
+        const saved = raw ? JSON.parse(raw) : null;
+        if (saved?.domains) {
+          _domains = mergeDomainList(saved.domains);
+          _domainListAt = saved.at || 0;
+        }
+        return AsyncStorage.getItem(STORAGE_ACTIVE_DOMAIN_KEY);
+      })
       .then((saved: string | null) => {
-        if (saved && ANIMERULZ_DOMAINS.includes(saved)) {
+        if (saved && _domains.includes(saved)) {
           _pinnedDomain = saved;
         }
       })
@@ -50,7 +93,33 @@ if (AsyncStorage) {
 // In-memory stream cache and AniList ID lookup cache
 const _streamCache = new Map<string, { ts: number; data: StreamData }>();
 const _anilistIdCache = new Map<string, number>();
-const CACHE_TTL = 15 * 60 * 1000; // 15 mins
+const CACHE_TTL = 90 * 60 * 1000; // links last 2 hours; isStreamUrlExpired guards the end
+// Links are kept on the phone too, so Continue Watching skips the lookup after a restart.
+const STORAGE_LINKS_KEY = '@animeverse:stream_links';
+const SAVED_LINKS = 40;
+const stillGood = (entry: { ts: number; data: StreamData }) => Date.now() - entry.ts < CACHE_TTL && !isStreamUrlExpired(entry.data?.streamUrl);
+if (AsyncStorage) {
+  try {
+    AsyncStorage.getItem(STORAGE_LINKS_KEY)
+      .then((raw: string | null) => {
+        const saved: Array<[string, { ts: number; data: StreamData }]> = raw ? JSON.parse(raw) : [];
+        for (const [key, entry] of saved) if (entry?.data?.streamUrl && stillGood(entry) && !_streamCache.has(key)) _streamCache.set(key, entry);
+      })
+      .catch(() => {});
+  } catch {}
+}
+function saveLinks() {
+  const fresh = [..._streamCache.entries()].filter(([, entry]) => stillGood(entry)).slice(-SAVED_LINKS);
+  AsyncStorage?.setItem(STORAGE_LINKS_KEY, JSON.stringify(fresh)).catch(() => {});
+}
+
+// Episodes this server has no playable copy of: not asked again for a while.
+const _missingEpisodes = new Map<string, number>();
+const MISSING_TTL = 30 * 60 * 1000;
+export function mainLacksEpisode(anilistId: number | null | undefined, episode: number): boolean {
+  const at = _missingEpisodes.get(`${anilistId}:${episode}`);
+  return at != null && Date.now() - at < MISSING_TTL;
+}
 
 /**
  * Validates whether signed streaming tokens (such as Ravok ?md5=...&expires=...)
@@ -313,6 +382,7 @@ async function verifyActiveDomainInBackground(): Promise<string> {
   }
 
   _verificationPromise = (async () => {
+    await refreshDomainList();
     let saved: string | null = null;
     try {
       if (AsyncStorage) {
@@ -321,7 +391,7 @@ async function verifyActiveDomainInBackground(): Promise<string> {
     } catch {}
 
     // 1. Test current pinned domain or saved domain first
-    const primary = saved && ANIMERULZ_DOMAINS.includes(saved) ? saved : _pinnedDomain;
+    const primary = saved && _domains.includes(saved) ? saved : _pinnedDomain;
     const ok = await checkDomainHealth(primary);
     if (ok) {
       _pinnedDomain = primary;
@@ -330,7 +400,7 @@ async function verifyActiveDomainInBackground(): Promise<string> {
     }
 
     // 2. Fall back to testing all known mirrors
-    for (const domain of ANIMERULZ_DOMAINS) {
+    for (const domain of _domains) {
       if (domain === primary) continue;
       const mirrorOk = await checkDomainHealth(domain);
       if (mirrorOk) {
@@ -346,7 +416,7 @@ async function verifyActiveDomainInBackground(): Promise<string> {
     }
 
     // 3. Fallback default if completely offline or unreachable
-    const defaultDomain = ANIMERULZ_DOMAINS[0];
+    const defaultDomain = _domains[0];
     _pinnedDomain = defaultDomain;
     _hasVerifiedThisSession = true;
     return defaultDomain;
@@ -363,7 +433,7 @@ export async function getOrVerifyActiveDomain(force = false): Promise<string> {
   }
 
   // Optimistic fast path: return pinned domain immediately without blocking
-  const domain = _pinnedDomain || ANIMERULZ_DOMAINS[0];
+  const domain = _pinnedDomain || _domains[0];
   if (!_hasVerifiedThisSession && !_verificationPromise) {
     verifyActiveDomainInBackground().catch(() => {});
   }
@@ -374,6 +444,7 @@ export async function getOrVerifyActiveDomain(force = false): Promise<string> {
  * Resolves Multi-Audio stream for the given anime and episode.
  */
 const _inflight = new Map<string, Promise<StreamData>>();
+let _lastRecheck = 0;
 
 export function resolveAnimeRulzDirect(
   params: {
@@ -434,10 +505,15 @@ async function resolveAnimeRulzOnce(
   }
 
   if (!anilistId || anilistId <= 0) {
-    throw new Error('AnimeRulz requires a valid positive anilistId');
+    throw Object.assign(new Error('AnimeRulz requires a valid positive anilistId'), { kind: 'missing' });
   }
 
   const cacheKey = `${anilistId}:${params.episode}`.toLowerCase();
+  const notHere = () => {
+    _missingEpisodes.set(cacheKey, Date.now());
+    return Object.assign(new Error("This episode isn't on the main server"), { kind: 'missing' });
+  };
+  if (!forceRefresh && mainLacksEpisode(anilistId, params.episode)) throw notHere();
   if (!forceRefresh) {
     const hit = _streamCache.get(cacheKey);
     if (hit && Date.now() - hit.ts < CACHE_TTL && !isStreamUrlExpired(hit.data.streamUrl)) {
@@ -450,21 +526,20 @@ async function resolveAnimeRulzOnce(
 
   const ep = params.episode;
 
-  // One bad answer from a busy server shouldn't cost the viewer every language:
-  // try again, then the mirror, before giving up and leaving it to the backup.
-  const mirror = ANIMERULZ_DOMAINS.find((d) => d !== domain);
+  // A clear no is believed at once (the episode isn't here, or the server refused).
+  // Only a lost connection or a server error gets one more try.
   let streamRes: any = null;
   let lastError: unknown = null;
-  for (const base of mirror ? [domain, domain, mirror] : [domain, domain]) {
+  for (let attempt = 1; attempt <= 2 && !streamRes; attempt++) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 5000);
     try {
-      const res = await fetch(`${base}/api/reanime/stream?anilist_id=${anilistId}&episode=${ep}`, {
+      const res = await fetch(`${domain}/api/reanime/stream?anilist_id=${anilistId}&episode=${ep}`, {
         headers: {
           'User-Agent': USER_AGENT,
           Accept: 'application/json, text/plain, */*',
-          Origin: base,
-          Referer: `${base}/watch?anilist_id=${anilistId}&ep=${ep}`,
+          Origin: domain,
+          Referer: `${domain}/watch?anilist_id=${anilistId}&ep=${ep}`,
           'Sec-Fetch-Site': 'same-origin',
           'X-Requested-With': 'XMLHttpRequest',
         },
@@ -472,41 +547,44 @@ async function resolveAnimeRulzOnce(
       });
 
       if (!res.ok) {
-        throw new Error(`AnimeRulz stream API HTTP ${res.status}`);
+        const kind = res.status === 404 || res.status >= 500 ? 'connection' : 'refused';
+        throw Object.assign(new Error(`HTTP ${res.status}`), { kind });
       }
       streamRes = await res.json();
-      if (base !== domain) _pinnedDomain = base;
-      break;
     } catch (e) {
       lastError = e;
-      console.log(`[Stream] main server didn't answer (${base}, ep ${ep}): ${e instanceof Error ? e.message : String(e)}`);
-      await new Promise((r) => setTimeout(r, 300));
+      console.log(`[Stream] main server, ep ${ep}, try ${attempt}: ${e instanceof Error ? e.message : String(e)}`);
+      if ((e as { kind?: string }).kind === 'missing' || (e as { kind?: string }).kind === 'refused') break;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 300));
     } finally {
       clearTimeout(timer);
     }
   }
-  if (!streamRes) throw lastError instanceof Error ? lastError : new Error('AnimeRulz stream API failed');
-
-  if (!streamRes || !Array.isArray(streamRes.servers) || streamRes.servers.length === 0) {
-    throw new Error('No streaming servers available on AnimeRulz');
+  if (!streamRes) {
+    // Perhaps the site has moved: check the addresses, at most once a minute.
+    if (Date.now() - _lastRecheck > 60000) {
+      _lastRecheck = Date.now();
+      getOrVerifyActiveDomain(true).catch(() => {});
+    }
+    throw lastError instanceof Error ? lastError : new Error('No answer');
   }
 
-  // Priority 1: Multi-Audio / Indian Server (e.g. Multi-1 on Ravok or Multi-2)
-  const multiServer =
-    streamRes.servers.find(
-      (s: any) =>
-        s &&
-        (s.dataType === 'indian' || String(s.serverName || '').toLowerCase().includes('multi')),
-    ) || streamRes.servers[0];
+  const servers: any[] = Array.isArray(streamRes?.servers) ? streamRes.servers.filter(Boolean) : [];
+  if (!servers.length) throw notHere();
 
+  // What this episode has, as this server lists it.
+  const modes = (['sub', 'dub'] as const).filter((m) => servers.some((s) => s.dataType === m));
+
+  // The server the app can play: the multi-audio one. Many episodes (often new
+  // shows) only have the other kinds listed, and that's simply not playable here.
+  const multiServer = servers.find((s) => /ravok\.buzz/.test(String(s.dataLink))) || servers.find((s) => /\.m3u8/i.test(String(s.dataLink)));
   const dataLink = multiServer?.dataLink;
-  if (!dataLink) {
-    throw new Error('No valid server link found on AnimeRulz');
-  }
+  if (!dataLink) throw notHere();
 
   let masterM3u8: string | null = null;
   let subtitles: SubtitleTrack[] = [];
   let referer = `${domain}/`;
+  let videoRequestFailed = false;
 
   // Case A: Ravok Server (Multi-1)
   if (dataLink.includes('ravok.buzz')) {
@@ -550,9 +628,11 @@ async function resolveAnimeRulzOnce(
             referer = 'https://ravok.buzz/';
             if (masterM3u8) break;
           }
+          if (!postRes?.ok) videoRequestFailed = true;
           console.log(`[Stream] main server gave no video link (ep ${ep}, try ${attempt}, HTTP ${postRes?.status})`);
         } catch (e) {
           // Attempt failed, back off and retry once
+          videoRequestFailed = true;
           console.log(`[Stream] video link request failed (ep ${ep}, try ${attempt}): ${e instanceof Error ? e.message : String(e)}`);
         } finally {
           clearTimeout(fetchTimer);
@@ -570,7 +650,8 @@ async function resolveAnimeRulzOnce(
   }
 
   if (!masterM3u8) {
-    throw new Error('Could not extract master.m3u8 from AnimeRulz server');
+    if (!videoRequestFailed) throw notHere();
+    throw new Error('The main server gave no video link');
   }
 
   // Construct audio tracks based on server metadata without blocking JS-level manifest fetch.
@@ -628,8 +709,11 @@ async function resolveAnimeRulzOnce(
     referer,
     subtitles,
     audioTracks,
+    modes,
   };
 
+  _missingEpisodes.delete(cacheKey);
   _streamCache.set(cacheKey, { ts: Date.now(), data: result });
+  saveLinks();
   return result;
 }

@@ -6,16 +6,23 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createContext, startTransition, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { Anime } from './types';
+import { savedZoom } from './videoZoom';
 
 export type Settings = {
   titleLang: 'english' | 'romaji'; // "Attack on Titan" or "Shingeki no Kyojin"
   audioLang: 'japanese' | 'english' | 'hindi'; // the viewer's preferred audio language
+  audioLang2: 'japanese' | 'english' | 'hindi'; // what plays when that one isn't there (see secondLanguageFor)
   quality: 'saver' | 'medium' | 'highest'; // preferred streaming quality
   launchSound: boolean; // the opening animation's sound
+  viewEnhance: boolean; // the player's picture enhancement
+  playerQuality: number | null; // last chosen in the player: a height, -1 for Auto, null for the setting above
+  playerSpeed: number;
+  playerFit: 'contain' | 'cover' | 'fill';
+  playerZoom: number; // pinched size in fullscreen: 1 is the fit mode's own size
 };
 
 const KEY = 'animeverse:settings:v1';
-export const DEFAULT_SETTINGS: Settings = { titleLang: 'english', audioLang: 'japanese', quality: 'medium', launchSound: true };
+export const DEFAULT_SETTINGS: Settings = { titleLang: 'english', audioLang: 'japanese', audioLang2: 'japanese', quality: 'medium', launchSound: true, viewEnhance: false, playerQuality: null, playerSpeed: 1, playerFit: 'contain', playerZoom: 1 };
 
 // Read directly at launch (the opening animation plays before the app's
 // settings are loaded).
@@ -40,9 +47,15 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
           ...s,
           ...(saved.titleLang ? { titleLang: saved.titleLang } : {}),
           ...(saved.audioLang ? { audioLang: saved.audioLang } : {}),
+          ...(saved.audioLang2 ? { audioLang2: saved.audioLang2 } : {}),
           // Older saves used other values (auto/1080p...); those fall back to the default.
           ...(saved.quality && ['saver', 'medium', 'highest'].includes(saved.quality) ? { quality: saved.quality } : {}),
           ...(typeof saved.launchSound === 'boolean' ? { launchSound: saved.launchSound } : {}),
+          ...(typeof saved.viewEnhance === 'boolean' ? { viewEnhance: saved.viewEnhance } : {}),
+          ...(typeof saved.playerQuality === 'number' ? { playerQuality: saved.playerQuality } : {}),
+          ...(typeof saved.playerSpeed === 'number' && saved.playerSpeed > 0 ? { playerSpeed: saved.playerSpeed } : {}),
+          ...(saved.playerFit && ['contain', 'cover', 'fill'].includes(saved.playerFit) ? { playerFit: saved.playerFit } : {}),
+          playerZoom: savedZoom(saved.playerZoom),
         }));
       })
       .catch(() => {})

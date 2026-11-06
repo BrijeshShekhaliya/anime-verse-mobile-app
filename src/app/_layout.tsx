@@ -1,3 +1,4 @@
+import '@/lib/quietLogs';
 import { Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_800ExtraBold, Inter_900Black } from '@expo-google-fonts/inter';
 import { Orbitron_900Black } from '@expo-google-fonts/orbitron';
 import { useFonts } from 'expo-font';
@@ -18,6 +19,9 @@ import { colors } from '@/lib/theme';
 import { getOrVerifyActiveDomain } from '@/services/animerulzClient';
 import { SettingsProvider } from '@/lib/settings';
 import { TOUR_FIRST, loadOnboarded, onboarded, tourItems } from '@/lib/onboarding';
+
+// Anything that breaks on a screen shows a way forward instead of closing the app.
+export { CrashScreen as ErrorBoundary } from '@/components/CrashScreen';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
 // The animated splash (same black, same logo) takes over with a quick cross-fade.
@@ -87,7 +91,6 @@ export default function RootLayout() {
               <Stack.Screen name="watch/[id]" />
               <Stack.Screen name="search" />
               <Stack.Screen name="settings" />
-              <Stack.Screen name="kuro-test" />
               <Stack.Screen name="welcome" options={{ animation: 'fade', animationDuration: 300, gestureEnabled: false }} />
             </Stack>
             </SettingsProvider>

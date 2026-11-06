@@ -1,13 +1,23 @@
 package expo.modules.nativemedia3player
 
+import android.animation.ValueAnimator
 import android.content.Context
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
+import android.graphics.Paint
+import android.graphics.RenderEffect
+import android.graphics.RuntimeShader
+import android.os.Build
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.FrameMetrics
 import android.view.ViewGroup
 import android.view.LayoutInflater
+import android.view.TextureView
 import android.view.View.MeasureSpec
+import android.view.Window
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -54,6 +64,11 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
   val onVideoTracks by EventDispatcher()
   val onEnd by EventDispatcher()
   val onError by EventDispatcher()
+  val onSystemPause by EventDispatcher()
+  private val isDebuggable = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+  private fun logDebug(message: String) {
+    if (isDebuggable) Log.d("AnimeVersePlayer", message)
+  }
   private val mainHandler = Handler(Looper.getMainLooper())
   private val trackSelector = DefaultTrackSelector(context)
   private val loadControl = DefaultLoadControl.Builder()
@@ -80,7 +95,17 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
   private var selectedQualityHeight = -1
   private var selectedAudioTrackId: Int? = null
   private var activeAudioTrackId: Int? = null
+  private var startTimeMs = 0L
+  private var enhanced = false
+  private var enhanceStrength = 0f // 0..1: the fade
+  private var enhanceFade: ValueAnimator? = null
+  private val enhanceGovernor = EnhanceGovernor()
+  private var edgeShader: RuntimeShader? = null
+  private var detailShader: RuntimeShader? = null
+  private var metricsWindow: Window? = null
+  private var metricsListener: Window.OnFrameMetricsAvailableListener? = null
   private var preferredAudioLanguage: String? = null
+  private var fallbackAudioLanguage: String? = null
   private var selectedTextTrackId: Int? = null
   private var subtitlesEnabled = false
   private var lastTracksSignature = ""
@@ -100,6 +125,10 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
     playerView.setShutterBackgroundColor(android.graphics.Color.BLACK)
     addView(playerView, ViewGroup.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+    // The shaders work in pixels, so a rotation or a new fit needs them told the new size.
+    playerView.videoSurfaceView?.addOnLayoutChangeListener { _, l, t, r, b, oldL, oldT, oldR, oldB ->
+      if (r - l != oldR - oldL || b - t != oldB - oldT) drawEnhancement()
+    }
     applyTrackPreferences()
     ensurePlayer()
   }
@@ -121,11 +150,11 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
           override fun onPlaybackStateChanged(state: Int) {
             when (state) {
               Player.STATE_BUFFERING -> {
-                Log.d("AnimeVersePlayer", "Player state: BUFFERING at ${exo.currentPosition}ms")
+                logDebug("Player state: BUFFERING at ${exo.currentPosition}ms")
                 emit("onBuffer", mapOf("buffering" to true))
               }
               Player.STATE_READY -> {
-                Log.d("AnimeVersePlayer", "Player state: READY (buffered: ${exo.bufferedPosition}ms, playing: ${exo.isPlaying})")
+                logDebug("Player state: READY (buffered: ${exo.bufferedPosition}ms, playing: ${exo.isPlaying})")
                 emit("onBuffer", mapOf("buffering" to false))
                 preloadAudioPlaylists(exo)
                 val duration = if (exo.duration == C.TIME_UNSET) 0.0 else exo.duration / 1000.0
@@ -140,11 +169,19 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
           }
           override fun onTracksChanged(tracks: Tracks) { publishTracks(tracks) }
           override fun onVideoSizeChanged(videoSize: VideoSize) {
-            Log.d("AnimeVersePlayer", "Active video size changed: ${videoSize.width}x${videoSize.height}")
+            logDebug("Active video size changed: ${videoSize.width}x${videoSize.height}")
+            drawEnhancement()
           }
           override fun onIsPlayingChanged(isPlaying: Boolean) { playerView.keepScreenOn = isPlaying }
+          // A call, another app's sound, headphones pulled out: the player stopped by itself,
+          // and the play button has to say so.
+          override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            if (!playWhenReady && reason != Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST && reason != Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) {
+              emit("onSystemPause", emptyMap<String, Any>())
+            }
+          }
           override fun onPlayerError(error: PlaybackException) {
-            Log.e("AnimeVersePlayer", "Player error: ${error.message}", error)
+            logDebug("Player error: ${error.message}")
             if (isTemporaryNetworkError(error) && networkRetries < MAX_NETWORK_RETRIES) {
               // A lost signal isn't a broken video: try again from the same moment
               // instead of reloading the episode or changing server.
@@ -164,7 +201,10 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
           AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
           true,
         )
-        exo.setSeekParameters(SeekParameters.CLOSEST_SYNC)
+        exo.setHandleAudioBecomingNoisy(true)
+        // Within half a second of the target: a nearby keyframe if there is one (shown at
+        // once), otherwise the player decodes up to it. "Closest keyframe" could land seconds off.
+        exo.setSeekParameters(SeekParameters(500_000L, 500_000L))
         exo.playWhenReady = !paused
         exo.setPlaybackSpeed(playbackRate)
         exo.volume = volume
@@ -191,6 +231,7 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     textGroups.clear()
     videoTracks.clear()
     playlistCache.clear()
+    if (upcomingFor == target) playlistCache.putAll(upcomingPlaylists)
     preloadedFor = null
     networkRetries = 0
     retryRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -207,7 +248,8 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     val newSource = HlsMediaSource.Factory(cachingFactory)
       .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(MIN_LOAD_RETRIES))
       .createMediaSource(mediaItem)
-    player?.setMediaSource(newSource, true)
+    // Starts loading at the right moment, so nothing from the beginning is downloaded or shown.
+    if (startTimeMs > 0) player?.setMediaSource(newSource, startTimeMs) else player?.setMediaSource(newSource, true)
     player?.prepare()
     player?.playWhenReady = !paused
   }
@@ -249,14 +291,14 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
   }
   fun setSelectedQualityHeight(value: Int) {
     if (selectedQualityHeight != value) {
-      Log.d("AnimeVersePlayer", "setSelectedQualityHeight: $value (was $selectedQualityHeight)")
+      logDebug("setSelectedQualityHeight: $value (was $selectedQualityHeight)")
       selectedQualityHeight = value
       applyTrackPreferences()
     }
   }
   fun setSelectedAudioTrackId(value: Int?) {
     if (selectedAudioTrackId != value) {
-      Log.d("AnimeVersePlayer", "setSelectedAudioTrackId: $value (was $selectedAudioTrackId)")
+      logDebug("setSelectedAudioTrackId: $value (was $selectedAudioTrackId)")
       selectedAudioTrackId = value
       // If already playing this track (e.g. native preferredAudioLanguage already selected it),
       // avoid re-applying preferences to prevent buffer drops.
@@ -269,8 +311,148 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
   fun setPreferredAudioLanguage(value: String?) {
     val normalized = value?.trim()?.lowercase(Locale.ROOT)
     if (preferredAudioLanguage != normalized) {
-      Log.d("AnimeVersePlayer", "setPreferredAudioLanguage: $normalized (was $preferredAudioLanguage)")
+      logDebug("setPreferredAudioLanguage: $normalized (was $preferredAudioLanguage)")
       preferredAudioLanguage = normalized
+      applyTrackPreferences()
+    }
+  }
+  fun setEnhanced(value: Boolean) {
+    if (enhanced == value) return
+    enhanced = value
+    fadeEnhancement()
+  }
+
+  // On and off with a short fade. It runs when the picture is drawn, so nothing in the video
+  // pipeline is touched: no reload, no lost frames, nothing to flicker. Each step only changes
+  // a number the shaders read, and the fade starts at a strength that changes no pixel.
+  private fun fadeEnhancement() {
+    enhanceFade?.cancel()
+    enhanceFade = null
+    val target = if (enhanced) 1f else 0f
+    if (enhanced) watchFrameTimes() else stopWatchingFrameTimes()
+    if (!isAttachedToWindow) {
+      // Opening a video with it already on: nothing to fade from.
+      enhanceStrength = target
+      drawEnhancement()
+      return
+    }
+    enhanceFade = ValueAnimator.ofFloat(enhanceStrength, target).apply {
+      duration = ENHANCE_FADE_MS
+      addUpdateListener {
+        enhanceStrength = it.animatedValue as Float
+        drawEnhancement()
+      }
+      start()
+    }
+  }
+
+  private fun drawEnhancement() {
+    val view = playerView.videoSurfaceView as? TextureView ?: return
+    try {
+      if (enhanceStrength <= 0f) {
+        clearEnhancement(view)
+      } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && enhanceGovernor.level != EnhanceLevel.COLOUR) {
+        if (view.width > 0 && view.height > 0) view.setRenderEffect(gpuEnhancement(view))
+      } else {
+        drawColourOnly(view)
+      }
+    } catch (e: Throwable) {
+      // A phone whose GPU refuses the shaders still gets the colour.
+      logDebug("Enhancement fallback: ${e.message}")
+      enhanceGovernor.lowerTo(EnhanceLevel.COLOUR)
+      try {
+        drawColourOnly(view)
+      } catch (_: Throwable) {
+      }
+    }
+  }
+
+  private fun gpuEnhancement(view: TextureView): RenderEffect {
+    val spread = enhanceSpread(view.height, player?.videoSize?.height ?: 0)
+    val soft = enhanceSoftness(spread)
+    val full = enhanceGovernor.level == EnhanceLevel.FULL
+    val detail = detailShader ?: RuntimeShader(ENHANCE_DETAIL_SHADER).also { detailShader = it }
+    setEnhanceUniforms(detail, view, spread, soft)
+    detail.setFloatUniform("clarity", if (full) 1f else 0f)
+    val detailEffect = RenderEffect.createRuntimeShaderEffect(detail, "content")
+    if (!full) return detailEffect
+    val edge = edgeShader ?: RuntimeShader(ENHANCE_EDGE_SHADER).also { edgeShader = it }
+    setEnhanceUniforms(edge, view, spread, soft)
+    return RenderEffect.createChainEffect(detailEffect, RenderEffect.createRuntimeShaderEffect(edge, "content"))
+  }
+
+  private fun setEnhanceUniforms(shader: RuntimeShader, view: TextureView, spread: Float, soft: Float) {
+    shader.setFloatUniform("size", view.width.toFloat(), view.height.toFloat())
+    shader.setFloatUniform("strength", enhanceStrength)
+    shader.setFloatUniform("spread", spread)
+    shader.setFloatUniform("soft", soft)
+  }
+
+  private fun clearEnhancement(view: TextureView) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) view.setRenderEffect(null)
+    view.setLayerPaint(null)
+  }
+
+  private fun drawColourOnly(view: TextureView) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) view.setRenderEffect(null)
+    view.setLayerPaint(Paint().apply { colorFilter = ColorMatrixColorFilter(enhanceMatrix()) })
+  }
+
+  private fun enhanceMatrix(): ColorMatrix {
+    val c = 1f + (ENHANCE_CONTRAST - 1f) * enhanceStrength
+    val shift = (1f - c) * 127.5f
+    return ColorMatrix().apply {
+      setSaturation(1f + (ENHANCE_SATURATION - 1f) * enhanceStrength)
+      postConcat(
+        ColorMatrix(
+          floatArrayOf(
+            c, 0f, 0f, 0f, shift,
+            0f, c, 0f, 0f, shift,
+            0f, 0f, c, 0f, shift,
+            0f, 0f, 0f, 1f, 0f,
+          ),
+        ),
+      )
+    }
+  }
+
+  // Watches how long the GPU takes per frame, and steps the enhancement down if it can't keep up.
+  private fun watchFrameTimes() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || metricsListener != null) return
+    val window = appContext.currentActivity?.window ?: return
+    val listener = Window.OnFrameMetricsAvailableListener { _, metrics, _ ->
+      val gpuNanos = metrics.getMetric(FrameMetrics.GPU_DURATION)
+      if (gpuNanos >= 0 && enhanceStrength >= 1f && player?.isPlaying == true && enhanceGovernor.onFrame(gpuNanos / 1_000_000.0)) {
+        logDebug("Enhancement lowered to ${enhanceGovernor.level}")
+        drawEnhancement()
+      }
+    }
+    try {
+      window.addOnFrameMetricsAvailableListener(listener, mainHandler)
+      metricsWindow = window
+      metricsListener = listener
+    } catch (e: Throwable) {
+      logDebug("Frame times unavailable: ${e.message}")
+    }
+  }
+
+  private fun stopWatchingFrameTimes() {
+    val listener = metricsListener ?: return
+    try {
+      metricsWindow?.removeOnFrameMetricsAvailableListener(listener)
+    } catch (_: Throwable) {
+    }
+    metricsWindow = null
+    metricsListener = null
+  }
+
+  fun setStartTime(value: Double?) {
+    startTimeMs = if (value != null && value.isFinite() && value > 0) (value * 1000).toLong() else 0L
+  }
+  fun setFallbackAudioLanguage(value: String?) {
+    val normalized = value?.trim()?.lowercase(Locale.ROOT)
+    if (fallbackAudioLanguage != normalized) {
+      fallbackAudioLanguage = normalized
       applyTrackPreferences()
     }
   }
@@ -296,60 +478,27 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     builder.clearOverridesOfType(C.TRACK_TYPE_VIDEO)
     if (selectedQualityHeight < 0) {
       // Auto restores ExoPlayer's adaptive bitrate selection.
-      builder.setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
-      builder.setMinVideoSize(0, 0)
-      builder.setMaxVideoBitrate(Int.MAX_VALUE)
+      builder.adaptVideo()
       builder.setViewportSizeToPhysicalDisplaySize(context, true)
-      Log.d("AnimeVersePlayer", "applyTrackPreferences: Video set to Auto (Adaptive)")
+      logDebug("applyTrackPreferences: Video set to Auto (Adaptive)")
     } else {
-      // Locked: only this height qualifies, so the player has nothing to adapt
-      // between. Set as a rule rather than a pick of one track, it holds from the
-      // first segment (no low-quality start, no re-download once tracks are known)
-      // and into the next episode. If a video lacks this height, the player takes
-      // the closest one below it.
-      builder.setMaxVideoSize(Int.MAX_VALUE, selectedQualityHeight)
-      builder.setMinVideoSize(0, selectedQualityHeight)
-      builder.setMaxVideoBitrate(Int.MAX_VALUE)
-      builder.clearViewportSizeConstraints()
-      Log.d("AnimeVersePlayer", "applyTrackPreferences: Locked video height to $selectedQualityHeight")
+      val height = nearestHeight(videoTracks.map { it.third }, selectedQualityHeight)
+      builder.lockVideoHeight(height)
+      logDebug("applyTrackPreferences: Locked video height to $height")
     }
 
-    // Configure preferred language so ExoPlayer picks it natively on manifest load
-    val prefLang = preferredAudioLanguage?.lowercase(Locale.ROOT)
-    if (!prefLang.isNullOrBlank()) {
-      when {
-        prefLang.contains("hin") -> {
-          builder.setPreferredAudioLanguages("hin", "hi")
-          builder.setPreferredAudioLabels("Hindi", "hindi")
-        }
-        prefLang.contains("jpn") || prefLang.contains("ja") -> {
-          builder.setPreferredAudioLanguages("jpn", "ja")
-          builder.setPreferredAudioLabels("Japanese", "japanese")
-        }
-        prefLang.contains("eng") || prefLang.contains("en") -> {
-          builder.setPreferredAudioLanguages("eng", "en")
-          builder.setPreferredAudioLabels("English", "english")
-        }
-        prefLang.contains("tel") || prefLang.contains("te") -> {
-          builder.setPreferredAudioLanguages("tel", "te")
-          builder.setPreferredAudioLabels("Telugu", "telugu")
-        }
-        prefLang.contains("tam") || prefLang.contains("ta") -> {
-          builder.setPreferredAudioLanguages("tam", "ta")
-          builder.setPreferredAudioLabels("Tamil", "tamil")
-        }
-        else -> {
-          builder.setPreferredAudioLanguages(prefLang)
-        }
-      }
-    }
+    // The whole order goes to ExoPlayer before it loads anything, so it starts on the
+    // right language from the first frame: first choice, second, Japanese, English.
+    val wantedOrder = audioOrder()
+    builder.setPreferredAudioLanguages(*wantedOrder.flatMap { it.codes }.toTypedArray())
+    builder.setPreferredAudioLabels(*wantedOrder.flatMap { it.labels }.toTypedArray())
 
     // Lock exact audio track if selected and known in current groups
     val audio = selectedAudioTrackId
     if (audio != null && audio >= 0 && audioGroups.getOrNull(audio) != null) {
       val (group, trackIndex) = audioGroups[audio]
       builder.setOverrideForType(TrackSelectionOverride(group, listOf(trackIndex)))
-      Log.d("AnimeVersePlayer", "applyTrackPreferences: Locked audio to track index $trackIndex")
+      logDebug("applyTrackPreferences: Locked audio to track index $trackIndex")
     } else {
       builder.clearOverridesOfType(C.TRACK_TYPE_AUDIO)
     }
@@ -371,6 +520,23 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
       trackSelector.parameters = newParams
     }
   }
+
+  private class AudioLanguage(val codes: List<String>, val labels: List<String>)
+
+  private fun audioLanguage(name: String): AudioLanguage = when {
+    name.contains("hin") -> AudioLanguage(listOf("hin", "hi"), listOf("Hindi", "hindi"))
+    name.contains("jpn") || name.contains("ja") -> AudioLanguage(listOf("jpn", "ja"), listOf("Japanese", "japanese"))
+    name.contains("eng") || name.contains("en") -> AudioLanguage(listOf("eng", "en"), listOf("English", "english"))
+    name.contains("tel") || name.contains("te") -> AudioLanguage(listOf("tel", "te"), listOf("Telugu", "telugu"))
+    name.contains("tam") || name.contains("ta") -> AudioLanguage(listOf("tam", "ta"), listOf("Tamil", "tamil"))
+    else -> AudioLanguage(listOf(name), emptyList())
+  }
+
+  private fun audioOrder(): List<AudioLanguage> =
+    listOfNotNull(preferredAudioLanguage, fallbackAudioLanguage, "japanese", "english")
+      .filter { it.isNotBlank() }
+      .distinct()
+      .map { audioLanguage(it) }
 
   private fun publishTracks(tracks: Tracks) {
     val newAudio = mutableListOf<Pair<TrackGroup, Int>>()
@@ -453,7 +619,7 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     textGroups.clear(); textGroups.addAll(newText)
     videoTracks.clear(); videoTracks.addAll(newVideo)
     activeAudioTrackId = activeAudioId
-    Log.d("AnimeVersePlayer", "publishTracks: detected ${audioOut.size} audios (active: $activeAudioId), ${videoOut.size} video variants")
+    logDebug("publishTracks: detected ${audioOut.size} audios (active: $activeAudioId), ${videoOut.size} video variants")
     val signature = audioOut.joinToString { "${it["id"]}:${it["name"]}:${it["lang"]}" } + "|" +
                     textOut.joinToString { "${it["id"]}:${it["name"]}:${it["lang"]}" } + "|" +
                     videoOut.joinToString { "${it["height"]}x${it["width"]}" }
@@ -463,7 +629,8 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
       emit("onTextTracks", mapOf("tracks" to textOut))
       emit("onVideoTracks", mapOf("levels" to videoOut))
       val wanted = selectedAudioTrackId
-      if (wanted != null && wanted >= 0 && wanted != activeAudioId) applyTrackPreferences()
+      val heightMissing = selectedQualityHeight > 0 && videoTracks.isNotEmpty() && videoTracks.none { it.third == selectedQualityHeight }
+      if (heightMissing || (wanted != null && wanted >= 0 && wanted != activeAudioId)) applyTrackPreferences()
     }
   }
 
@@ -487,7 +654,50 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     }.start()
   }
 
-  private fun readPlaylist(url: String, from: String?): ByteArray? {
+  // The next episode's playlists, read near the end of this one. This server takes
+  // about 1.7 s to send them, so the next episode starts that much sooner. Kept outside
+  // this view, which is replaced when the episode changes.
+  fun preloadNext(value: List<String>?) {
+    val uri = value?.getOrNull(0)
+    if (uri.isNullOrBlank() || uri == upcomingFor) return
+    val from = value.getOrNull(1)?.takeIf { it.isNotBlank() }
+    val height = selectedQualityHeight
+    val wanted = audioOrder().flatMap { it.codes }
+    upcomingFor = uri
+    upcomingPlaylists.clear()
+    Thread {
+      val master = readPlaylist(uri, from, finishedOnly = false) ?: return@Thread
+      val text = String(master, Charsets.UTF_8)
+      if (!text.contains("#EXT-X-STREAM-INF")) return@Thread
+      val lines = text.lines()
+      val parts = mutableListOf<String>()
+      // The picture: only when the quality is locked; Auto chooses at play time.
+      if (height > 0) {
+        lines.indices
+          .filter { lines[it].startsWith("#EXT-X-STREAM-INF") }
+          .mapNotNull { i ->
+            val h = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1)?.toIntOrNull()
+            val link = lines.getOrNull(i + 1)?.trim()
+            if (h == null || h > height || link.isNullOrEmpty()) null else h to link
+          }
+          .maxByOrNull { it.first }
+          ?.let { parts.add(it.second) }
+      }
+      // The sound: the first of the viewer's languages this video has.
+      val audio = lines.filter { it.startsWith("#EXT-X-MEDIA") && it.contains("TYPE=AUDIO") && it.contains("URI=") }
+      wanted.firstNotNullOfOrNull { code -> audio.firstOrNull { it.contains("LANGUAGE=\"$code\"") } }
+        ?.let { Regex("URI=\"([^\"]+)\"").find(it)?.groupValues?.get(1) }
+        ?.let { parts.add(it) }
+      val found = mutableMapOf(uri to master)
+      for (part in parts) {
+        val link = try { URL(URL(uri), part).toString() } catch (e: Exception) { continue }
+        readPlaylist(link, from)?.let { found[link] = it }
+      }
+      if (upcomingFor == uri) upcomingPlaylists.putAll(found)
+    }.start()
+  }
+
+  private fun readPlaylist(url: String, from: String?, finishedOnly: Boolean = true): ByteArray? {
     var connection: HttpURLConnection? = null
     return try {
       connection = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -500,7 +710,7 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
       val body = connection.inputStream.use { it.readBytes() }
       val text = String(body, Charsets.UTF_8)
       // Only a finished playlist never changes, so only that is safe to keep.
-      if (text.startsWith("#EXTM3U") && text.contains("#EXT-X-ENDLIST")) body else null
+      if (text.startsWith("#EXTM3U") && (!finishedOnly || text.contains("#EXT-X-ENDLIST"))) body else null
     } catch (e: Exception) {
       null
     } finally {
@@ -558,6 +768,7 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
       "onVideoTracks" -> onVideoTracks(payload)
       "onEnd" -> onEnd(payload)
       "onError" -> onError(payload)
+      "onSystemPause" -> onSystemPause(payload)
     }
   }
 
@@ -583,9 +794,11 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     measureAndLayoutPlayer(w, h)
   }
 
-  // React Native doesn't pass on layout requests from inside a native view, so
-  // a new fit mode or video shape would only apply at the next rotation. Do it
-  // here, once per frame at most, measuring first so the video gets its new shape.
+  // React Native doesn't pass on layout requests from inside a native view, so a new fit
+  // mode or video shape would wait for the next rotation. This view lays itself out, once
+  // per frame at most. Laying out only the player inside isn't enough: Android stops passing
+  // requests up while this view still counts as waiting for layout, so the first change
+  // worked and later ones were silently dropped.
   private var layoutQueued = false
 
   override fun requestLayout() {
@@ -594,7 +807,11 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
     layoutQueued = true
     post {
       layoutQueued = false
-      measureAndLayoutPlayer(width, height)
+      measure(
+        MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
+        MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY),
+      )
+      layout(left, top, right, bottom)
     }
   }
 
@@ -607,6 +824,9 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
   }
 
   fun releasePlayer() {
+    enhanceFade?.cancel()
+    enhanceFade = null
+    stopWatchingFrameTimes()
     progressRunnable?.let { mainHandler.removeCallbacks(it) }
     progressRunnable = null
     retryRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -619,7 +839,13 @@ class NativeMedia3PlayerView(context: Context, appContext: AppContext) : ExpoVie
   }
 
   private companion object {
+    val upcomingPlaylists = ConcurrentHashMap<String, ByteArray>()
+    @Volatile var upcomingFor: String? = null
     const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36"
+    // Only for phones that can't run the shaders.
+    const val ENHANCE_CONTRAST = 1.03f
+    const val ENHANCE_SATURATION = 1.26f
+    const val ENHANCE_FADE_MS = 320L
     const val MAX_NETWORK_RETRIES = 3
     const val RETRY_CLEAR_MS = 10_000L
     const val MIN_LOAD_RETRIES = 6

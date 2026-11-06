@@ -2,19 +2,22 @@
 // My List, episode progress (for "Continue Watching") and recent searches.
 // Stored with AsyncStorage; nothing leaves the phone.
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { AppState } from 'react-native';
+import { createContext, startTransition, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Anime } from './types';
 
 // A light copy of a title: enough to draw a card without a network request.
 export type SavedTitle = Pick<
   Anime,
-  'id' | 'title' | 'titleRomaji' | 'image' | 'image2x' | 'banner' | 'backdrop' | 'type' | 'year' | 'score' | 'episodes' | 'episodeCount' | 'seasonCount' | 'languages' | 'airing'
+  'id' | 'title' | 'titleRomaji' | 'image' | 'image2x' | 'banner' | 'backdrop' | 'type' | 'year' | 'score' | 'episodes' | 'episodeCount' | 'seasonCount' | 'languages' | 'airing' | 'anilistId'
 >;
 
 export type HistoryEntry = { anime: SavedTitle; at: number };
 export type ListEntry = { anime: SavedTitle; at: number };
 
 export type ProgressOptions = {
+  audio?: string;
+  season?: number;
   time?: number;
   duration?: number;
   completed?: boolean;
@@ -23,6 +26,8 @@ export type ProgressOptions = {
 
 export type Progress = {
   anime: SavedTitle;
+  season?: number; // missing on older saves: season 1
+  audio?: string; // the language picked in the player for this show
   episode: number; // the episode currently watched or last finished
   total: number | null;
   time?: number;
@@ -60,6 +65,7 @@ export const slim = (a: Anime): SavedTitle => ({
   seasonCount: a.seasonCount,
   languages: a.languages,
   airing: a.airing,
+  anilistId: a.anilistId,
 });
 
 type Library = State & {
@@ -108,7 +114,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       AsyncStorage.setItem(KEY, JSON.stringify(state)).catch(() => {});
-    }, 300);
+    }, AppState.currentState === 'active' ? 300 : 0);
   }, [state, ready]);
 
   const recordView = useCallback((a: Anime) => {
@@ -153,24 +159,28 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
           ? { watch: extra }
           : (extra as ProgressOptions) || {};
 
-      setState((s) => {
+      startTransition(() => setState((s) => {
         const existing = s.progress[a.id];
+        const nextSeason = opts.season ?? existing?.season ?? 1;
+        const nextAudio = opts.audio ?? existing?.audio;
+        // Episode 3 of another season is a different episode.
+        const sameEpisode = existing?.episode === episode && (existing?.season ?? 1) === nextSeason;
         const nextCompleted =
           opts.completed !== undefined
             ? opts.completed
-            : existing?.episode === episode
+            : sameEpisode
             ? existing?.completed
             : false;
         const nextTime =
           opts.time !== undefined
             ? opts.time
-            : existing?.episode === episode
+            : sameEpisode
             ? existing?.time
             : 0;
         const nextDuration =
           opts.duration !== undefined
             ? opts.duration
-            : existing?.episode === episode
+            : sameEpisode
             ? existing?.duration
             : 0;
         const nextWatchUrl = opts.watch?.url ?? existing?.watchUrl ?? null;
@@ -178,7 +188,8 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
 
         if (
           existing &&
-          existing.episode === episode &&
+          sameEpisode &&
+          existing.audio === nextAudio &&
           existing.total === total &&
           existing.completed === nextCompleted &&
           existing.time === nextTime &&
@@ -195,6 +206,8 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
         } else {
           progress[a.id] = {
             anime: slim(a),
+            season: nextSeason,
+            audio: nextAudio,
             episode,
             total,
             time: nextTime,
@@ -213,7 +226,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
             ? [{ anime: slim(a), at: Date.now() }, ...s.history.filter((h) => h.anime.id !== a.id)].slice(0, HISTORY_MAX)
             : s.history;
         return { ...s, progress, history };
-      });
+      }));
     },
     []
   );

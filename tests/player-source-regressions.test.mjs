@@ -23,7 +23,10 @@ describe('Player source-level regressions', () => {
     assert.match(route, /const switchKey = `\$\{requestedEpisodeKey\}:\$\{targetMode\}:\$\{resolved\.streamUrl\}`/);
     assert.match(route, /setResumeAfterSourceChange\(\{ key: switchKey, time: capturedTime, shouldPlay: isPlayingRef\.current \}\)/);
     assert.match(route, /pending\.key === nativeSourceKeyRef\.current/);
-    assert.match(route, /nativeVideoRef\.current\?\.seek\?\.\(pending\.time\)/);
+    assert.match(route, /const startTime = resumeAfterSourceChange\?\.key === nativeStreamKey \? resumeAfterSourceChange\.time : 0;/);
+    assert.match(route, /startTime=\{startTime\}/);
+    // The player starts there directly; one ordinary seek if it turns out not to have.
+    assert.match(route, /seekNativePlayer\(startAt\)/);
   });
 
   test('Fullscreen presentation follows the measured screen shape', () => {

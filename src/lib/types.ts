@@ -147,6 +147,8 @@ export type StreamData = {
   subtitles?: SubtitleTrack[];
   // Dynamic in-manifest audio renditions discovered by the resolver.
   audioTracks?: StreamAudioTrack[];
+  // Which of sub / dub the server really lists for this episode (the backup server).
+  modes?: Array<'sub' | 'dub'>;
   // Dynamic in-manifest video quality levels (e.g. 1080p, 720p, 480p, 360p).
   videoLevels?: Array<{ index: number; width: number; height: number; bitrate: number }>;
 };

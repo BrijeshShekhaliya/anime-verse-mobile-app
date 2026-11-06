@@ -1,5 +1,6 @@
 import React, { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { AppState, StyleSheet, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 import { VideoView, useVideoPlayer, type VideoSource } from 'expo-video';
 
 export type NativePlayerTrack = {
@@ -31,6 +32,11 @@ type Props = {
   selectedQualityHeight: number;
   selectedAudioTrackId?: number | null;
   preferredAudioLanguage?: string | null;
+  fallbackAudioLanguage?: string | null;
+  startTime?: number; // where a new video starts, in seconds
+  enhanced?: boolean; // View Enhancement (Expo Go can only change colour; the APK's is the real one)
+  zoomStyle?: React.ComponentProps<typeof Animated.View>['style']; // the pinched size, on the video alone: subtitles stay put
+  onSystemPause?: () => void; // the system stopped it: a call, another app's sound
   selectedTextTrackId?: number | null;
   subtitles: NativeSubtitle[];
   subtitlesEnabled: boolean;
@@ -149,6 +155,11 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
   selectedQualityHeight,
   selectedAudioTrackId = null,
   preferredAudioLanguage = null,
+  fallbackAudioLanguage = null,
+  startTime = 0,
+  enhanced = false,
+  zoomStyle,
+  onSystemPause,
   selectedTextTrackId = null,
   subtitles,
   subtitlesEnabled,
@@ -169,9 +180,9 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
   const player = useVideoPlayer(null, (instance) => {
     instance.timeUpdateEventInterval = 0.4;
     instance.bufferOptions = BUFFER_OPTIONS;
-    // Land on the nearest keyframe: skipping shows the new picture at once
-    // instead of decoding up to the exact frame.
-    instance.seekTolerance = { toleranceBefore: 1, toleranceAfter: 1 };
+    // Within half a second of the target: a nearby keyframe if there is one (shown at
+    // once), otherwise the player decodes up to it.
+    instance.seekTolerance = { toleranceBefore: 0.5, toleranceAfter: 0.5 };
     instance.keepScreenOnWhilePlaying = true;
     instance.staysActiveInBackground = false;
   });
@@ -190,8 +201,8 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
   // The screen makes new callbacks whenever its data refreshes. Loading reads the
   // latest ones from here, so only a new address ever (re)loads the video: having
   // them as dependencies restarted the stream at random and downloaded it twice.
-  const latest = useRef({ onBuffer, onError, paused, source });
-  latest.current = { onBuffer, onError, paused, source };
+  const latest = useRef({ onBuffer, onError, onSystemPause, paused, source, startTime });
+  latest.current = { onBuffer, onError, onSystemPause, paused, source, startTime };
 
   // A lost signal mid-episode isn't a broken video: pick up from the same moment
   // (twice at most, then the screen's own recovery takes over).
@@ -212,10 +223,21 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
     return true;
   }, [player]);
 
+  // A new video waits here until its tracks are known and its language is set. Started
+  // straight away, it played the default language for a moment, then reloaded the audio
+  // when the right one was chosen: half a second of the wrong language, then the loader.
+  const waitingForTracksRef = useRef(false);
+  const startOnceTracksAreSet = useCallback(() => {
+    if (!waitingForTracksRef.current) return;
+    waitingForTracksRef.current = false;
+    if (!latest.current.paused) player.play();
+  }, [player]);
+
   // Keep one VideoPlayer instance alive across source, orientation and control changes.
   useEffect(() => {
     if (!source) return;
     let active = true;
+    waitingForTracksRef.current = true;
     readySourceRef.current = null;
     playedToRef.current = 0;
     retries.current = { count: 0, at: 0 };
@@ -224,7 +246,11 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
     setExternalSubtitleCues([]);
     player.replaceAsync(source).then(() => {
       if (!active) return;
-      if (latest.current.paused) player.pause();
+      if (latest.current.startTime > 0) {
+        player.currentTime = latest.current.startTime;
+        playedToRef.current = latest.current.startTime;
+      }
+      if (latest.current.paused || waitingForTracksRef.current) player.pause();
       else player.play();
     }).catch((error: unknown) => {
       if (!active) return;
@@ -236,8 +262,46 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
 
   useEffect(() => {
     if (paused) player.pause();
-    else if (uri) player.play();
+    else if (uri && !waitingForTracksRef.current) player.play();
   }, [player, paused, uri]);
+
+  // Android pauses this player by itself when the app leaves the screen, and nothing else
+  // restarts it: the screen still thinks it's playing, so it never asks again.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && uri && !latest.current.paused && !waitingForTracksRef.current) {
+        try {
+          player.play();
+        } catch {
+          // Already released: this screen is closing.
+        }
+      }
+    });
+    return () => sub.remove();
+  }, [player, uri]);
+
+  // The player stopped without being asked (a call, another app's sound): the button has to
+  // say so. Waits a moment, because buffering also stops it, and only then does the status
+  // show which of the two this is.
+  const systemPauseCheck = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (systemPauseCheck.current) clearTimeout(systemPauseCheck.current);
+  }, []);
+  useEffect(() => {
+    const sub = player.addListener('playingChange', ({ isPlaying }) => {
+      if (systemPauseCheck.current) clearTimeout(systemPauseCheck.current);
+      if (isPlaying) return;
+      systemPauseCheck.current = setTimeout(() => {
+        if (AppState.currentState !== 'active' || latest.current.paused || waitingForTracksRef.current) return;
+        try {
+          if (!player.playing && player.status === 'readyToPlay') latest.current.onSystemPause?.();
+        } catch {
+          // Already released: this screen is closing.
+        }
+      }, 400);
+    });
+    return () => sub.remove();
+  }, [player]);
 
   useEffect(() => {
     player.playbackRate = playbackRate;
@@ -247,27 +311,27 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
     player.volume = Math.min(1, Math.max(0, volume));
   }, [player, volume]);
 
-    const syncAudioTrack = useCallback(() => {
+  const syncAudioTrack = useCallback(() => {
     const available = player.availableAudioTracks;
     if (!available || available.length === 0) return;
+    // Choosing the track already playing would reload its audio for nothing. (Each read
+    // of a track gives a new object, so comparing the objects never finds a match.)
+    const choose = (target: (typeof available)[number]) => {
+      const now = player.audioTrack;
+      if (!now || now.id !== target.id) player.audioTrack = target;
+    };
 
     if (selectedAudioTrackId !== null && selectedAudioTrackId >= 0 && available[selectedAudioTrackId]) {
-      const target = available[selectedAudioTrackId];
-      if (player.audioTrack !== target) {
-        player.audioTrack = target;
-      }
+      choose(available[selectedAudioTrackId]);
       return;
     }
 
     if (preferredAudioLanguage) {
-      const match = available.find((t) =>
-        isAudioLanguageMatch(t.name || t.label || '', t.language || '', preferredAudioLanguage),
-      );
-      if (match && player.audioTrack !== match) {
-        player.audioTrack = match;
-      }
+      const by = (language: string) => available.find((t) => isAudioLanguageMatch(t.name || t.label || '', t.language || '', language));
+      const match = by(preferredAudioLanguage) || (fallbackAudioLanguage ? by(fallbackAudioLanguage) : undefined) || by('japanese') || by('english');
+      if (match) choose(match);
     }
-  }, [player, selectedAudioTrackId, preferredAudioLanguage]);
+  }, [player, selectedAudioTrackId, preferredAudioLanguage, fallbackAudioLanguage]);
 
   useEffect(() => {
     syncAudioTrack();
@@ -357,6 +421,7 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
         // actually ready. Publish tracks now, but restore the playhead only when
         // ExoPlayer reports readyToPlay.
         publishTracks();
+        startOnceTracksAreSet();
       }),
       player.addListener('timeUpdate', (event) => {
         const time = Math.max(0, event.currentTime || 0);
@@ -369,6 +434,9 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
       player.addListener('statusChange', (event) => {
         if (event.status === 'loading') onBuffer(true);
         if (event.status === 'readyToPlay') {
+          // In case the tracks never announced themselves: never stay stuck waiting.
+          syncAudioTrack();
+          startOnceTracksAreSet();
           onBuffer(false);
           if (readySourceRef.current !== uri) {
             readySourceRef.current = uri;
@@ -391,7 +459,7 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
       player.addListener('playToEnd', onEnd),
     ];
     return () => subscriptions.forEach((subscription) => subscription.remove());
-  }, [player, uri, onLoad, onProgress, onBuffer, onError, onEnd, publishTracks, syncAudioTrack, retryAfterNetworkError]);
+  }, [player, uri, onLoad, onProgress, onBuffer, onError, onEnd, publishTracks, syncAudioTrack, retryAfterNetworkError, startOnceTracksAreSet]);
 
   const hasCuesRef = useRef(false);
   hasCuesRef.current = externalSubtitleCues.length > 0;
@@ -399,9 +467,15 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
 
   return (
     <View style={StyleSheet.absoluteFill}>
+      {/* The view's size differs by a pixel per mode (hidden by the frame): the video view only
+          applies a new fit when its layout changes, so otherwise it could stay as it was.
+          collapsable: without it this view only exists while filtered, so each toggle moved the
+          video to a new parent, which replaced its surface: a flicker and lost frames. */}
+      <Animated.View collapsable={false} style={[StyleSheet.absoluteFill, zoomStyle]}>
+      <View collapsable={false} style={[StyleSheet.absoluteFill, enhanced && styles.enhanced]}>
       <VideoView
         player={player}
-        style={StyleSheet.absoluteFill}
+        style={[StyleSheet.absoluteFill, { right: fitMode === 'contain' ? 0 : fitMode === 'cover' ? -1 : -2 }]}
         nativeControls={false}
         contentFit={fitMode}
         // TextureView resizes with the rotated React Native layout. SurfaceView can
@@ -409,6 +483,8 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
         surfaceType="textureView"
         allowsPictureInPicture={false}
       />
+      </View>
+      </Animated.View>
       {subtitlesEnabled && !hasEmbeddedSubtitleTracks && activeSubtitle ? (
         <View pointerEvents="none" style={styles.subtitleContainer}>
           <Text style={styles.subtitleText}>{activeSubtitle.text}</Text>
@@ -419,6 +495,9 @@ const ExpoVideoHlsPlayer = forwardRef<NativeVideoPlayerHandle, Props>(function E
 });
 
 const styles = StyleSheet.create({
+  // One fixed filter for every scene, so it must be safe for all of them. No contrast: it
+  // pushes everything below mid-grey down, which is what darkened night scenes.
+  enhanced: { filter: [{ brightness: 1.026 }, { saturate: 1.26 }] },
   subtitleContainer: {
     position: 'absolute',
     left: 18,

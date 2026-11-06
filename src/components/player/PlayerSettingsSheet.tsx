@@ -1,10 +1,11 @@
-import { BlurView } from 'expo-blur';
 import { useEffect, useState } from 'react';
-import { BackHandler, Platform, ScrollView, StyleSheet, Switch, Text, View, useWindowDimensions } from 'react-native';
+import { BackHandler, ScrollView, StyleSheet, Switch, Text, View, useWindowDimensions } from 'react-native';
 import Animated, { Easing, interpolate, runOnJS, useAnimatedStyle, useSharedValue, withSpring, withTiming } from 'react-native-reanimated';
 import { Icon, type IconName } from '@/components/Icon';
 import { PressableScale } from '@/components/PressableScale';
-import { colors, fonts } from '@/lib/theme';
+import { qualityBadge } from '@/lib/quality';
+import { fonts } from '@/lib/theme';
+import { PLAYER_COLOURS, QualityBadge } from './PlayerMiniMenu';
 
 export type SheetOption = { key: string; label: string; hint?: string; selected: boolean; disabled?: boolean; onSelect: () => void };
 export type SheetSection = {
@@ -20,14 +21,14 @@ export type SheetSection = {
 
 type Insets = { top: number; bottom: number; left: number; right: number };
 
-const SPRING = { damping: 22, stiffness: 240, mass: 0.9 };
+const SPRING = { damping: 24, stiffness: 300, mass: 0.8 };
+const HEAD_HEIGHT = 48;
+const ROW_HEIGHT = 46;
 
-// Player settings on a frosted-glass card. In fullscreen it floats at the
-// right, clear of the edges, so the video stays in view; in portrait it rises
-// from the bottom. The main list shows every setting with its current value;
-// tapping one glides its choices in. Opened from a quick chip (audio,
-// subtitles...), it goes straight to that list and closes once something is
-// picked. Everything scrolls inside the card, so nothing spills out of it.
+// Player settings, in the same style as the player's own menus: see-through and plain, with each
+// option in its own colour. In fullscreen it floats at the right; in portrait it rises only as
+// high as it needs and stops below the player. The main list shows every setting with its current
+// value; tapping one glides its choices in. Everything scrolls inside the card.
 export function PlayerSettingsSheet({
   open,
   initialSection,
@@ -56,7 +57,7 @@ export function PlayerSettingsSheet({
       page.value = initialSection ? 1 : 0;
       progress.value = withSpring(1, SPRING);
     } else if (rendered) {
-      progress.value = withTiming(0, { duration: 180, easing: Easing.in(Easing.quad) }, (done) => {
+      progress.value = withTiming(0, { duration: 160, easing: Easing.in(Easing.quad) }, (done) => {
         if (done) runOnJS(setRendered)(false);
       });
     }
@@ -80,43 +81,39 @@ export function PlayerSettingsSheet({
     page.value = withSpring(1, SPRING);
   };
   const goMain = () => {
-    page.value = withTiming(0, { duration: 200, easing: Easing.out(Easing.cubic) }, (done) => {
+    page.value = withTiming(0, { duration: 180, easing: Easing.out(Easing.cubic) }, (done) => {
       if (done) runOnJS(setSection)(null);
     });
   };
 
-  const gap = 12;
-  const panelW = fullscreen ? Math.min(380, width * 0.44) : width;
   const backdropStyle = useAnimatedStyle(() => ({ opacity: progress.value }));
   const panelStyle = useAnimatedStyle(() =>
     fullscreen
       ? {
           opacity: interpolate(progress.value, [0, 0.4], [0, 1], 'clamp'),
-          transform: [{ translateX: interpolate(progress.value, [0, 1], [56, 0]) }, { scale: interpolate(progress.value, [0, 1], [0.96, 1]) }],
+          transform: [{ translateX: interpolate(progress.value, [0, 1], [40, 0]) }],
         }
       : { transform: [{ translateY: interpolate(progress.value, [0, 1], [height * 0.7, 0]) }] }
   );
   const mainStyle = useAnimatedStyle(() => ({
     opacity: interpolate(page.value, [0, 0.6], [1, 0], 'clamp'),
-    transform: [{ translateX: interpolate(page.value, [0, 1], [0, -40]) }],
+    transform: [{ translateX: interpolate(page.value, [0, 1], [0, -32]) }],
   }));
   const subStyle = useAnimatedStyle(() => ({
     opacity: interpolate(page.value, [0.3, 1], [0, 1], 'clamp'),
-    transform: [{ translateX: interpolate(page.value, [0, 1], [60, 0]) }],
+    transform: [{ translateX: interpolate(page.value, [0, 1], [48, 0]) }],
   }));
 
   if (!rendered) return null;
   const current = sections.find((s) => s.key === section);
+  const accent = (current && PLAYER_COLOURS[current.key]) || '#fff';
 
+  // Just tall enough for its rows, and never over the player above it.
+  const playerBottom = insets.top + (width * 9) / 16;
+  const naturalHeight = 14 + HEAD_HEIGHT + sections.length * ROW_HEIGHT + 8 + Math.max(insets.bottom, 10);
   const placement = fullscreen
-    ? {
-        top: Math.max(insets.top, gap),
-        bottom: Math.max(insets.bottom, gap),
-        right: Math.max(insets.right, gap),
-        width: panelW,
-        borderRadius: 24,
-      }
-    : { left: 0, right: 0, bottom: 0, maxHeight: height * 0.72, borderTopLeftRadius: 26, borderTopRightRadius: 26 };
+    ? { top: 12, bottom: 12, right: Math.max(insets.right, 12), width: Math.min(340, width * 0.42), borderRadius: 16 }
+    : { left: 0, right: 0, bottom: 0, height: Math.min(naturalHeight, height - playerBottom), borderTopLeftRadius: 18, borderTopRightRadius: 18 };
 
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents={open ? 'auto' : 'none'}>
@@ -124,55 +121,46 @@ export function PlayerSettingsSheet({
         <PressableScale style={StyleSheet.absoluteFill} scaleTo={1} onPress={onClose} accessibilityLabel="Close settings" />
       </Animated.View>
 
-      <Animated.View style={[styles.panel, placement, !fullscreen && { height: height * 0.72 }, panelStyle]}>
-        {/* Frosted glass (a real blur on Android too), with a dark tint over it. */}
-        <BlurView
-          intensity={45}
-          tint="dark"
-          experimentalBlurMethod={Platform.OS === 'android' ? 'dimezisBlurView' : undefined}
-          style={StyleSheet.absoluteFill}
-        />
-        <View style={[StyleSheet.absoluteFill, styles.tint]} />
+      <Animated.View style={[styles.panel, placement, panelStyle]}>
         {!fullscreen ? <View style={styles.handle} /> : null}
 
         <View style={[styles.pages, !fullscreen && { paddingBottom: Math.max(insets.bottom, 10) }]}>
           {/* Main list */}
           <Animated.View style={[styles.page, mainStyle]} pointerEvents={section ? 'none' : 'auto'}>
             <View style={styles.header}>
-              <View>
-                <Text style={styles.kicker}>PLAYER</Text>
-                <Text style={styles.headerTitle}>Settings</Text>
-              </View>
+              <Text style={styles.headerTitle}>Settings</Text>
               <PressableScale onPress={onClose} style={styles.headerBtn} hitSlop={8} accessibilityLabel="Close">
-                <Icon name="x" size={18} color="#fff" />
+                <Icon name="x" size={17} color="rgba(255,255,255,0.8)" />
               </PressableScale>
             </View>
             <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false} contentContainerStyle={styles.list}>
-              {sections.map((s) => (
-                <PressableScale
-                  key={s.key}
-                  scaleTo={0.98}
-                  onPress={() => (s.toggle ? s.toggle.onChange(!s.toggle.value) : s.options ? openSection(s.key) : s.onPress?.())}
-                  style={styles.row}
-                >
-                  <View style={styles.rowIcon}>
-                    <Icon name={s.icon} size={17} color={colors.accent} />
-                  </View>
-                  <Text style={styles.rowTitle} numberOfLines={1}>
-                    {s.title}
-                  </Text>
-                  {s.toggle ? (
-                    <Switch value={s.toggle.value} onValueChange={s.toggle.onChange} trackColor={{ false: 'rgba(255,255,255,0.18)', true: colors.accent }} thumbColor="#fff" />
-                  ) : (
-                    <View style={styles.valuePill}>
-                      <Text style={styles.rowValue} numberOfLines={1}>
-                        {s.value}
-                      </Text>
-                      <Icon name="right" size={14} color="rgba(255,255,255,0.55)" />
-                    </View>
-                  )}
-                </PressableScale>
-              ))}
+              {sections.map((s) => {
+                const colour = PLAYER_COLOURS[s.key] ?? 'rgba(255,255,255,0.8)';
+                const badge = s.key === 'quality' ? qualityBadge(parseInt(s.value, 10) || 0) : null;
+                return (
+                  <PressableScale
+                    key={s.key}
+                    scaleTo={0.985}
+                    onPress={() => (s.toggle ? s.toggle.onChange(!s.toggle.value) : s.options ? openSection(s.key) : s.onPress?.())}
+                    style={styles.row}
+                  >
+                    <View style={styles.rowIcon}>{badge ? <QualityBadge name={badge} /> : <Icon name={s.icon} size={19} color={colour} />}</View>
+                    <Text style={styles.rowTitle} numberOfLines={1}>
+                      {s.title}
+                    </Text>
+                    {s.toggle ? (
+                      <Switch value={s.toggle.value} onValueChange={s.toggle.onChange} trackColor={{ false: 'rgba(255,255,255,0.18)', true: colour }} thumbColor="#fff" />
+                    ) : (
+                      <View style={styles.value}>
+                        <Text style={styles.rowValue} numberOfLines={1}>
+                          {s.value}
+                        </Text>
+                        <Icon name="right" size={13} color="rgba(255,255,255,0.45)" />
+                      </View>
+                    )}
+                  </PressableScale>
+                );
+              })}
             </ScrollView>
           </Animated.View>
 
@@ -180,37 +168,44 @@ export function PlayerSettingsSheet({
           {current ? (
             <Animated.View style={[styles.page, styles.pageTop, subStyle]}>
               <View style={styles.header}>
-                <PressableScale onPress={initialSection ? onClose : goMain} style={styles.headerBtn} hitSlop={8} accessibilityLabel="Back">
-                  <Icon name={initialSection ? 'x' : 'left'} size={18} color="#fff" />
+                <PressableScale onPress={initialSection ? onClose : goMain} style={styles.headerBack} hitSlop={8} accessibilityLabel="Back">
+                  <Icon name={initialSection ? 'x' : 'left'} size={17} color="rgba(255,255,255,0.8)" />
                 </PressableScale>
-                <View style={{ flex: 1, marginLeft: 12 }}>
-                  <Text style={styles.kicker}>SETTINGS</Text>
-                  <Text style={styles.headerTitle} numberOfLines={1}>
-                    {current.title}
-                  </Text>
-                </View>
+                <Text style={[styles.headerTitle, { flex: 1 }]} numberOfLines={1}>
+                  {current.title}
+                </Text>
               </View>
               <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false} contentContainerStyle={styles.list}>
                 {current.options?.length ? (
-                  current.options.map((o) => (
-                    <PressableScale
-                      key={o.key}
-                      disabled={o.disabled}
-                      scaleTo={0.98}
-                      onPress={() => {
-                        o.onSelect();
-                        if (initialSection) onClose();
-                        else goMain();
-                      }}
-                      style={[styles.option, o.selected && styles.optionOn, o.disabled && { opacity: 0.4 }]}
-                    >
-                      <View style={[styles.radio, o.selected && styles.radioOn]}>{o.selected ? <View style={styles.radioDot} /> : null}</View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={[styles.optionLabel, o.selected && { color: '#fff' }]}>{o.label}</Text>
-                        {o.hint ? <Text style={styles.optionHint}>{o.hint}</Text> : null}
-                      </View>
-                    </PressableScale>
-                  ))
+                  current.options.map((o) => {
+                    const badge = current.key === 'quality' ? qualityBadge(Number(o.key) || 0) : null;
+                    return (
+                      <PressableScale
+                        key={o.key}
+                        disabled={o.disabled}
+                        scaleTo={0.985}
+                        onPress={() => {
+                          o.onSelect();
+                          if (initialSection) onClose();
+                          else goMain();
+                        }}
+                        style={[styles.option, o.selected && { backgroundColor: `${accent}26` }, o.disabled && { opacity: 0.4 }]}
+                      >
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.optionLabel, o.selected && styles.optionLabelOn]} numberOfLines={1}>
+                            {o.label}
+                          </Text>
+                          {o.hint && !badge ? (
+                            <Text style={styles.optionHint} numberOfLines={1}>
+                              {o.hint}
+                            </Text>
+                          ) : null}
+                        </View>
+                        {badge ? <QualityBadge name={badge} /> : null}
+                        <View style={styles.tick}>{o.selected ? <Icon name="check" size={15} color={accent} /> : null}</View>
+                      </PressableScale>
+                    );
+                  })
                 ) : (
                   <Text style={styles.empty}>{current.emptyText || 'Nothing to choose here yet.'}</Text>
                 )}
@@ -224,58 +219,27 @@ export function PlayerSettingsSheet({
 }
 
 const styles = StyleSheet.create({
-  backdrop: { backgroundColor: 'rgba(0,0,0,0.45)' },
-  panel: { position: 'absolute', overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.12)' },
-  tint: { backgroundColor: 'rgba(16,17,22,0.72)' },
-  handle: { alignSelf: 'center', width: 38, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.28)', marginTop: 8 },
+  backdrop: { backgroundColor: 'rgba(0,0,0,0.3)' },
+  panel: { position: 'absolute', overflow: 'hidden', backgroundColor: 'rgba(18,18,22,0.8)', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.16)' },
+  handle: { alignSelf: 'center', width: 32, height: 3, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.3)', marginTop: 7, marginBottom: 4 },
   pages: { flex: 1 },
   page: { flex: 1 },
   pageTop: { ...StyleSheet.absoluteFill },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 18,
-    paddingTop: 14,
-    paddingBottom: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: 'rgba(255,255,255,0.08)',
-  },
-  kicker: { color: colors.accent, fontFamily: fonts.black, fontSize: 10.5, letterSpacing: 1.6 },
-  headerTitle: { color: '#fff', fontFamily: fonts.black, fontSize: 19, marginTop: 1 },
-  headerBtn: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.1)' },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', height: HEAD_HEIGHT, paddingHorizontal: 16 },
+  headerTitle: { color: '#fff', fontFamily: fonts.bold, fontSize: 15 },
+  headerBtn: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', marginRight: -6 },
+  headerBack: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', marginLeft: -8, marginRight: 4 },
   scroll: { flex: 1 },
-  list: { padding: 12, gap: 8 },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingLeft: 10,
-    paddingRight: 12,
-    height: 58,
-    borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-  },
-  rowIcon: { width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,100,10,0.14)' },
-  rowTitle: { flex: 1, color: '#fff', fontFamily: fonts.bold, fontSize: 15 },
-  valuePill: { flexDirection: 'row', alignItems: 'center', gap: 4, maxWidth: 150 },
-  rowValue: { color: 'rgba(255,255,255,0.7)', fontFamily: fonts.medium, fontSize: 13.5, flexShrink: 1 },
-  option: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 13,
-    borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderWidth: 1,
-    borderColor: 'transparent',
-  },
-  optionOn: { backgroundColor: 'rgba(255,100,10,0.12)', borderColor: 'rgba(255,100,10,0.55)' },
-  radio: { width: 20, height: 20, borderRadius: 10, borderWidth: 2, borderColor: 'rgba(255,255,255,0.35)', alignItems: 'center', justifyContent: 'center' },
-  radioOn: { borderColor: colors.accent },
-  radioDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.accent },
-  optionLabel: { color: 'rgba(255,255,255,0.88)', fontFamily: fonts.bold, fontSize: 15 },
-  optionHint: { color: 'rgba(255,255,255,0.5)', fontFamily: fonts.regular, fontSize: 12.5, marginTop: 2 },
-  empty: { color: 'rgba(255,255,255,0.6)', fontFamily: fonts.regular, fontSize: 13.5, padding: 8, lineHeight: 19 },
+  list: { paddingHorizontal: 8, paddingBottom: 8 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 10, height: ROW_HEIGHT, paddingHorizontal: 8, borderRadius: 10 },
+  rowIcon: { width: 28, alignItems: 'center' },
+  rowTitle: { flex: 1, color: 'rgba(255,255,255,0.92)', fontFamily: fonts.medium, fontSize: 14 },
+  value: { flexDirection: 'row', alignItems: 'center', gap: 4, maxWidth: 150 },
+  rowValue: { color: 'rgba(255,255,255,0.6)', fontFamily: fonts.regular, fontSize: 13, flexShrink: 1 },
+  option: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 44, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10 },
+  optionLabel: { color: 'rgba(255,255,255,0.85)', fontFamily: fonts.medium, fontSize: 14 },
+  optionLabelOn: { color: '#fff', fontFamily: fonts.bold },
+  optionHint: { color: 'rgba(255,255,255,0.5)', fontFamily: fonts.regular, fontSize: 11.5, marginTop: 1 },
+  tick: { width: 18, alignItems: 'center' },
+  empty: { color: 'rgba(255,255,255,0.6)', fontFamily: fonts.regular, fontSize: 13, padding: 10, lineHeight: 18 },
 });

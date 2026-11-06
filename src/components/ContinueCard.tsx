@@ -12,10 +12,20 @@ import { api } from '@/lib/api';
 import { backdropOf, useArt } from '@/lib/artwork';
 import type { Anime } from '@/lib/types';
 import { useTitle } from '@/lib/settings';
+import { useEpisodeStill } from '@/lib/queries';
+import { continueState } from '@/lib/resume';
+
+const clock = (seconds: number) => {
+  const t = Math.floor(seconds);
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const sec = String(t % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+};
 
 export const CONTINUE_CARD_W = 286;
 
-// Landscape card for "Continue Watching": the show's banner, which episode is
+// Landscape card for "Continue Watching": the episode's picture, which episode is
 // next, and a progress bar that fills in as the row appears.
 // compact: the smaller grid card (My List → Continue, two per row): the title
 // sits under the picture instead of over it.
@@ -23,22 +33,14 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W, compact
   const a = item.anime;
   const { art: tmdb, settled } = useArt(a as Anime, true);
   const title = useTitle(a);
-  // Waits for TMDB's banner instead of showing the AniList one first.
-  const art = settled ? backdropOf(a as Anime, tmdb, true) : undefined;
-  const isCompleted = Boolean(item.completed);
-  const done = Boolean(item.total && item.episode >= item.total && isCompleted);
   // If completed, prompt next episode; if paused/stopped halfway, continue THIS episode!
-  const targetEp = done ? item.episode : isCompleted ? item.episode + 1 : item.episode;
-  const pct = item.total
-    ? Math.min(
-        1,
-        (isCompleted
-          ? item.episode
-          : Math.max(0, item.episode - 1 + (item.duration && item.duration > 0 ? (item.time || 0) / item.duration : 0.5))) /
-          item.total,
-      )
-    : 0;
-  const left = item.total ? Math.max(0, item.total - (isCompleted ? item.episode : item.episode - 1)) : null;
+  const { done, targetEp, fraction: pct, position, left } = continueState(item);
+  // The picture of the episode this opens. The show's banner only if it has none, and only
+  // once that's known, so one is never shown and then swapped for the other.
+  const episode = useEpisodeStill(a as Anime, item.season ?? 1, targetEp);
+  const sharp = compact ? episode.still : episode.still?.replace('/w300/', '/w500/');
+  const art = sharp || (settled && !episode.pending ? backdropOf(a as Anime, tmdb, true) : undefined);
+  const detail = position ? `  ·  ${clock(position.time)} / ${clock(position.duration)}` : left ? `  ·  ${left} left` : null;
 
   // Progress fills from empty (transform only: no layout work per frame).
   const reduce = useReducedMotion();
@@ -53,14 +55,14 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W, compact
       <PressableScale
         onPress={() => {
           api.seedDetail(a as Anime); // the player knows the title at once
-          nav.push(`/watch/${a.id}?ep=${targetEp}` as any);
+          nav.push(`/watch/${a.id}?season=${item.season ?? 1}&ep=${targetEp}` as any);
         }}
         scaleTo={0.97}
         accessibilityLabel={`Continue ${title}, episode ${targetEp}`}
       >
         <View style={[styles.art, { height: Math.round(width * 0.56) }]}>
           {art ? (
-            <Image source={{ uri: art }} style={StyleSheet.absoluteFill} contentFit="cover" transition={250} cachePolicy="memory-disk" recyclingKey={a.id} />
+            <Image source={{ uri: art }} style={StyleSheet.absoluteFill} contentFit="cover" transition={250} cachePolicy="memory-disk" recyclingKey={`${a.id}:${targetEp}`} />
           ) : null}
           <LinearGradient colors={['rgba(0,0,0,0.35)', 'transparent', 'rgba(0,0,0,0.9)']} locations={[0, 0.35, 1]} style={StyleSheet.absoluteFill} />
 
@@ -81,7 +83,7 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W, compact
             </Text>
             <Text style={styles.meta} numberOfLines={1}>
               {done ? 'All episodes watched' : `Episode ${targetEp}`}
-              {left ? <Text style={styles.metaDim}>{`  ·  ${left} left`}</Text> : null}
+              {detail ? <Text style={styles.metaDim}>{detail}</Text> : null}
             </Text>
           </View>
           )}
@@ -97,7 +99,7 @@ export function ContinueCard({ item, index = 0, width = CONTINUE_CARD_W, compact
             </Text>
             <Text style={styles.belowMeta} numberOfLines={1}>
               {done ? 'All watched' : `Episode ${targetEp}`}
-              {left ? <Text style={styles.metaDim}>{`  ·  ${left} left`}</Text> : null}
+              {detail ? <Text style={styles.metaDim}>{detail}</Text> : null}
             </Text>
           </View>
         ) : null}

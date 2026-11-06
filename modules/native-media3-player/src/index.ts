@@ -23,6 +23,10 @@ export type NativeMedia3ViewProps = {
   selectedQualityHeight: number;
   selectedAudioTrackId?: number | null;
   preferredAudioLanguage?: string | null;
+  fallbackAudioLanguage?: string | null;
+  preload?: string[] | null;
+  startTime?: number;
+  enhanced?: boolean;
   selectedTextTrackId?: number | null;
   subtitlesEnabled: boolean;
   style?: StyleProp<ViewStyle>;
@@ -34,6 +38,7 @@ export type NativeMedia3ViewProps = {
   onVideoTracks?: (event: Media3Event<{ levels: Media3Level[] }>) => void;
   onEnd?: () => void;
   onError?: (event: Media3Event<{ message: string }>) => void;
+  onSystemPause?: () => void;
 };
 
 export type NativeMedia3ViewRef = {
@@ -50,6 +55,22 @@ const isAvailable: boolean = (() => {
     return false;
   }
 })();
+
+// The phone's own media volume, changed with no system popup. Only in a build that includes
+// this module (the APK): null under Expo Go, where the player's own volume is used instead.
+const volumeModule = (() => {
+  if (Platform.OS !== 'android') return null;
+  try {
+    return requireOptionalNativeModule<{ getSystemVolume(): number | null; setSystemVolume(value: number): void }>('NativeMedia3Player');
+  } catch {
+    return null;
+  }
+})();
+export const systemVolume = {
+  available: !!volumeModule,
+  get: () => volumeModule?.getSystemVolume() ?? null,
+  set: (value: number) => volumeModule?.setSystemVolume(value),
+};
 
 export function isNativeMedia3Available(): boolean {
   return isAvailable;

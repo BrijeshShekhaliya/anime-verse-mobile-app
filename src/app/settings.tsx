@@ -6,6 +6,7 @@ import Animated, { Easing, FadeInDown, useAnimatedStyle, useSharedValue, withTim
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Icon } from '@/components/Icon';
 import { PressableScale } from '@/components/PressableScale';
+import { secondLanguageFor } from '@/lib/audioMatch';
 import { useSettings, type Settings } from '@/lib/settings';
 import { colors, fonts, radius } from '@/lib/theme';
 
@@ -48,11 +49,21 @@ export default function SettingsScreen() {
     setAudioLang(v);
     s.update({ audioLang: v });
   };
+  const [audioLang2, setAudioLang2] = useState(s.audioLang2);
+  useEffect(() => setAudioLang2(s.audioLang2), [s.audioLang2]);
+  const chooseAudioLang2 = (v: Settings['audioLang']) => {
+    setAudioLang2(v);
+    s.update({ audioLang2: v });
+  };
+  // The second language offers everything except the first.
+  const secondLang = secondLanguageFor(audioLang, audioLang2);
+  const firstLabel = AUDIO_OPTIONS.find((o) => o.key === audioLang)?.label;
+  const secondLabel = AUDIO_OPTIONS.find((o) => o.key === secondLang)?.label;
   const [quality, setQuality] = useState(s.quality);
   useEffect(() => setQuality(s.quality), [s.quality]);
   const chooseQuality = (v: Settings['quality']) => {
     setQuality(v);
-    s.update({ quality: v });
+    s.update({ quality: v, playerQuality: null });
   };
   const [sound, setSound] = useState<'on' | 'off'>(s.launchSound ? 'on' : 'off');
   useEffect(() => setSound(s.launchSound ? 'on' : 'off'), [s.launchSound]);
@@ -93,14 +104,19 @@ export default function SettingsScreen() {
               <Icon name="mic" size={19} color="#fff" />
             </GradientTile>
             <View style={{ flex: 1 }}>
-              <Text style={styles.rowTitle}>Preferred audio language</Text>
+              <Text style={styles.rowTitle}>Audio language</Text>
               <Text style={styles.rowHint} numberOfLines={1}>
-                {AUDIO_OPTIONS.find((o) => o.key === audioLang)?.hint}
+                {firstLabel}, or {secondLabel} if it isn&apos;t available
               </Text>
             </View>
           </View>
-          <View style={styles.segWrap}>
+          <View style={styles.choice}>
+            <LanguageStep number={1} label="First choice" active />
             <Segmented value={audioLang} options={AUDIO_OPTIONS} onChange={chooseAudioLang} />
+          </View>
+          <View style={styles.choice}>
+            <LanguageStep number={2} label={`If ${firstLabel} isn't available`} />
+            <Segmented key={audioLang} value={secondLang} options={AUDIO_OPTIONS.filter((o) => o.key !== audioLang)} onChange={chooseAudioLang2} />
           </View>
           <View style={styles.divider} />
           <View style={styles.row}>
@@ -134,24 +150,6 @@ export default function SettingsScreen() {
           </View>
         </Section>
 
-        <Section title="PLAYER LABS (TESTING)">
-          <PressableScale
-            onPress={() => nav.push('/kuro-test')}
-            style={styles.labsRow}
-            scaleTo={0.98}
-          >
-            <GradientTile colors={['#8B5CF6', '#EC4899']}>
-              <Icon name="spark" size={19} color="#fff" />
-            </GradientTile>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.rowTitle}>Test Kuro Player UI</Text>
-              <Text style={styles.rowHint} numberOfLines={2}>
-                Preview the clean open-source Kuro video player interface in an isolated test environment
-              </Text>
-            </View>
-            <Icon name="right" size={20} color={colors.muted} />
-          </PressableScale>
-        </Section>
       </ScrollView>
     </View>
   );
@@ -163,6 +161,19 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
       <Text style={styles.sectionTitle}>{title.toUpperCase()}</Text>
       <View style={styles.card}>{children}</View>
     </Animated.View>
+  );
+}
+
+function LanguageStep({ number, label, active = false }: { number: number; label: string; active?: boolean }) {
+  return (
+    <View style={styles.step}>
+      <View style={[styles.stepNumber, active && styles.stepNumberOn]}>
+        <Text style={[styles.stepNumberText, active && styles.stepNumberTextOn]}>{number}</Text>
+      </View>
+      <Text style={styles.stepLabel} numberOfLines={1}>
+        {label}
+      </Text>
+    </View>
   );
 }
 
@@ -215,11 +226,17 @@ const styles = StyleSheet.create({
   rowTitle: { color: '#fff', fontFamily: fonts.bold, fontSize: 15.5 },
   rowHint: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12.5, marginTop: 2 },
   segWrap: { paddingHorizontal: 14 },
+  choice: { paddingHorizontal: 14, marginBottom: 12 },
+  step: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
+  stepNumber: { width: 18, height: 18, borderRadius: 9, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface2 },
+  stepNumberOn: { backgroundColor: colors.accent },
+  stepNumberText: { color: colors.text2, fontFamily: fonts.black, fontSize: 10.5 },
+  stepNumberTextOn: { color: '#000' },
+  stepLabel: { flexShrink: 1, color: colors.text2, fontFamily: fonts.medium, fontSize: 12.5 },
   divider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.line, marginTop: 16, marginHorizontal: 14 },
   seg: { flexDirection: 'row', padding: 3, borderRadius: 12, backgroundColor: colors.surface2 },
   segPill: { position: 'absolute', top: 3, bottom: 3, left: 3, borderRadius: 9, backgroundColor: colors.accent },
   segBtn: { flex: 1, height: 38, alignItems: 'center', justifyContent: 'center' },
   segText: { color: colors.text2, fontFamily: fonts.bold, fontSize: 14 },
   segTextOn: { color: '#000' },
-  labsRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 14, paddingVertical: 14 },
 });

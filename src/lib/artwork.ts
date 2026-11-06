@@ -11,6 +11,7 @@ import Constants from 'expo-constants';
 import { Image } from 'expo-image';
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import { whenIdle } from './idle';
+import { decodeTmdbKey } from './tmdbKey';
 import { onMobileData } from './network';
 import type { Anime } from './types';
 
@@ -23,8 +24,7 @@ export type Art = {
 };
 type Entry = Art & { t: number; full: boolean };
 
-const TMDB_KEY: string =
-  process.env.EXPO_PUBLIC_TMDB_API_KEY || (Constants.expoConfig?.extra as { tmdbApiKey?: string } | undefined)?.tmdbApiKey || '';
+const TMDB_KEY: string = decodeTmdbKey(process.env.EXPO_PUBLIC_TMDB_KEY_ENC);
 // TMDB's two API addresses. Some mobile networks block the main one, so the
 // first to answer on this network is used (see tmdbBase).
 const TMDB_HOSTS = ['https://api.themoviedb.org/3', 'https://api.tmdb.org/3'];
